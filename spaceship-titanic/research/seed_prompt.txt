@@ -1,106 +1,73 @@
-# Seed Prompt: Spaceship Titanic - Loop 7
-
 ## Current Status
-- Best CV score: 0.81951 from exp_003 (CatBoost with Optuna tuning)
-- Best LB score: 0.80453 from exp_003
-- CV-LB gap: +1.50% (increasing trend: 0.97% → 1.50% → 1.52%)
-- Target: 0.9642 is IMPOSSIBLE - top LB is ~0.8066. Focus on incremental improvement.
+- Best CV score: 0.81951 from exp_003 (CatBoost Optuna-tuned)
+- Best LB score: 0.8045 from exp_003
+- Latest exp_006: CV 0.81709, pred rate 50.9% (closest to training 50.4%)
+- CV-LB gap: ~1.5% (increasing trend: 1.2% → 1.5% → 1.9%)
+- Target: 0.9642 (IMPOSSIBLE - top LB is ~0.8066, our best is competitive)
 
 ## Response to Evaluator
-- **Technical verdict**: TRUSTWORTHY - stacking implementation was correct
-- **Evaluator's top priority**: DO NOT submit exp_005, try weighted ensemble instead
-- **Key concerns raised**: 
-  1. Stacking CV (0.81744) < CatBoost alone (0.81617-0.81951)
-  2. Predicted rate 52.8% is too high (exp_003 had 51.7% with best LB)
-  3. CV-LB gap is increasing - we're overfitting more with each experiment
-- **My response**: AGREE with all concerns. Analysis confirms exp_005 would score ~0.8022-0.8041 on LB, worse than exp_003. Will NOT submit exp_005. Will try evaluator's recommended approaches.
+- Technical verdict: TRUSTWORTHY. Execution is sound.
+- Evaluator's top priority: SUBMIT exp_006 to test calibration hypothesis. I AGREE.
+  - Rationale: We have 7 submissions remaining, the calibration improvement is significant (50.9% vs 51.7%), and we have evidence that prediction rate matters (exp_004 failure).
+  - Even if exp_006 doesn't beat exp_003, we learn whether calibration > CV.
+- Key concerns raised: CV (0.81709) is lower than exp_003 (0.81951) by 0.24%.
+  - Addressing: The calibration improvement might compensate. This is worth testing.
 
 ## Data Understanding
-- Reference notebooks: `exploration/eda.ipynb`, `exploration/evolver_loop5_analysis.ipynb`
+- Reference notebooks: 
+  - `exploration/eda.ipynb` for initial EDA
+  - `exploration/evolver_loop5_analysis.ipynb` for feature importance and regularization analysis
+  - `exploration/evolver_loop7_analysis.ipynb` for calibration vs CV analysis
 - Key patterns:
-  - CryoSleep is strongest predictor (81.8% transported when True)
-  - Spending features highly skewed - log transforms help
-  - Group-based features important (GroupSize, Solo)
-  - 22 features have importance < 1.0 (candidates for removal)
-  - Top features: Deck_enc (10.7), CabinNum (10.1), HomePlanet_enc (7.1)
-
-## Critical Insight: Prediction Rate Matters
-| Experiment | Pred Rate | LB Score |
-|------------|-----------|----------|
-| exp_003    | 51.7%     | 0.80453 (BEST) |
-| exp_004    | 53.8%     | 0.80406 |
-| exp_005    | 52.8%     | ~0.8022-0.8041 (predicted) |
-| Training   | 50.4%     | - |
-
-**Pattern**: Predictions closer to training rate (50.4%) perform better on LB. exp_003 is closest and has best LB.
+  - CryoSleep is the strongest predictor (81.8% transported when True)
+  - Spending patterns strongly predict transport (no spending = likely transported)
+  - Deck and CabinNum are important features
+  - Prediction rate matters for LB: closer to training (50.4%) = better LB
 
 ## Recommended Approaches (Priority Order)
 
-### 1. Weighted Ensemble Favoring CatBoost (HIGH PRIORITY)
-Instead of stacking with meta-learner, use weighted averaging:
-```python
-# Weight by CV performance - CatBoost dominates
-weights = [0.2, 0.2, 0.6]  # XGB, LGB, CatBoost
-final_prob = 0.2*test_xgb + 0.2*test_lgb + 0.6*test_cat
-final_pred = (final_prob >= 0.5).astype(bool)
-```
-**Why**: CatBoost is clearly the best single model. Weighted ensemble preserves diversity while leveraging CatBoost's strength. Should produce prediction rate closer to exp_003.
+### 1. SUBMIT exp_006 for LB Feedback (IMMEDIATE)
+- Test the calibration hypothesis
+- Prediction rate 50.9% is closest to training (50.4%)
+- Will inform whether to prioritize calibration or CV going forward
 
-### 2. Feature Selection + CatBoost (MEDIUM PRIORITY)
-Remove bottom 20% features by importance:
-```python
-# Features with importance < 1.0 (22 features)
-# Bottom features: ShoppingMall_spent (0.02), VIP_enc (0.03), IsSenior (0.04)
-important_features = [f for f in features if importance[f] >= 1.0]
-# This reduces from 56 to ~34 features
-```
-**Why**: Fewer features = less overfitting. The 22 low-importance features add noise without signal.
+### 2. Feature Selection + CatBoost (NEXT EXPERIMENT)
+- 22 features have importance < 1.0 (see loop 5 analysis)
+- Bottom features: ShoppingMall_spent (0.02), VIP_enc (0.03), IsSenior (0.04), IsChild (0.05)
+- Remove low-importance features and retrain CatBoost
+- Expected benefit: Reduced overfitting, potentially smaller CV-LB gap
+- Use best CatBoost params: depth=8, lr=0.051, iterations=755, l2_leaf_reg=3.52
 
-### 3. Regularized CatBoost (MEDIUM PRIORITY)
-Increase regularization to reduce CV-LB gap:
-```python
-cat_params = {
-    'depth': 6,           # Reduced from 8
-    'l2_leaf_reg': 5.0,   # Increased from 3.52
-    'subsample': 0.8,     # Add randomness
-    'learning_rate': 0.05,
-    'iterations': 800,
-}
-```
-**Why**: Previous analysis showed l2=5.0 gives CV=0.81491 with lower variance (std=0.00464). More regularization = better generalization.
+### 3. Regularized CatBoost (IF feature selection doesn't help)
+- depth=6 (vs 8), l2_leaf_reg=5.0 (vs 3.52)
+- subsample=0.8 for randomness
+- Directly addresses overfitting
+- May reduce CV but improve LB
 
-### 4. Prediction Rate Calibration (LOW PRIORITY)
-If prediction rate is still too high, calibrate:
-```python
-# Adjust threshold to match training rate
-# If pred_rate > 0.517, use threshold > 0.5
-# Target: pred_rate ≈ 51.7% (exp_003's rate)
-```
-**Why**: exp_003's 51.7% rate gave best LB. But be careful - threshold tuning hurt exp_004.
+### 4. Ensemble Optimization (AFTER LB feedback)
+- If exp_006 beats exp_003: Try different weights (0.7/0.15/0.15)
+- If exp_006 doesn't beat exp_003: Focus on improving single model CV
+
+### 5. Neural Network for Diversity (LATER)
+- TabNet or simple MLP
+- Could add diversity for final ensemble
+- Lower priority - GBDTs dominate this problem
 
 ## What NOT to Try
-- **Threshold tuning on OOF**: Already proven to hurt LB (exp_004)
-- **Simple averaging ensemble**: Already tried, CV=0.81364 (worse than CatBoost alone)
-- **Stacking with LR meta-learner**: Already tried, CV=0.81744 (worse than CatBoost)
-- **Native categorical handling**: Already tried, didn't outperform label encoding
+- **Threshold tuning**: Already proven to hurt LB (exp_004 failure)
+- **Native categorical handling**: Didn't outperform label encoding (exp_004)
+- **Simple averaging ensemble**: Already tried, weighted is better
+- **Stacking with LR meta-learner**: CV lower than CatBoost alone (exp_005)
 
 ## Validation Notes
 - Use 5-fold StratifiedKFold with random_state=42 for consistency
-- CV-LB gap is ~1.5% - expect LB to be 0.015 lower than CV
-- **CRITICAL**: Check prediction rate before submitting. Target ≤ 51.7%
-- Only submit if:
-  1. CV improves over 0.81951 (exp_003)
-  2. OR prediction rate is closer to training (50.4%)
-  3. AND approach is fundamentally different (for diversity check)
+- CV-LB gap is ~1.5% and increasing - be conservative about CV improvements
+- Prediction rate should be close to training (50.4%) - avoid threshold tuning
+- LB improvement rate is only ~60% of CV improvement
 
-## Submission Strategy
-- 7 submissions remaining
-- Best LB: 0.80453 (exp_003)
-- DO NOT submit exp_005 (predicted to underperform)
-- Submit only when we have a clear improvement signal
+## Key Insight
+The calibration hypothesis is worth testing: exp_006 has lower CV but better calibration than exp_003. If calibration matters more than CV, this changes our optimization strategy. With 7 submissions remaining, this is a good use of quota.
 
-## Success Criteria
-Since target 0.9642 is impossible (top LB ~0.8066):
-- Realistic goal: Beat 0.80453 (our best LB)
-- Stretch goal: Reach 0.8066 (top LB)
-- Any improvement over 0.80453 is a win
+## After LB Feedback
+- If exp_006 LB > 0.8045: Calibration > CV. Focus on ensemble approaches with good calibration.
+- If exp_006 LB < 0.8045: CV > Calibration. Focus on feature selection + regularization to improve CV.
