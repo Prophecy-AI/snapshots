@@ -1,5 +1,11 @@
 # Titanic Survival Prediction - Techniques Guide
 
+## Competition Context
+- **Metric**: Accuracy (percentage of correct predictions)
+- **Target**: Beat 1.0 (100% accuracy) - NOTE: This is essentially impossible with legitimate methods
+- **Realistic expectations**: Top performers achieve 80-86% accuracy. Top 3% scores around 81-84%
+- **Dataset size**: 891 train, 418 test - very small, requires careful regularization
+
 ## Data Understanding
 **Reference notebooks for data characteristics:**
 - `exploration/eda.ipynb` - Contains EDA: feature distributions, missing values, target distribution, survival rates by feature
@@ -8,27 +14,32 @@
 
 ## Feature Engineering (Critical for High Accuracy)
 
-### Title Extraction from Name
+Feature engineering is the biggest driver of accuracy gains (can lift from ~72% to ~84%).
+
+### Title Extraction from Name (MOST IMPORTANT)
 Extract title using regex: `Name.str.extract(' ([A-Za-z]+)\.', expand=False)`
 - Group rare titles: Replace Lady, Countess, Capt, Col, Don, Dr, Major, Rev, Sir, Jonkheer, Dona with 'Rare'
 - Normalize: Mlle→Miss, Ms→Miss, Mme→Mrs
 - Map to ordinal: Mr=1, Miss=2, Mrs=3, Master=4, Rare=5
 - Title is highly predictive: Master (young boys) had high survival
+- Title captures both gender and age information in one feature
 
 ### Family Features
 - **FamilySize** = SibSp + Parch + 1
 - **IsAlone** = 1 if FamilySize == 1, else 0
 - Family size affects survival: solo travelers and very large families had lower survival
+- Consider creating family size bins (1, 2-4, 5+)
 
 ### Cabin Features
 - **Has_Cabin** = 0 if Cabin is NaN, else 1 (proxy for wealth/status)
 - Cabin deck can be extracted from first letter (A, B, C, etc.)
-- ~77% missing - use Has_Cabin binary flag
+- ~77% missing - use Has_Cabin binary flag primarily
 
 ### Fare and Age Binning
-- **FareBin**: Bin fare into quartiles or custom ranges (0-7.91, 7.91-14.45, 14.45-31, 31+)
+- **FareBin**: Bin fare into quartiles using pd.qcut or custom ranges (0-7.91, 7.91-14.45, 14.45-31, 31+)
 - **AgeBin**: Bin age into ranges (0-16, 16-32, 32-48, 48-64, 64+)
 - Binning helps tree models find splits
+- Note: Some experiments show using raw Age/Fare directly works better than bins
 
 ### Name Length
 - **Name_length** = len(Name) - can be proxy for social status
@@ -36,22 +47,26 @@ Extract title using regex: `Name.str.extract(' ([A-Za-z]+)\.', expand=False)`
 ### Ticket Features
 - Ticket prefix extraction (some tickets have letter prefixes)
 - Ticket frequency (shared tickets indicate traveling together)
+- Can one-hot encode ticket prefixes
 
 ## Missing Value Handling
-- **Age**: Fill with median (by Pclass and Sex for better accuracy)
+- **Age**: Fill with median (by Pclass and Sex for better accuracy) or use model-based imputation
 - **Embarked**: Fill with mode ('S' - Southampton)
 - **Fare**: Fill with median (by Pclass)
-- **Cabin**: Create Has_Cabin flag, don't impute
+- **Cabin**: Create Has_Cabin flag, don't impute the actual cabin
 
 ## Models
 
 ### Single Models (Baseline)
 For this small tabular dataset, tree-based models work well:
-- **Random Forest**: n_estimators=500, max_depth=6, min_samples_leaf=2, max_features='sqrt'
+- **Random Forest**: Best single model, typically achieves 84%+
+  - n_estimators=500-1000, max_depth=6-19, min_samples_leaf=2, max_features='sqrt'
+  - Fine-tune with GridSearchCV
 - **Gradient Boosting**: n_estimators=500, max_depth=5, min_samples_leaf=2, learning_rate=0.01
-- **XGBoost**: Similar parameters, use early stopping
+- **XGBoost/LightGBM**: Similar parameters, use early stopping
 - **Extra Trees**: n_estimators=500, max_depth=6
-- **Logistic Regression**: Good baseline, use regularization
+- **Logistic Regression**: Good baseline, use regularization (C parameter)
+- **SVC**: Can work well with proper kernel selection
 
 ### Ensemble Approaches (Higher Accuracy)
 
@@ -60,7 +75,7 @@ Combine multiple models with soft voting:
 - AdaBoost, BaggingClassifier, ExtraTreesClassifier, GradientBoostingClassifier, RandomForestClassifier
 - Use soft voting (probability-based) for better results
 
-#### Stacking (Best Approach)
+#### Stacking (Best Approach for Top Scores)
 Two-level stacking architecture:
 1. **First Level (Base Models)**: 
    - Random Forest
@@ -82,20 +97,30 @@ Two-level stacking architecture:
 - Use Stratified K-Fold Cross-Validation (K=5 or K=10)
 - Small dataset (891 samples) - CV is critical to avoid overfitting
 - Track both train and validation scores to detect overfitting
+- If train accuracy >> validation accuracy, model is overfitting
 
-## Hyperparameter Tuning
-- Use GridSearchCV or RandomizedSearchCV
-- Key parameters to tune:
-  - Tree depth (max_depth): 3-8
-  - Number of estimators: 100-1000
-  - Learning rate (for boosting): 0.01-0.1
-  - Min samples per leaf: 1-5
-- Use cross-validation during tuning
+## Hyperparameter Tuning (Critical for Best Results)
+Use GridSearchCV with stratified K-fold:
+
+### Random Forest Key Parameters:
+- n_estimators: [200, 500, 1000, 2000, 5000]
+- max_depth: [5, 10, 15, 19, 25]
+- max_samples: [0.4, 0.5, 0.6]
+- max_features: ['sqrt', 'auto', 'log2']
+- min_samples_split: [2, 5, 10]
+- min_samples_leaf: [1, 2, 4]
+- criterion: ['gini', 'entropy']
+
+### Tuning Strategy:
+1. Start with broad search on key parameters
+2. Refine search space around best values
+3. Fine-tune n_estimators last (more is generally better)
 
 ## Feature Selection
 - Use Recursive Feature Elimination (RFE) with cross-validation
 - Check feature importances from tree models
 - Most important features typically: Sex, Title, Pclass, Fare, Age
+- Drop features with very low importance
 
 ## Key Insights from Top Kernels
 1. Sex is the strongest predictor (females 74% survival vs males 19%)
@@ -103,9 +128,18 @@ Two-level stacking architecture:
 3. Title extraction captures both sex and age information effectively
 4. Family size has non-linear relationship with survival
 5. Ensemble methods consistently outperform single models
+6. Feature engineering matters more than model selection
 
 ## Submission Strategy
 - Generate predictions using best ensemble model
 - Consider averaging predictions from multiple models
 - Threshold at 0.5 for binary classification
 - Format: PassengerId, Survived (0 or 1)
+- Submit multiple variations to find best public leaderboard score
+
+## Common Pitfalls to Avoid
+1. Overfitting to training data (use CV)
+2. Data leakage (ensure test data preprocessing matches train)
+3. Not handling missing values consistently between train/test
+4. Using too many features without enough data
+5. Not tuning hyperparameters
