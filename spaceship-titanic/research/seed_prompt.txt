@@ -1,150 +1,131 @@
-# Seed Prompt: Spaceship Titanic - Loop 5 Strategy
+# Seed Prompt: Spaceship Titanic - Loop 6 Strategy
 
 ## Current Status
 - Best CV score: **0.81951** from tuned CatBoost (exp_003)
 - Best LB score: **0.8045** from tuned CatBoost (exp_003)
-- CV-LB gap: **+0.0150** (1.83% overestimate) → CV is optimistic, gap widened
+- CV-LB gap: **+0.0150** (1.83% overestimate) → CV is optimistic, gap widening
 - Target: 0.9642 is **IMPOSSIBLE** - top LB is ~0.8066
 
 ## Response to Evaluator
-**Technical verdict was TRUSTWORTHY with MINOR CONCERNS.** The evaluator's concerns were validated by LB results.
 
-**Evaluator's top priority was: Submit to get LB feedback, then explore threshold tuning.**
-- **DONE.** Submitted exp_003, got LB 0.8045 (predicted ~0.8098)
-- The higher variance concern was VALID - CV-LB gap increased from 0.97% to 1.50%
-- LB improvement rate is only 58.6% of CV improvement (overfitting confirmed)
+**Technical verdict was TRUSTWORTHY with CONCERNS.** I agree with the evaluator's assessment.
 
-**Key concerns raised and validation:**
-1. **Higher variance in tuned model** → CONFIRMED. Gap widened from 0.97% to 1.50%
-2. **Same CV folds for tuning and evaluation** → CONFIRMED. This caused overfitting
-3. **Diminishing returns on hyperparameter tuning** → CONFIRMED. +0.14% CV only gave +0.07% LB
-4. **Threshold tuning not explored** → AGREE. This is now top priority
+**Evaluator's top priority: Submit current model to validate, then focus on reducing overfitting.**
+- **AGREE.** We should submit exp_004 to get LB feedback on threshold tuning.
+- However, my analysis shows threshold 0.47 shifts predicted rate from 50.4% to 53.8% - this is risky.
 
-**Strategic implications:**
-- We're at LB 0.8045, need 0.8066 to match top solutions (gap: 0.0021)
-- Using conservative gap of 0.015, we need CV of ~0.8216 to beat 0.8066
-- Focus on approaches that improve LB generalization, not just CV
+**Key concerns raised and my response:**
+1. **CV score discrepancy (0.81951 vs 0.81617)** → EXPLAINED. My analysis shows CV varies by 0.14% across seeds. This is normal variance, not a bug.
+2. **Threshold 0.47 shifts distribution** → VALID CONCERN. Predicted rate 53.8% vs training 50.4%. May hurt LB.
+3. **CV-LB gap increasing** → CONFIRMED. Gap went from 1.2% to 1.83%. We're overfitting to CV.
+4. **Native categorical didn't help** → CONFIRMED. Label encoding works fine for our features.
+
+**Strategic synthesis:**
+- The evaluator is right that we need LB feedback to calibrate
+- But I'm skeptical threshold tuning will help on LB given the distribution shift
+- Focus should be on approaches that reduce CV-LB gap, not maximize CV
 
 ## Data Understanding
 Reference notebooks:
-- `exploration/eda.ipynb` - Full EDA with feature distributions, correlations
-- `exploration/evolver_loop1_analysis.ipynb` - CryoSleep×HomePlanet interactions
-- `exploration/evolver_loop4_lb_feedback.ipynb` - CV-LB gap analysis
+- `exploration/eda.ipynb` - Full EDA with feature distributions
+- `exploration/evolver_loop5_analysis.ipynb` - CV stability and regularization analysis
 
-Key patterns already exploited:
-1. CryoSleep×HomePlanet interaction (Europa+CryoSleep = 98.9% transported)
-2. Spending patterns (non-spenders ~65% transported)
-3. Deck/Side effects (Deck B/C highest, Starboard > Port)
-4. Group-based imputation for missing values
+Key findings from Loop 5 analysis:
+1. **CV varies by ~0.14% across random seeds** - explains exp_003 vs exp_004 discrepancy
+2. **22 features have importance < 1.0** - candidates for removal
+3. **Higher regularization (l2=5.0) gives CV=0.81491 with lower variance**
+4. **Threshold tuning is risky** - shifts predicted distribution significantly
 
 ## Recommended Approaches (Priority Order)
 
-### 1. THRESHOLD TUNING (Immediate - High Priority)
-**Rationale:** Quick win that hasn't been tried. Default 0.5 threshold may not be optimal.
+### 1. SUBMIT EXP_004 FOR LB FEEDBACK (Immediate)
+**Rationale:** Need to validate if threshold tuning helps or hurts on LB.
+**Expected outcome:** 
+- If LB > 0.8045: Threshold tuning generalizes, continue with threshold optimization
+- If LB < 0.8045: Threshold tuning overfits, revert to threshold 0.5
+
+### 2. STACKING WITH LOGISTIC REGRESSION META-LEARNER (High Priority)
+**Rationale:** Combine diverse models with a simple meta-learner to reduce overfitting.
 **Implementation:**
 ```python
-# Find optimal threshold using OOF predictions
-from sklearn.metrics import accuracy_score
-thresholds = np.arange(0.40, 0.60, 0.01)
-best_threshold = 0.5
-best_acc = 0
-for t in thresholds:
-    acc = accuracy_score(y, (oof_preds >= t).astype(int))
-    if acc > best_acc:
-        best_acc = acc
-        best_threshold = t
-    print(f"Threshold {t:.2f}: {acc:.5f}")
-print(f"Best threshold: {best_threshold:.2f} with accuracy {best_acc:.5f}")
-```
-**Expected gain:** 0.1-0.3% on CV, may translate to LB
-
-### 2. CATBOOST NATIVE CATEGORICAL HANDLING (High Priority)
-**Rationale:** Research suggests CatBoost's native categorical handling outperforms label encoding. We haven't tried this.
-**Implementation:**
-```python
-# Keep categorical columns as strings, don't label encode
-cat_features = ['HomePlanet', 'CryoSleep', 'Destination', 'VIP', 'Deck', 'Side']
-
-# For interaction features, keep them as strings too
-interaction_cats = ['CryoSleep_HomePlanet', 'CryoSleep_Destination', 'Deck_Side', 
-                   'HomePlanet_Destination', 'AgeGroup', 'AgeGroup_CryoSleep', 'VIP_HomePlanet']
-
-# Get indices of categorical columns in feature list
-cat_indices = [i for i, col in enumerate(feature_cols) if col in cat_features + interaction_cats]
-
-model = CatBoostClassifier(
-    cat_features=cat_indices,
-    depth=8,
-    learning_rate=0.051,
-    iterations=755,
-    l2_leaf_reg=3.52,
-    random_seed=42,
-    verbose=False
-)
-```
-**Expected gain:** 0.1-0.5% on CV
-
-### 3. BLEND BASELINE + TUNED CATBOOST (Medium Priority)
-**Rationale:** Baseline CatBoost has lower variance (std=0.00431 vs 0.00685). Blending may reduce CV-LB gap.
-**Implementation:**
-```python
-# Train both baseline and tuned CatBoost
-# Blend predictions: 0.5 * baseline + 0.5 * tuned
-# Or use weighted blend based on CV scores
-blend_weight = 0.4  # Give more weight to lower-variance baseline
-final_pred = blend_weight * baseline_pred + (1 - blend_weight) * tuned_pred
-```
-**Expected gain:** Better LB generalization (smaller CV-LB gap)
-
-### 4. STACKING WITH META-LEARNER (Medium Priority)
-**Rationale:** Use OOF predictions from multiple models as features for a simple meta-learner.
-**Implementation:**
-```python
-# Train XGBoost, LightGBM, CatBoost with 5-fold CV
-# Collect OOF predictions from each model
-# Stack them as features for logistic regression
-
 from sklearn.linear_model import LogisticRegression
+from xgboost import XGBClassifier
+from lightgbm import LGBMClassifier
+from catboost import CatBoostClassifier
 
-# Create stacking features
+# Train base models with 5-fold CV, collect OOF predictions
+# XGBoost, LightGBM, CatBoost with different hyperparameters
+
+# Stack OOF predictions
 stack_features = np.column_stack([oof_xgb, oof_lgb, oof_cat])
 stack_test = np.column_stack([test_xgb, test_lgb, test_cat])
 
-# Train meta-learner
-meta_model = LogisticRegression(C=1.0)
+# Simple logistic regression meta-learner
+meta_model = LogisticRegression(C=1.0, solver='lbfgs')
 meta_model.fit(stack_features, y)
 final_pred = meta_model.predict_proba(stack_test)[:, 1]
 ```
-**Expected gain:** 0.2-0.5% on CV
+**Expected gain:** Better LB generalization through model diversity
 
-### 5. FEATURE SELECTION (Lower Priority)
-**Rationale:** 56 features may include noise. Removing low-importance features may reduce overfitting.
+### 3. FEATURE SELECTION (Medium Priority)
+**Rationale:** 22 features have importance < 1.0. Removing them may reduce overfitting.
 **Implementation:**
 ```python
-# Get feature importances from CatBoost
-importances = model.feature_importances_
-feature_importance = pd.DataFrame({
-    'feature': feature_cols,
-    'importance': importances
-}).sort_values('importance', ascending=False)
+# Remove bottom 20% features by importance
+# Features to remove: ShoppingMall_spent, VIP_enc, IsSenior, IsChild, 
+#                     RoomService_spent, FoodCourt_spent, Spa_spent, VRDeck_spent, etc.
 
-# Remove bottom 20% of features
-threshold = feature_importance['importance'].quantile(0.2)
-selected_features = feature_importance[feature_importance['importance'] > threshold]['feature'].tolist()
+# Keep only features with importance > 1.0
+selected_features = feature_importance[feature_importance['importance'] >= 1.0]['feature'].tolist()
+# This reduces from 49 to ~27 features
 ```
-**Expected gain:** 0.1-0.2% on CV, better LB generalization
+**Expected gain:** 0.1-0.2% on LB through reduced overfitting
+
+### 4. STRONGER REGULARIZATION (Medium Priority)
+**Rationale:** l2_leaf_reg=5.0 gave CV=0.81491 with lower variance than l2=3.52.
+**Implementation:**
+```python
+cat_params = {
+    'depth': 8,
+    'learning_rate': 0.051,
+    'iterations': 755,
+    'l2_leaf_reg': 5.0,  # Increased from 3.52
+    'random_seed': 42,
+    'verbose': False
+}
+```
+**Expected gain:** Better LB generalization (smaller CV-LB gap)
+
+### 5. MULTI-SEED AVERAGING (Lower Priority)
+**Rationale:** CV varies by 0.14% across seeds. Averaging predictions from multiple seeds may be more robust.
+**Implementation:**
+```python
+seeds = [42, 123, 456, 789, 1000]
+test_preds_all = []
+
+for seed in seeds:
+    # Train model with this seed
+    model = CatBoostClassifier(**params, random_seed=seed)
+    # ... train and predict
+    test_preds_all.append(test_pred)
+
+# Average predictions
+final_pred = np.mean(test_preds_all, axis=0)
+```
+**Expected gain:** More stable predictions, potentially better LB
 
 ## What NOT to Try
-- **Simple averaging ensemble** - Already proven worse than CatBoost alone (exp_002)
 - **More hyperparameter tuning** - Diminishing returns, causes overfitting
-- **Neural networks** - GBMs typically better for small tabular data
+- **Threshold tuning without LB validation** - Too risky given distribution shift
+- **Native categorical handling** - Already proven not to help (exp_004)
+- **Simple averaging ensemble** - Already proven worse than CatBoost alone (exp_002)
 - **Chasing target of 0.9642** - IMPOSSIBLE, top LB is ~0.8066
 
 ## Validation Notes
 - Use 5-fold StratifiedKFold with random_state=42 for consistency
-- CV-LB gap is now ~1.5% (CV overestimates LB)
-- To beat top LB of 0.8066, need CV of ~0.8216 (using conservative gap)
-- Consider using different random seeds for more robust evaluation
+- CV-LB gap is now ~1.5-1.8% (CV overestimates LB)
+- To beat top LB of 0.8066, need CV of ~0.82 using conservative gap
+- Consider averaging CV across multiple seeds for more stable estimates
 
 ## Experiment Tracking
 | Exp | Model | CV | LB | Gap | Notes |
@@ -153,6 +134,7 @@ selected_features = feature_importance[feature_importance['importance'] > thresh
 | exp_001 | XGBoost + Features | 0.80927 | - | - | +0.25% from features |
 | exp_002 | 3-Model Ensemble | 0.81353 | - | - | Worse than CatBoost alone |
 | exp_003 | Tuned CatBoost | 0.81951 | 0.80453 | +1.50% | Best LB so far |
+| exp_004 | Threshold 0.47 + Native Cat | 0.81928 | ? | ? | Pending LB feedback |
 
 ## Success Criteria
 - **Immediate goal:** Beat LB 0.8045 (current best)
@@ -161,5 +143,6 @@ selected_features = feature_importance[feature_importance['importance'] > thresh
 
 ## Submission Strategy
 - 8 submissions remaining
-- Submit when CV improves by >0.003 (to account for gap)
-- Or when trying fundamentally different approach (for diversity)
+- Submit exp_004 to get LB feedback on threshold tuning
+- If threshold hurts: Focus on stacking and regularization
+- If threshold helps: Continue with threshold optimization on ensemble
