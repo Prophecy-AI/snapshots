@@ -1,158 +1,99 @@
+## Current Status
+- Best CV score: 0.8283 from exp_000 (Baseline RF with Feature Engineering)
+- Best LB score: None (no submissions yet)
+- CV-LB gap: Unknown - need to submit baseline to calibrate
+
+## Response to Evaluator
+- Technical verdict was TRUSTWORTHY. Execution is sound, can proceed with strategy.
+- Evaluator's top priority: Implement stacking ensemble with diverse base models. **Agree** - this is the highest-leverage improvement based on research (stacking adds 1-3% per arthurtok kernel).
+- Key concerns raised:
+  1. Target score of 1.0 is unrealistic → **Acknowledged**. Top Titanic scores are 85-87%. Reframing goal to "beat 0.85 on LB" which is achievable.
+  2. Missing features (Deck, Age/Fare bins, interaction) → Will add these alongside stacking.
+  3. No LB submission yet → Will submit baseline first to calibrate CV-LB relationship.
+- Minor leakage in age imputation noted but impact is minimal per evaluator.
+
 ## Data Understanding
-**Reference notebooks for data characteristics:**
-- `exploration/eda.ipynb` - Contains EDA: feature distributions, missing values, target distribution
-- Binary classification problem predicting survival (0/1)
-- Evaluation metric: Accuracy (percentage of correct predictions)
-- Target score to beat: 1.0 (100% accuracy) - extremely ambitious, typical top scores are 80-85%
+**Reference notebooks:**
+- `exploration/eda.ipynb` - EDA with feature distributions, missing values analysis
+- `research/kernels/arthurtok_introduction-to-ensembling-stacking-in-python/` - Stacking implementation reference
 
-## Feature Engineering (Critical for High Scores)
+**Key patterns to exploit:**
+- Sex is most predictive (females 74.2% survival vs males 18.9%)
+- Title captures both gender and social status (Master indicates young male children with ~57% survival)
+- Pclass strongly correlated with survival (1st: 63%, 2nd: 47%, 3rd: 24%)
+- Family size 2-4 has higher survival than alone or large families
+- Has_Cabin indicates wealth/class (67% survival with cabin vs 30% without)
 
-Feature engineering is MORE important than model selection for this dataset. Top solutions emphasize creative feature extraction.
+**Important: 100% Public Leaderboard**
+Per Kaggle staff discussion, Titanic uses 100% of test data for public LB. This means:
+- No private/public shake-up risk
+- CV-LB correlation should be reliable
+- LB score is the true final score
 
-### Title Extraction from Name (MOST IMPORTANT)
-Extract title from Name field - this is one of the most predictive features:
+## Recommended Approaches
+
+### Priority 1: Submit Baseline for LB Calibration
+Before implementing stacking, submit current baseline (exp_000) to establish LB benchmark.
+- This uses 1 submission but provides critical CV-LB calibration
+- Expected LB: ~0.78-0.80 (CV often slightly optimistic)
+
+### Priority 2: Implement Stacking Ensemble (HIGHEST IMPACT)
+Based on arthurtok kernel, implement 2-level stacking:
+
+**First Level (5 Base Models):**
+1. RandomForest (n_estimators=500, max_depth=6, min_samples_leaf=2)
+2. ExtraTrees (n_estimators=500, max_depth=8, min_samples_leaf=2)
+3. AdaBoost (n_estimators=500, learning_rate=0.75)
+4. GradientBoosting (n_estimators=500, max_depth=5, learning_rate=0.1)
+5. SVC (kernel='rbf', probability=True, C=1.0) - requires feature scaling!
+
+**Second Level (Meta-Learner):**
+- XGBoost (n_estimators=2000, max_depth=4, gamma=0.9, subsample=0.8, colsample_bytree=0.8)
+- OR Logistic Regression for simpler meta-learner
+
+**Out-of-Fold Prediction Process (CRITICAL to prevent leakage):**
 ```python
-# Extract title using regex
-df['Title'] = df['Name'].str.extract(' ([A-Za-z]+)\.', expand=False)
+# For each base model:
+# 1. Use K-Fold (k=5) cross-validation
+# 2. For each fold, train on k-1 folds, predict on held-out fold
+# 3. Concatenate predictions to form new feature set for meta-learner
+# 4. Also generate test predictions by averaging across folds
 ```
-- Common titles: Mr, Mrs, Miss, Master, Dr, Rev, etc.
-- Group rare titles into 'Rare' category
-- 'Master' title indicates young male children (high survival ~57%)
-- Title captures both gender and social status information
-- Map titles: {'Mlle':'Miss', 'Ms':'Miss', 'Mme':'Mrs', 'Lady':'Rare', 'Countess':'Rare', etc.}
 
-### Family Features
-- **FamilySize** = SibSp + Parch + 1 (total family members including self)
-- **IsAlone** = 1 if FamilySize == 1, else 0
-- **FamilySizeGroup**: Small (2-4) vs Large (>4) vs Alone (1)
-- Family size of 2-4 has higher survival rates than alone or large families
+### Priority 3: Add Missing Features
+Before or alongside stacking, add:
+1. **Deck** - First letter of Cabin (A, B, C, D, E, F, G, Unknown)
+2. **Age binning** - Child (<16), Teen (16-32), Adult (32-48), Senior (>48)
+3. **Fare binning** - Quartiles (0-7.91, 7.91-14.45, 14.45-31, >31)
+4. **Sex_Pclass interaction** - female_1, female_2, female_3, male_1, etc.
+5. **Ticket_frequency** - Count of passengers sharing same ticket (group travel)
 
-### Cabin Features
-- **Has_Cabin** = 1 if Cabin is not null, else 0 (indicates wealth/class)
-- **Deck** = First letter of Cabin (A, B, C, D, E, F, G) - deck position matters
-- Passengers with cabins had ~67% survival vs ~30% without
+### Priority 4: Hyperparameter Tuning (Lower Priority)
+Only after stacking is implemented and features are mature:
+- GridSearchCV on XGBoost meta-learner
+- Tune base model parameters
 
-### Binning Continuous Variables
-- **AgeBin**: Bin Age into categories (Child <16, Teen 16-32, Adult 32-48, Senior >48)
-- **FareBin**: Bin Fare into quartiles or quintiles
-- Binning helps tree models and reduces noise
+## What NOT to Try
+- Single model hyperparameter tuning before stacking (low ROI)
+- Deep learning (dataset too small, 891 samples)
+- Complex neural architectures (overkill for this problem)
+- Chasing 100% accuracy (impossible due to inherent noise)
 
-### Other Features
-- **Name_length**: Length of name (correlates with social status)
-- **Ticket_prefix**: Extract alphabetic prefix from ticket number
-- **Ticket_frequency**: Count of passengers sharing same ticket (group travel)
-- **Fare_per_person**: Fare / (number of people on same ticket)
+## Validation Notes
+- Use Stratified 5-Fold CV (maintains class balance)
+- Current CV: 0.8283 ± 0.0138 (fold scores: 0.803-0.844)
+- Expect LB to be slightly lower than CV (typical pattern)
+- After LB submission, calculate CV-LB gap to calibrate expectations
 
-### Interaction Features
-- **Sex_Pclass**: Combine Sex and Pclass (female_1, female_2, female_3, male_1, etc.)
-- **Age_Pclass**: Age group combined with class
+## Expected Outcomes
+- Baseline LB: ~0.78-0.80
+- With stacking: ~0.80-0.82 LB (84-86% CV)
+- With additional features + stacking: ~0.82-0.85 LB
+- Realistic ceiling: ~0.85-0.87 LB (top public scores)
 
-## Missing Value Handling
-- **Age**: Fill with median grouped by (Pclass, Sex, Title) for better accuracy
-- **Embarked**: Fill with mode ('S' - Southampton)
-- **Fare**: Fill with median grouped by Pclass
-- **Cabin**: Create Has_Cabin feature, then can drop original
-
-## Models for Binary Classification
-
-### Single Models (Baseline)
-- **Random Forest**: n_estimators=100-500, max_depth=6-8, good baseline ~82-84%
-- **Gradient Boosting**: Often outperforms RF slightly
-- **XGBoost**: n_estimators=2000, max_depth=4, learning_rate=0.01-0.1
-- **LightGBM**: Fast training, good for hyperparameter search
-- **CatBoost**: Handles categorical features natively
-- **SVM**: With RBF kernel, requires feature scaling
-- **Logistic Regression**: Good interpretability, ~80% accuracy
-
-### Ensemble Methods (For Higher Scores)
-
-#### Voting Classifier
-Combine multiple models with soft voting:
-- RandomForest + GradientBoosting + XGBoost + SVC + LogisticRegression
-- Use soft voting (probability-based) for better results
-
-#### Stacking (Recommended for Best Scores)
-Two-level stacking approach from top kernels:
-
-1. **First Level (Base Models)**:
-   - Random Forest (n_estimators=500, max_depth=6, min_samples_leaf=2)
-   - Extra Trees (n_estimators=500, max_depth=8, min_samples_leaf=2)
-   - AdaBoost (n_estimators=500, learning_rate=0.75)
-   - Gradient Boosting (n_estimators=500, max_depth=5, learning_rate=0.1)
-   - SVC (kernel='rbf', probability=True, C=1.0)
-
-2. **Second Level (Meta-Learner)**:
-   - XGBoost (n_estimators=2000, max_depth=4, gamma=0.9, subsample=0.8, colsample_bytree=0.8)
-   - Or Logistic Regression for simpler meta-learner
-   - Use out-of-fold predictions from first level as features
-
-3. **Out-of-Fold Prediction Process**:
-   - Use K-Fold (k=5) cross-validation
-   - For each fold, train on k-1 folds, predict on held-out fold
-   - Concatenate predictions to form new feature set
-   - This prevents data leakage
-
-### Key Insight: Model Diversity
-- Uncorrelated base models produce better ensemble results
-- Mix tree-based (RF, GBM) with linear (LogReg) and kernel (SVM) methods
-- Check correlation between model predictions - low correlation = better ensemble
-
-## Hyperparameter Tuning
-- Use GridSearchCV or RandomizedSearchCV with cross-validation
-- Key parameters for tree models: max_depth, n_estimators, min_samples_leaf, max_features
-- For XGBoost: learning_rate, max_depth, subsample, colsample_bytree, gamma, reg_alpha, reg_lambda
-- For SVM: C, gamma, kernel
-
-## Feature Selection
-- Use Recursive Feature Elimination (RFE) with cross-validation
-- Check feature importances from tree models
-- Most important features typically: Sex, Title, Pclass, Fare, Age, FamilySize
-- Remove highly correlated features (keep one)
-
-## Validation Strategy
-- Use Stratified K-Fold (k=5 or k=10) to maintain class balance
-- Small dataset (891 samples) - be careful of overfitting
-- Cross-validation score is more reliable than single train/test split
-- Trust CV score over public leaderboard score
-
-## Domain Knowledge
-- "Women and children first" - Sex and Age are critical
-- Higher class passengers had better access to lifeboats
-- Embarked port correlates with class/wealth (Cherbourg had more 1st class)
-- Family dynamics matter - small families survived better
-- Crew members mostly died (not in dataset but context helps)
-
-## Code Patterns
-
-### Feature Engineering Pipeline
-1. Combine train and test for consistent encoding
-2. Extract Title from Name
-3. Create FamilySize, IsAlone, Has_Cabin, Deck
-4. Fill missing values (Age by Title/Pclass/Sex groups)
-5. Bin Age and Fare
-6. Create interaction features
-7. Encode categorical variables (LabelEncoder or OneHotEncoder)
-8. Drop unused columns (Name, Ticket, Cabin, PassengerId)
-
-### Recommended Feature Set
-Final features to use:
-- Pclass, Sex_Code, Age (or AgeBin), Fare (or FareBin)
-- Title_Code, FamilySize, IsAlone
-- Embarked_Code, Has_Cabin
-- Optional: Deck, Ticket_frequency, interaction features
-
-## Tips for Achieving High Accuracy
-1. **Feature engineering is key** - Title extraction alone can boost accuracy 3-5%
-2. **Ensemble diverse models** - Stacking typically adds 1-3% over single models
-3. **Tune hyperparameters carefully** - Use cross-validation, not single split
-4. **Don't overfit** - Small dataset is prone to overfitting; regularize models
-5. **Try multiple random seeds** - Results can vary with initialization
-6. **Combine original features with engineered features** in stacking
-7. **Use probability predictions** for soft voting ensembles
-
-## Expected Performance
-- Basic model (RF with raw features): ~78-80%
-- With feature engineering: ~82-84%
-- With stacking ensemble: ~84-86%
-- Top public scores: ~85-87%
-- Perfect score (1.0) is extremely difficult - may require perfect feature engineering or luck
+## Code Reference
+See `research/kernels/arthurtok_introduction-to-ensembling-stacking-in-python/` for:
+- SklearnHelper class for consistent model interface
+- get_oof() function for out-of-fold predictions
+- Feature engineering patterns (Age/Fare binning, Title mapping)
+- XGBoost meta-learner configuration
