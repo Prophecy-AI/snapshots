@@ -1,37 +1,40 @@
 ## Current Status
 - Best CV score: 0.81951 from exp_003 (CatBoost Optuna-tuned) - **NOT REPRODUCIBLE**
 - Best LB score: 0.8045 from exp_003
-- Latest exp_008: CV 0.81698 (multi-seed ensemble)
+- Latest exp_009: CV 0.81560 (target encoding - WORSE than baseline)
 - **TRUE BASELINE**: ~0.817 CV (confirmed by multi-seed analysis)
-- CV-LB gap: ~1.6-2.0% average
+- CV-LB gap: ~1.6-2.0% average (INCREASING - sign of overfitting)
 - Target: 0.9642 (IMPOSSIBLE - top LB is ~0.8066, our best 0.8045 is top ~7%)
 
 ## Response to Evaluator
-- Technical verdict: TRUSTWORTHY. Multi-seed ensemble implementation is sound.
-- Evaluator's top priority: **Investigate why exp_003 achieved CV=0.81951 and try to reproduce it.**
-- **I AGREE** with the diagnosis but **DISAGREE** with spending time on investigation:
-  - The multi-seed analysis (5 seeds) conclusively shows true CV is ~0.817
-  - exp_003's CV of 0.81951 was likely a lucky Optuna run
-  - Investigating further is unlikely to be productive
-  - Better to try fundamentally different approaches
+- **Technical verdict**: TRUSTWORTHY. Target encoding implementation was sound with proper per-fold fitting.
+- **Evaluator's top priority**: "Try 10-fold CV with regularization to reduce overfitting and get more stable estimates."
+- **I AGREE** with this recommendation. The evaluator correctly identified:
+  1. Target encoding HURT performance (0.81560 vs 0.81698) - CONFIRMED
+  2. High fold variance (2.02% spread) suggests instability
+  3. CV-LB gap is increasing (1.19% → 1.97%) - overfitting signal
+  4. We've been stuck for 7 experiments without beating exp_003
 
-- Key concerns raised:
-  1. exp_003 is NOT reproducible - CONFIRMED by multi-seed analysis
-  2. We're stuck at CV ~0.817 - CONFIRMED
-  3. Need CV > 0.82089 to beat exp_003's LB - CONFIRMED
+- **Key concerns raised**:
+  1. Target encoding didn't help - CONFIRMED. CatBoost's native handling works better.
+  2. exp_003's CV of 0.81951 is NOT reproducible - CONFIRMED by multi-seed analysis
+  3. Need CV > 0.82089 to beat exp_003's LB - CONFIRMED by linear model
 
-- **SYNTHESIS**: Accept that our true baseline is ~0.817 CV. Focus on fundamentally different approaches that could unlock +0.4% improvement. Target encoding is the highest priority as it's a fundamentally different feature encoding approach used by top kernels.
+- **SYNTHESIS**: The evaluator's diagnosis is correct. We've exhausted "fundamentally different encoding" approaches. The path forward is:
+  1. **Reduce overfitting** through regularization and 10-fold CV
+  2. **Try KNN imputation** (different data preprocessing, not model changes)
+  3. Accept that our ceiling may be ~0.817 CV and focus on generalization
 
 ## Data Understanding
 - Reference notebooks:
   - `exploration/eda.ipynb` for initial EDA
-  - `exploration/evolver_loop9_analysis.ipynb` for CV-LB analysis and exp_003 investigation
+  - `exploration/evolver_loop10_analysis.ipynb` for post-target-encoding analysis
 - Key patterns:
   - CryoSleep is the strongest predictor (81.8% transported when True)
   - Spending patterns strongly predict transport
   - **CV is the primary driver of LB** (R²=0.92)
   - **To beat LB 0.8045, need CV > 0.82089** (from linear model)
-  - **True baseline is ~0.817 CV** (exp_003's 0.81951 was lucky)
+  - **True baseline is ~0.817 CV** (exp_003's 0.81951 was lucky Optuna run)
 
 ## CV-LB Gap Analysis (4 submissions)
 | Experiment | CV | LB | Gap | Gap % |
@@ -46,93 +49,110 @@
 
 ## Recommended Approaches (Priority Order)
 
-### 1. TARGET ENCODING (HIGH PRIORITY - DO THIS FIRST)
+### 1. 10-FOLD CV + STRONGER REGULARIZATION (HIGH PRIORITY - DO THIS FIRST)
 **Rationale**: 
-- Top kernels use target encoding
-- We've only used label encoding which doesn't capture category-target relationships
-- Fundamentally different approach that could unlock new signal
-- Could provide the +0.4% improvement we need
-
-**Implementation**:
-```python
-from category_encoders import TargetEncoder
-
-# CRITICAL: Use CV-based encoding to avoid leakage
-cat_cols = ['HomePlanet', 'Destination', 'Deck', 'Side', 'CryoSleep', 'VIP']
-te = TargetEncoder(cols=cat_cols, smoothing=1.0)
-
-# Fit on train, transform both
-# Use within CV loop to avoid leakage:
-for train_idx, val_idx in skf.split(X, y):
-    te.fit(X_train[cat_cols], y_train)
-    X_train_encoded = te.transform(X_train[cat_cols])
-    X_val_encoded = te.transform(X_val[cat_cols])
-```
-
-**Expected benefit**: +0.2-0.5% CV improvement (based on research)
-
-### 2. CABIN REGION FEATURES (MEDIUM PRIORITY)
-**Rationale**:
-- Top kernel (complete guide) uses cabin number regions
-- We only use raw CabinNum which may not capture spatial patterns
-- Passengers in similar cabin regions may have similar outcomes
-
-**Implementation**:
-```python
-# Create cabin region features (from complete guide kernel)
-df['Cabin_region1'] = (df['CabinNum'] < 300).astype(int)
-df['Cabin_region2'] = ((df['CabinNum'] >= 300) & (df['CabinNum'] < 600)).astype(int)
-df['Cabin_region3'] = ((df['CabinNum'] >= 600) & (df['CabinNum'] < 900)).astype(int)
-df['Cabin_region4'] = ((df['CabinNum'] >= 900) & (df['CabinNum'] < 1200)).astype(int)
-df['Cabin_region5'] = ((df['CabinNum'] >= 1200) & (df['CabinNum'] < 1500)).astype(int)
-df['Cabin_region6'] = ((df['CabinNum'] >= 1500) & (df['CabinNum'] < 1800)).astype(int)
-df['Cabin_region7'] = (df['CabinNum'] >= 1800).astype(int)
-```
-
-### 3. 10-FOLD CV (MEDIUM PRIORITY)
-**Rationale**:
+- Evaluator's top recommendation
+- High fold variance (2.02% spread) suggests overfitting
+- CV-LB gap is increasing (1.19% → 1.97%)
 - Top kernels use 10-fold CV
-- More stable CV estimates
-- May slightly improve generalization
+- Focus on GENERALIZATION, not maximizing CV
 
 **Implementation**:
 ```python
+from sklearn.model_selection import StratifiedKFold
+from catboost import CatBoostClassifier
+
+# More regularized parameters
+cat_params = {
+    'depth': 6,  # Reduced from 8
+    'learning_rate': 0.05,
+    'iterations': 1000,
+    'l2_leaf_reg': 7.0,  # Increased from 3.52
+    'subsample': 0.8,  # New - adds randomness
+    'colsample_bylevel': 0.8,  # New - adds randomness
+    'random_seed': 42,
+    'verbose': False,
+    'early_stopping_rounds': 100
+}
+
+# 10-fold CV for more stable estimates
 skf = StratifiedKFold(n_splits=10, shuffle=True, random_state=42)
 ```
 
-### 4. FAMILY SIZE FEATURE (MEDIUM PRIORITY)
+**Expected outcome**: 
+- More stable CV estimates (lower fold variance)
+- Potentially LOWER CV but BETTER LB (reduced overfitting)
+- If CV drops but LB improves, this validates the overfitting hypothesis
+
+### 2. KNN IMPUTATION (MEDIUM PRIORITY)
 **Rationale**:
-- Top kernel extracts surname and calculates family size
-- Family members may have correlated outcomes
-- We have Group but not Family
+- Mentioned in top solutions (0.8066 LB)
+- Our current imputation is simple (mode/median)
+- KNN imputation captures relationships between features
+- Different data preprocessing approach (not model changes)
+- Research shows KNN imputation is effective for mixed data with k=5
 
 **Implementation**:
 ```python
-# Extract surname from Name
-df['Surname'] = df['Name'].str.split().str[-1]
+from sklearn.impute import KNNImputer
+from sklearn.preprocessing import LabelEncoder
 
-# Calculate family size
-surname_counts = pd.concat([train['Surname'], test['Surname']]).value_counts()
-df['Family_size'] = df['Surname'].map(surname_counts)
+# Encode categoricals first (KNN needs numeric data)
+le = LabelEncoder()
+for col in categorical_cols:
+    df[col] = le.fit_transform(df[col].astype(str))
+
+# KNN imputation with k=5 (research-recommended)
+imputer = KNNImputer(n_neighbors=5, weights='distance')
+df_imputed = pd.DataFrame(imputer.fit_transform(df), columns=df.columns)
 ```
 
-### 5. LGBM + CATBOOST SOFT VOTING (LOWER PRIORITY)
+**Expected benefit**: +0.1-0.3% CV improvement (based on research)
+
+### 3. ADVERSARIAL VALIDATION (MEDIUM PRIORITY)
 **Rationale**:
-- Top kernel uses LGBM + CatBoost with soft voting
-- We tried this in exp_002 but CatBoost alone was better
-- May be worth revisiting with target encoding features
+- CV-LB gap is increasing (1.19% → 1.97%)
+- This could indicate distribution shift between train and test
+- Adversarial validation can identify features causing the shift
+- Could help us understand why CV doesn't translate to LB
 
 **Implementation**:
 ```python
-# Train both models
-lgbm_preds = lgbm_model.predict_proba(X_test)[:, 1]
-cat_preds = cat_model.predict_proba(X_test)[:, 1]
+# Create adversarial dataset
+train['is_train'] = 1
+test['is_train'] = 0
+combined = pd.concat([train, test])
 
-# Soft voting (average probabilities)
-final_preds = (lgbm_preds + cat_preds) / 2
+# Train classifier to distinguish train from test
+adv_model = CatBoostClassifier(iterations=100, verbose=False)
+adv_model.fit(combined[features], combined['is_train'])
+
+# If AUC > 0.7, there's significant distribution shift
+# Check feature importances to find drifting features
+```
+
+### 4. PSEUDO-LABELING (LOWER PRIORITY)
+**Rationale**:
+- Can help with distribution shift
+- Use confident test predictions to augment training data
+- Risk: may amplify errors if predictions are wrong
+
+**Implementation**:
+```python
+# Get predictions on test set
+test_probs = model.predict_proba(X_test)[:, 1]
+
+# Select confident predictions (>0.9 or <0.1)
+confident_mask = (test_probs > 0.9) | (test_probs < 0.1)
+pseudo_labels = (test_probs[confident_mask] > 0.5).astype(int)
+
+# Add to training data
+X_augmented = pd.concat([X_train, X_test[confident_mask]])
+y_augmented = np.concatenate([y_train, pseudo_labels])
 ```
 
 ## What NOT to Try (Exhausted Approaches)
+- **Target encoding**: HURT CV by -0.14% (exp_009: 0.81560 vs 0.81698)
 - **Threshold tuning**: Proven to hurt LB (exp_004: 0.8041 vs exp_003: 0.8045)
 - **Native categorical handling**: Didn't outperform label encoding (exp_004)
 - **Simple averaging ensemble**: Weighted is better (exp_006)
@@ -144,31 +164,31 @@ final_preds = (lgbm_preds + cat_preds) / 2
 - **Investigating exp_003**: Multi-seed analysis shows it was a lucky run
 
 ## Validation Notes
-- Use 5-fold StratifiedKFold with random_state=42 for consistency (or try 10-fold)
-- CV-LB gap is ~1.6-2.0% and increasing - need to reduce overfitting
-- **Focus on CV**: Higher CV = higher LB (proven across 4 submissions)
+- **Use 10-fold StratifiedKFold** with random_state=42 for more stable estimates
+- CV-LB gap is ~1.6-2.0% and INCREASING - need to reduce overfitting
+- **Focus on GENERALIZATION**: Higher CV doesn't always mean higher LB
 - LB improvement rate is ~55% of CV improvement
+- **Use 56 features with label encoding** (best feature set)
 
 ## Submission Strategy
 - 6 submissions remaining
 - Only submit if:
   1. CV > 0.82089 (needed to beat exp_003's LB based on linear model)
-  2. OR fundamentally different approach shows promise
-- Do NOT submit exp_008 (CV = 0.81698, lower than exp_003)
+  2. OR regularized model shows CV drop but we want to test generalization hypothesis
+- Do NOT submit exp_009 (CV = 0.81560, lower than exp_003)
 
 ## Key Insight
-**We're stuck at CV ~0.817.** The last 5 experiments (exp_004-008) all failed to beat exp_003's CV of 0.81951, which we now know was a lucky run.
+**We're stuck at CV ~0.817.** The last 7 experiments (exp_003-009) all failed to beat exp_003's CV of 0.81951, which we now know was a lucky Optuna run.
 
-**Target encoding is the highest priority** because:
-1. It's a fundamentally different feature encoding approach
-2. Top kernels use it
-3. It captures category-target relationships that label encoding misses
-4. It could provide the +0.4% improvement we need
+**The evaluator is correct**: Focus on reducing overfitting, not maximizing CV.
+- 10-fold CV + regularization is the highest priority
+- KNN imputation is a different data preprocessing approach worth trying
+- Adversarial validation could explain the increasing CV-LB gap
 
-**If target encoding doesn't help**, try:
-- Cabin region features (spatial patterns)
-- Family size feature (family correlation)
-- 10-fold CV (more stable estimates)
+**If 10-fold + regularization doesn't help**, consider:
+- KNN imputation (different data preprocessing)
+- Adversarial validation (understand distribution shift)
+- Accept that 0.8045 LB may be close to our ceiling
 
 ## Reality Check
 - Target: 0.9642 is IMPOSSIBLE (top LB is ~0.8066)
@@ -176,3 +196,4 @@ final_preds = (lgbm_preds + cat_preds) / 2
 - Gap to top: 0.0021 (0.26%)
 - We're already competitive. Need breakthrough for improvement.
 - True baseline is ~0.817 CV, not 0.82 as we thought.
+- **Focus on generalization, not CV maximization.**
