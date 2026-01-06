@@ -1,20 +1,23 @@
-# Titanic Survival Prediction - Loop 4 Strategy
+# Titanic Survival Prediction - Loop 5 Strategy
 
 ## Current Status
-- Best CV score: 0.8373 from exp_003 (Threshold-Tuned Ensemble)
+- Best CV score: 0.8496 from exp_004 (Stacking at threshold 0.5) or 0.8373 (threshold 0.615)
 - Best LB score: 0.7847 from exp_003 (Threshold-Tuned Ensemble)
-- CV-LB gap: +5.26% (consistent with previous experiments)
+- CV-LB gap: +5.3% (consistent across recent submissions)
 - Submissions used: 3/10 (5 remaining)
 
 ## Response to Evaluator
-- Technical verdict was **TRUSTWORTHY** - execution is sound
-- Evaluator's top priority: "SUBMIT THIS MODEL IMMEDIATELY to validate the survival rate hypothesis"
-- **DONE - and it WORKED!** LB improved from 0.7775 to 0.7847 (+0.72%, 3 passengers)
+- Technical verdict was **TRUSTWORTHY** - execution is sound, stacking implementation is correct
+- Evaluator's top priority: "SUBMIT THE STACKING MODEL to validate whether it improves over threshold-tuned ensemble"
+- **I AGREE** - We need LB feedback on stacking before deciding next steps
 - Key concerns raised:
-  1. Threshold 0.55 gives best OOF accuracy (0.8418) but wasn't tested - **Valid, worth exploring**
-  2. 15 predictions differ between Simple RF and Threshold-Tuned - **Analyzed: Threshold-Tuned won net +3**
-  3. Target of 1.0 is impossible - **Acknowledged, focusing on realistic 0.80+ goal**
-- **My synthesis**: The survival rate hypothesis is CONFIRMED. Lower survival rate (~31%) performs better on LB. The threshold tuning approach is validated. Now we need to push toward 0.80+ using stacking.
+  1. Stacking CV at threshold 0.615 (0.8373) equals threshold-tuned CV - **Valid, this is a concern**
+  2. The 15 different predictions are unanalyzed - **ANALYZED: 11F/4M, 13 from Pclass 3, mostly young females vs children/elderly**
+  3. Threshold 0.5 not explored - **Valid, this is our backup if threshold 0.615 doesn't improve LB**
+  4. Target of 1.0 is impossible - **Acknowledged, focusing on realistic 0.80+ goal**
+- **My synthesis**: Submit stacking at threshold 0.615 first. If no improvement, we have two options:
+  1. Try threshold 0.5 (higher CV, 133 survivors)
+  2. Pivot to feature engineering (ticket prefixes, family survival rates)
 
 ## Submission History Analysis
 | Exp | Model | CV | LB | Gap | Survival Rate | Notes |
@@ -22,107 +25,83 @@
 | exp_000 | XGBoost (13 features) | 0.8316 | 0.7584 | +7.32% | 37.6% | Overfitting |
 | exp_001 | Simple RF (7 features) | 0.8238 | 0.7775 | +4.63% | 31.3% | Simpler = better |
 | exp_003 | Threshold-Tuned Ensemble | 0.8373 | 0.7847 | +5.26% | 31.1% | **BEST LB** |
+| exp_004 | Stacking (threshold 0.615) | 0.8373 | ??? | ??? | 31.3% | **SUBMIT THIS** |
 
 **Key Pattern**: Lower survival rate (~31%) consistently outperforms training rate (38.4%) on LB.
 
 ## Data Understanding
 Reference notebooks:
 - `exploration/eda.ipynb` - Feature distributions, survival patterns
-- `exploration/evolver_loop4_lb_feedback.ipynb` - Latest LB feedback analysis
+- `exploration/evolver_loop5_analysis.ipynb` - Stacking vs Threshold-Tuned comparison
 - `research/kernels/arthurtok_introduction-to-ensembling-stacking-in-python/` - Stacking approach (0.808 LB)
 
 Key patterns:
 - Sex is dominant: Female 74.2% survival vs Male 18.9%
 - Pclass matters: 1st class 63%, 3rd class 24%
-- 15 disagreements between RF and Threshold-Tuned: Threshold-Tuned correctly predicted more 3rd class Masters as survivors
+- 15 predictions differ between Stacking and Threshold-Tuned:
+  - Stacking predicts survival for 8 more (mostly young 3rd class females, ages 18-36)
+  - Threshold-Tuned predicts survival for 7 more (children/elderly, ages 0.83-64)
 - Test set appears to have lower survival rate than training (distribution shift)
 
 ## Recommended Approaches (Priority Order)
 
-### Priority 1: Stacking with Out-of-Fold Predictions (HIGHEST PRIORITY)
-**Rationale**: The stacking kernel achieved 0.808 LB (top 9%). This is a proven approach that could push us to 0.80+.
+### Priority 1: SUBMIT STACKING MODEL (exp_004)
+**Rationale**: We need LB feedback to validate whether stacking improves over voting ensemble. The experiment is complete and ready.
 
 **Action**:
-1. Use 5 base models: RF, ExtraTrees, AdaBoost, GradientBoostingClassifier, SVC
-2. Generate out-of-fold predictions using 5-fold Stratified CV (CRITICAL: avoid leakage)
-3. Stack predictions as features for XGBoost meta-learner
-4. Use 8 features (with Title) for base models
-5. XGBoost meta-learner: n_estimators=2000, max_depth=4, gamma=0.9, subsample=0.8
-6. **IMPORTANT**: Apply threshold tuning to final predictions to achieve ~31% survival rate
+1. Submit candidate_004.csv (stacking, threshold 0.615, 131 survivors, 31.3%)
+2. Expected LB: ~0.78-0.79 (similar to threshold-tuned ensemble)
+3. This tests: Does stacking improve over voting ensemble when both are calibrated to ~31% survival rate?
 
-**Implementation details from kernel**:
-```python
-# Base model parameters
-rf_params = {'n_estimators': 500, 'max_depth': 6, 'min_samples_leaf': 2}
-et_params = {'n_estimators': 500, 'max_depth': 8, 'min_samples_leaf': 2}
-ada_params = {'n_estimators': 500, 'learning_rate': 0.75}
-gb_params = {'n_estimators': 500, 'max_depth': 5, 'min_samples_leaf': 2}
-svc_params = {'kernel': 'linear', 'C': 0.025}
-
-# OOF prediction function
-def get_oof(clf, x_train, y_train, x_test, kfold):
-    oof_train = np.zeros((len(x_train),))
-    oof_test = np.zeros((len(x_test),))
-    oof_test_skf = np.empty((kfold.n_splits, len(x_test)))
-    
-    for i, (train_idx, val_idx) in enumerate(kfold.split(x_train, y_train)):
-        clf.fit(x_train[train_idx], y_train[train_idx])
-        oof_train[val_idx] = clf.predict(x_train[val_idx])
-        oof_test_skf[i, :] = clf.predict(x_test)
-    
-    oof_test[:] = oof_test_skf.mean(axis=0)
-    return oof_train.reshape(-1, 1), oof_test.reshape(-1, 1)
-
-# Stack OOF predictions
-x_train_stack = np.concatenate((et_oof_train, rf_oof_train, ada_oof_train, gb_oof_train, svc_oof_train), axis=1)
-x_test_stack = np.concatenate((et_oof_test, rf_oof_test, ada_oof_test, gb_oof_test, svc_oof_test), axis=1)
-
-# XGBoost meta-learner
-gbm = xgb.XGBClassifier(n_estimators=2000, max_depth=4, gamma=0.9, subsample=0.8, colsample_bytree=0.8)
-```
-
-**Expected outcome**: CV ~0.83-0.84, LB ~0.78-0.81
-
-### Priority 2: Threshold 0.55 Test (Best OOF Accuracy)
-**Rationale**: Evaluator noted threshold 0.55 gives best OOF accuracy (0.8418) with 144 survivors (34.4%). This is a middle ground worth testing.
+### Priority 2: If Stacking Improves (LB > 0.7847)
+**Rationale**: Stacking adds value - continue refining the approach.
 
 **Action**:
-1. Use same ensemble from exp_003
-2. Apply threshold 0.55 instead of 0.608
-3. This gives 144 survivors (34.4% survival rate) vs 130 (31.1%)
-4. Submit to test whether OOF accuracy or survival rate matching is more predictive
+1. Add more diverse base models (LogisticRegression, neural network)
+2. Try different meta-learners (LightGBM, CatBoost)
+3. Experiment with probability averaging instead of prediction stacking
 
-**Expected outcome**: LB could be better or worse than 0.7847 - this tests the hypothesis
+### Priority 3: If Stacking Doesn't Improve (LB ≤ 0.7847)
+**Rationale**: Stacking doesn't add value at this calibration. Try alternative approaches.
 
-### Priority 3: Blending RF + Threshold-Tuned Ensemble
-**Rationale**: Simple RF and Threshold-Tuned Ensemble agree on 96.4% of predictions but differ on 15. Blending might capture the best of both.
+**Option A: Threshold 0.5 Variant**
+- Submit stacking at threshold 0.5 (CV 0.8496, 133 survivors, 31.8%)
+- Tests whether higher CV matters more than exact survival rate matching
+- This is still close to the target survival rate
+
+**Option B: Feature Engineering**
+- Add FamilySize = SibSp + Parch + 1
+- Add IsAlone = 1 if FamilySize == 1
+- Add Has_Cabin = 1 if Cabin is not null
+- Add Ticket prefix extraction
+- Add Family survival rate (from training data)
+
+**Option C: Blending**
+- Blend Simple RF + Threshold-Tuned + Stacking predictions
+- Use weighted average of probabilities
+- Apply threshold to achieve ~31% survival rate
+
+### Priority 4: Analyze Differing Predictions
+**Rationale**: Understanding who the models disagree on can inform feature engineering.
 
 **Action**:
-1. Load predictions from exp_001 (Simple RF) and exp_003 (Threshold-Tuned)
-2. Average probabilities: (RF_prob + Thresh_prob) / 2
-3. Apply threshold to achieve ~31% survival rate
-4. Submit to test if blending helps
-
-### Priority 4: Feature Engineering + Stacking
-**Rationale**: Add FamilySize and Has_Cabin features to base models for stacking.
-
-**Action**:
-1. Add FamilySize = SibSp + Parch + 1
-2. Add IsAlone = 1 if FamilySize == 1
-3. Add Has_Cabin = 1 if Cabin is not null
-4. Use these features in stacking approach
+1. The 15 passengers where Stacking and Threshold-Tuned differ:
+   - Stacking=1, Threshold=0: 8 passengers (mostly young 3rd class females)
+   - Stacking=0, Threshold=1: 7 passengers (children/elderly)
+2. After LB feedback, analyze which predictions were correct
+3. Use this to inform feature engineering
 
 ## What NOT to Try
-- More complex models without stacking (will overfit)
-- Hyperparameter tuning without calibration (survival rate matters more)
-- Chasing CV score alone (CV 0.8373 → LB 0.7847, gap is real)
-- Features that increase CV-LB gap (Deck, Name_length)
+- More complex models without calibration (survival rate matters more than CV)
+- Hyperparameter tuning without LB feedback (need to validate approach first)
+- Features that increase CV-LB gap (Deck, Name_length showed overfitting)
+- Chasing CV score alone (CV 0.8496 might not translate to better LB)
 
 ## Validation Notes
 - Use 5-fold Stratified CV with random_state=42 (consistent)
 - **Trust survival rate pattern**: ~31% survival rate performs best on LB
 - Expected LB = CV - 0.05 (based on recent submissions)
-- Monitor survival rate: aim for ~31% (130 survivors)
+- Monitor survival rate: aim for ~31% (130-133 survivors)
 
 ## Target Reality Check
 - **Impossible target**: 1.0 (100% accuracy)
@@ -131,20 +110,21 @@ gbm = xgb.XGBClassifier(n_estimators=2000, max_depth=4, gamma=0.9, subsample=0.8
 - **Realistic goal**: 0.80-0.81 (80-81%)
 - **Gap to close**: 1.5-2.5% (6-10 passengers)
 
-## Experiment Plan for Loop 4
-1. **exp_004**: Stacking with 5 base models + XGBoost meta-learner + threshold tuning
-2. **exp_005**: Threshold 0.55 on current ensemble (test OOF accuracy hypothesis)
-3. **exp_006**: Blending RF + Threshold-Tuned Ensemble
+## Experiment Plan for Loop 5
+1. **SUBMIT exp_004** (Stacking, threshold 0.615) - Get LB feedback
+2. Based on LB feedback:
+   - If improved: Iterate on stacking (more base models, different meta-learner)
+   - If not improved: Try threshold 0.5 variant OR pivot to feature engineering
 
 ## Submission Strategy
 - 5 submissions remaining
-- Submit stacking model (exp_004) - highest potential
+- Submit stacking model (exp_004) - validate approach
 - If stacking works (LB > 0.7847), iterate on stacking variations
-- If stacking fails, try blending approaches
-- Save 2 submissions for final ensemble tuning
+- If stacking fails, try threshold 0.5 variant
+- Save 2-3 submissions for final ensemble tuning
 
 ## Critical Success Factors
-1. **Stacking done correctly**: OOF predictions must avoid leakage
-2. **Threshold calibration**: Apply to final predictions to achieve ~31% survival rate
-3. **Model diversity**: Use different model types (tree-based, linear, SVM)
-4. **Feature consistency**: Use same preprocessing across all base models
+1. **Get LB feedback**: Submit stacking to validate approach
+2. **Threshold calibration**: ~31% survival rate is key
+3. **Model diversity**: If stacking doesn't help, try different approaches
+4. **Feature engineering**: May be needed to break through plateau
