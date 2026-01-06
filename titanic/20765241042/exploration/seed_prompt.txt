@@ -5,13 +5,14 @@
 - `exploration/eda.ipynb` - Contains EDA: feature distributions, missing values, target distribution, survival patterns by Sex/Pclass/Title
 
 ## Problem Type
-Binary classification (Survived: 0 or 1). Evaluation metric: Accuracy. Target: 100% accuracy.
+Binary classification (Survived: 0 or 1). Evaluation metric: Accuracy. Target: 100% accuracy (extremely challenging - top public scores ~80-93%).
 
 ## Feature Engineering (Critical for High Accuracy)
 
-### Title Extraction from Name
+### Title Extraction from Name (MOST IMPORTANT)
 Extract title using regex: `Name.str.extract(' ([A-Za-z]+)\.')`
 - Group rare titles (count < 10) into 'Rare' category
+- Map similar titles: Mlle/Ms -> Miss, Mme -> Mrs
 - Key titles: Mr, Miss, Mrs, Master, Rare
 - 'Master' (young boys) has ~57.5% survival vs 'Mr' at ~15.7%
 - Female titles (Miss, Mrs) have ~70-80% survival
@@ -19,51 +20,76 @@ Extract title using regex: `Name.str.extract(' ([A-Za-z]+)\.')`
 ### Family Features
 - **FamilySize** = SibSp + Parch + 1
 - **IsAlone** = 1 if FamilySize == 1, else 0
-- Family size 2-4 tends to have better survival than alone or large families
+- **FamilySize categories**: Small (2-4) has best survival, Alone and Large (>4) have lower survival
+- Consider creating FamilySurvival feature based on ticket/surname groupings
 
 ### Binning Continuous Variables
 - **AgeBin**: Use pd.cut() with 5 bins for Age
 - **FareBin**: Use pd.qcut() with 4 quantile bins for Fare
 - Binning helps tree models and reduces noise
 
-### Cabin Features (Optional)
-- Cabin has ~77% missing values - consider dropping
-- Alternative: Extract deck letter (first character) if present
-- Create HasCabin binary feature
+### Cabin Features
+- Cabin has ~77% missing values
+- **Deck**: Extract first letter (A-G, T) - different decks had different survival rates
+- **HasCabin**: Binary indicator (1 if cabin known, 0 otherwise)
+- Deck B had highest survival (~74%), Deck U (unknown) lowest (~30%)
+
+### Advanced Age Imputation
+- Simple: Fill with median grouped by Pclass/Sex/Title
+- Advanced: Use XGBoost/RandomForest to predict missing Age values
+- Age is important - infants (Age < 5) had high survival
+
+### Ticket Features (Optional)
+- Extract ticket prefix (letters before numbers)
+- Count passengers sharing same ticket number
+- Shared tickets often indicate family groups
 
 ## Missing Value Handling
-- **Age**: Fill with median (grouped by Pclass/Sex for better imputation)
-- **Embarked**: Fill with mode ('S')
-- **Fare**: Fill with median
-- **Cabin**: Drop or create HasCabin indicator
+- **Age**: Use model-based imputation (XGBoost) or median by Pclass/Sex/Title
+- **Embarked**: Fill with mode ('S') or analyze based on Fare/Pclass
+- **Fare**: Fill with median by Pclass
+- **Cabin**: Create HasCabin indicator, extract Deck
 
 ## Features to Drop
 - PassengerId (no predictive value)
 - Name (after extracting Title)
-- Ticket (high cardinality, weak signal)
-- Cabin (too many missing values)
+- Ticket (after extracting features)
+- Cabin (after extracting Deck/HasCabin)
 
 ## Models
 
 ### Recommended Base Models for Stacking
-1. **Random Forest**: n_estimators=500, max_depth=6, min_samples_leaf=2
+1. **Random Forest**: n_estimators=500, max_depth=6, min_samples_leaf=2, max_features='sqrt'
 2. **Extra Trees**: n_estimators=500, max_depth=8, min_samples_leaf=2
 3. **Gradient Boosting**: n_estimators=500, max_depth=5, min_samples_leaf=2
 4. **AdaBoost**: n_estimators=500, learning_rate=0.75
-5. **SVC**: kernel='linear', C=0.025
+5. **SVC**: kernel='linear', C=0.025 (or RBF kernel with tuned C and gamma)
 
-### Meta-Learner
-- **XGBoost** as second-level model on out-of-fold predictions
-- Alternative: Logistic Regression as simple meta-learner
+### Meta-Learner Options
+- **XGBoost**: Best for complex patterns in stacked features
+- **Logistic Regression**: Simple, less prone to overfitting
+- **LightGBM**: Fast alternative to XGBoost
 
 ### Single Model Alternatives
-- **XGBoost/LightGBM/CatBoost**: Often competitive without stacking
-- Hyperparameter tuning via GridSearchCV or RandomizedSearchCV
+- **XGBoost**: Often achieves 80%+ with good feature engineering
+- **CatBoost**: Handles categorical features natively
+- **LightGBM**: Fast training, good for hyperparameter search
 
-## Stacking Ensemble Approach
+## Ensemble Strategies
+
+### Stacking (Two-Level)
 1. Use K-Fold (K=5) to generate out-of-fold predictions from base models
 2. Stack predictions as features for second-level model
 3. This prevents overfitting on training data
+
+### Soft Voting
+- Average predicted probabilities from multiple models
+- Works well when models have similar performance
+- Use weights based on CV scores
+
+### Blending
+- Hold out a portion of training data for meta-model training
+- Simpler than stacking but uses less data
 
 ## Encoding
 - **Label Encoding**: For ordinal features (Pclass, Title_Code, AgeBin_Code, FareBin_Code)
@@ -71,26 +97,47 @@ Extract title using regex: `Name.str.extract(' ([A-Za-z]+)\.')`
 - Tree models work well with label encoding; linear models prefer one-hot
 
 ## Validation Strategy
-- Use StratifiedKFold (k=5) to maintain class balance
+- Use StratifiedKFold (k=5 or k=10) to maintain class balance
 - Cross-validation score should be primary metric
 - Small dataset (891 samples) - be careful of overfitting
+- Consider repeated stratified K-fold for more stable estimates
+
+## Hyperparameter Tuning
+- **GridSearchCV**: Systematic search, good for small parameter spaces
+- **RandomizedSearchCV**: Faster for large parameter spaces
+- **Bayesian Optimization** (Optuna/hyperopt): Most efficient for complex models
+- Key parameters for trees: max_depth, n_estimators, min_samples_leaf, learning_rate
+
+## Feature Selection
+- Use RFECV (Recursive Feature Elimination with CV)
+- Check feature importance from Random Forest/XGBoost
+- Remove highly correlated features
+- SelectFromModel with tree-based estimators
 
 ## Key Survival Patterns (Domain Knowledge)
 - "Women and children first" - Sex is the strongest predictor
-- Higher class = higher survival (Pclass 1 > 2 > 3)
-- Embarked at Cherbourg (C) had higher survival
+- Higher class = higher survival (Pclass 1: 63%, Pclass 3: 24%)
+- Female survival: 74.2%, Male survival: 18.9%
+- Embarked at Cherbourg (C) had higher survival (55%)
 - Young children (Age < 5) had high survival
 - Passengers traveling alone had lower survival
-
-## Hyperparameter Tuning
-- Use GridSearchCV with cv=5 for systematic search
-- Key parameters for trees: max_depth, n_estimators, min_samples_leaf
-- Use RFECV (Recursive Feature Elimination with CV) for feature selection
+- Family size 2-4 optimal for survival
 
 ## Tips for Maximizing Accuracy
-1. Feature engineering is more important than model selection for this dataset
+1. Feature engineering is MORE important than model selection for this dataset
 2. Title extraction is crucial - captures age/gender/social status
 3. Family features capture group dynamics
-4. Ensemble multiple diverse models
-5. Careful handling of Age missing values (use Pclass/Sex grouping)
+4. Ensemble multiple diverse models (different algorithms, not just different seeds)
+5. Careful handling of Age missing values (use Pclass/Sex/Title grouping or model-based)
 6. Consider interaction features (Sex_Pclass, Title_Pclass)
+7. Don't over-engineer - too many features can cause overfitting on small dataset
+8. Use cross-validation religiously - don't trust single train/test split
+9. Try both simple (Logistic Regression) and complex (XGBoost) models
+10. Analyze misclassified samples to find patterns
+
+## Common Pitfalls to Avoid
+- Overfitting on small dataset (891 samples)
+- Data leakage from test set during preprocessing
+- Not handling missing values consistently between train and test
+- Using features that won't be available at prediction time
+- Ignoring domain knowledge about the Titanic disaster
