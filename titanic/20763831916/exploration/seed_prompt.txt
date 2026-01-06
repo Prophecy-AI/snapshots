@@ -1,203 +1,101 @@
-# Titanic Survival Prediction - Techniques Guide
+# Titanic Survival Prediction - Loop 2 Strategy
+
+## Current Status
+- Best CV score: 0.8316 from exp_000 (Baseline XGBoost)
+- Best LB score: 0.7584 (exp_000)
+- CV-LB gap: +0.0732 (7.3%) → **SEVERE OVERFITTING**
+- Submissions used: 1/10 (7 remaining)
+
+## Response to Evaluator
+- Technical verdict was **TRUSTWORTHY** - execution is sound, but results show overfitting
+- Evaluator's top priority: "Submit baseline then implement ensemble" - We submitted and got 0.7584 LB, which is BELOW the gender-only baseline (~76-77%)
+- Key concerns raised: 
+  1. Target of 1.0 is impossible (agree - state-of-the-art is 81-85%)
+  2. Single model approach (agree - ensembles are more robust)
+  3. CV-LB gap (now confirmed at 7.3% - this is the critical issue)
+- **My synthesis**: The 7.3% CV-LB gap is the #1 problem. Before trying ensembles, we need to fix the overfitting issue. A complex ensemble of overfitting models will still overfit.
+
+## Critical Issue: Severe Overfitting
+The LB score of 0.7584 is:
+- Below the gender-only baseline (~76-77%)
+- Below even the worst CV fold (0.7921)
+- 7.3% lower than CV score
+
+**Root causes identified:**
+1. Too many features (13) - some may be noise
+2. XGBoost may be memorizing training patterns
+3. Age imputation on combined train+test (minor leakage)
+4. Distribution shift: Embarked C is 24.4% in test vs 18.9% in train
 
 ## Data Understanding
-**Reference notebooks for data characteristics:**
-- `exploration/eda.ipynb` - Contains EDA: feature distributions, missing values, target distribution, survival patterns by feature
+Reference notebooks:
+- `exploration/eda.ipynb` - Feature distributions, survival patterns
+- `exploration/evolver_loop1_lb_feedback.ipynb` - CV-LB gap analysis
+- `research/kernels/alexisbcook_titanic-tutorial/` - Simple baseline with 4 features
 
-## Problem Overview
-- Binary classification: Predict survival (0/1)
-- Evaluation metric: Accuracy
-- Small dataset: 891 training samples, 418 test samples
-- Target is slightly imbalanced: 38.4% survived, 61.6% did not survive
-- **Realistic target: 80-85% accuracy is state-of-the-art** (top solutions achieve ~81-85%)
-- 100% accuracy is not achievable due to inherent noise in the data
+Key patterns (from EDA):
+- Sex is dominant: Female 74.2% survival vs Male 18.9%
+- Pclass matters: 1st class 63%, 3rd class 24%
+- Title captures both sex and status
+- FamilySize has non-linear relationship (medium families best)
 
-## Feature Engineering (Critical for this problem)
+## Recommended Approaches (Priority Order)
 
-### Title Extraction from Name (MOST IMPORTANT)
-Extract titles from passenger names using regex pattern ` ([A-Za-z]+)\.`:
-- Common titles: Mr, Mrs, Miss, Master
-- Group rare titles (Lady, Countess, Capt, Col, Don, Dr, Major, Rev, Sir, Jonkheer, Dona) into "Rare"
-- Map Mlle/Ms → Miss, Mme → Mrs
-- Title is highly predictive of survival (Master = young boys, Miss/Mrs = females)
+### Priority 1: Simpler Model with Fewer Features
+**Rationale**: The official Titanic tutorial uses just 4 features (Pclass, Sex, SibSp, Parch) with Random Forest and achieves reasonable LB scores. Our 13-feature XGBoost is overfitting.
 
-### Family Features
-- **FamilySize** = SibSp + Parch + 1 (total family members including self)
-- **IsAlone** = 1 if FamilySize == 1, else 0
-- Medium family sizes (2-4) have higher survival rates than solo travelers or large families
-- Consider FamilySize bins: 1 (alone), 2-4 (small), 5+ (large)
+**Action**:
+- Use only core features: Sex, Pclass, SibSp, Parch, Fare, Embarked
+- Try Random Forest with max_depth=5, n_estimators=100
+- Compare CV and expected LB performance
 
-### Cabin Features
-- **Has_Cabin** = 1 if Cabin is not null, else 0 (proxy for wealth/class)
-- **Deck** = First character of Cabin (A, B, C, D, E, F, G, T) - fill missing with 'U' (unknown)
-- Deck B, D, E have higher survival rates (~74-75%)
-- Deck U (unknown) has lowest survival rate (~30%)
+### Priority 2: Voting Ensemble with Simple Models
+**Rationale**: Ensembles of diverse simple models are more robust than a single complex model.
 
-### Name Length
-- Name_length = len(Name) - can be weakly predictive
+**Action**:
+- Combine: LogisticRegression, RandomForest, GradientBoosting, SVC
+- Use soft voting (probability averaging)
+- Keep features simple (6-8 features max)
 
-### Age and Fare Binning
-- Bin Age into categories: 0-16, 16-32, 32-48, 48-64, 64+
-- Bin Fare into quartiles or categories: 0-7.91, 7.91-14.45, 14.45-31, 31+
-- Binning helps tree models and reduces noise
+### Priority 3: Regularization and Hyperparameter Tuning
+**Rationale**: If using XGBoost, increase regularization to prevent overfitting.
 
-### Ticket Features (Advanced)
-- Extract ticket prefix (letters before numbers)
-- Ticket frequency (how many passengers share same ticket)
+**Action**:
+- Reduce max_depth to 3
+- Increase reg_alpha and reg_lambda (L1/L2 regularization)
+- Reduce n_estimators
+- Use early stopping
 
-## Missing Value Handling
+### Priority 4: Feature Engineering Refinement
+**Rationale**: Some features may be adding noise rather than signal.
 
-### Age (20% missing) - Critical
-**Option 1:** Fill with median grouped by Pclass, Sex, and Title
-**Option 2:** Use random values within (mean - std, mean + std)
-**Option 3 (Best):** Use XGBoost/RandomForest to predict Age from other features
+**Action**:
+- Keep: Sex, Pclass, Title, FamilySize
+- Test: Has_Cabin, Deck (may be noisy due to 77% missing)
+- Remove: Name_length (weak signal)
+- Impute Age on train only, not combined data
 
-### Cabin (77% missing)
-- Create Has_Cabin binary feature
-- Extract Deck letter, fill missing with 'U'
-- Don't try to impute cabin numbers - too much missing
+## What NOT to Try
+- More complex models (will overfit more)
+- More features without validation
+- Hyperparameter tuning before fixing overfitting
+- Stacking (premature - need robust base models first)
 
-### Embarked (2 missing in train)
-- Fill with mode ('S' - Southampton)
-- Or analyze: if Pclass=1 and Fare=80, likely 'C' (Cherbourg)
+## Validation Notes
+- Use 5-fold Stratified CV (current approach is sound)
+- **Trust CV trend, but calibrate for LB gap**
+- Expected LB = CV - 0.07 (based on current gap)
+- A model with CV 0.80 might achieve LB 0.73-0.77
 
-### Fare (1 missing in test)
-- Fill with median grouped by Pclass and Embarked
+## Target Recalibration
+- **Impossible target**: 1.0 (100% accuracy)
+- **State-of-the-art**: 81-85% LB
+- **Realistic goal**: 78-80% LB (would be a significant improvement)
+- **Immediate goal**: Beat 76% LB (gender baseline)
 
-## Feature Selection
-**Drop these columns after feature engineering:**
-- PassengerId (identifier only)
-- Name (after extracting Title and Name_length)
-- Ticket (after extracting features)
-- Cabin (after creating Has_Cabin and Deck)
+## Experiment Plan for Loop 2
+1. **exp_001**: Simple Random Forest with 4-6 features (match official tutorial)
+2. **exp_002**: Voting ensemble with simple models
+3. **exp_003**: Regularized XGBoost with fewer features
 
-**Keep/create these features:**
-- Sex_Code (0=female, 1=male)
-- Pclass
-- Embarked_Code
-- Title_Code
-- FamilySize
-- IsAlone
-- AgeBin_Code or Age (continuous)
-- FareBin_Code or Fare (continuous)
-- Has_Cabin
-- Deck_Code
-- Name_length (optional)
-
-## Models
-
-### Recommended Models (in order of typical performance)
-1. **XGBoost** - Usually best single model, handles missing values
-2. **LightGBM** - Fast, good performance
-3. **Random Forest** - Robust, handles feature interactions well
-4. **Gradient Boosting** - Strong performer
-5. **Extra Trees** - Similar to RF, more randomness
-6. **Logistic Regression** - Good baseline, interpretable
-7. **SVM with RBF kernel** - Can work well with proper scaling
-
-### Ensemble Approaches (HIGHLY RECOMMENDED - Key to Top Scores)
-
-**Voting Classifier:**
-- Combine 5-10 diverse models
-- Hard voting (majority) or soft voting (probability averaging)
-- Include: RF, ExtraTrees, GradientBoosting, AdaBoost, LogisticRegression, SVC, XGBoost
-- Soft voting often performs better
-
-**Stacking (Best approach for this competition):**
-- Level 1: Use 5 base models (RF, ExtraTrees, AdaBoost, GradientBoosting, SVC)
-- Generate out-of-fold predictions using 5-fold CV to avoid data leakage
-- Level 2: Train XGBoost or LogisticRegression on the stacked predictions
-- This approach achieved 0.808 LB score (top 9%)
-
-**Blending:**
-- Average predictions from multiple models
-- Weight models by their CV performance
-
-## Hyperparameter Tuning
-
-### XGBoost (Primary Model)
-```
-n_estimators: 100-500
-max_depth: 3-6
-learning_rate: 0.01-0.1
-subsample: 0.8
-colsample_bytree: 0.8
-reg_alpha: 0-1
-reg_lambda: 0-1
-scale_pos_weight: 1 or class_weight
-```
-
-### Random Forest / Extra Trees
-```
-n_estimators: 100-500
-max_depth: 4-10
-min_samples_leaf: 2-5
-max_features: 'sqrt' or 0.3-0.5
-```
-
-### Gradient Boosting
-```
-n_estimators: 100-500
-max_depth: 3-6
-learning_rate: 0.01-0.1
-min_samples_leaf: 2-5
-subsample: 0.8
-```
-
-### SVC
-```
-kernel: 'rbf' or 'linear'
-C: 0.1-10
-gamma: 'scale' or 'auto'
-probability: True (for soft voting)
-```
-
-### Tuning Methods
-- GridSearchCV for exhaustive search
-- RandomizedSearchCV for faster exploration
-- Bayesian optimization (Optuna) for efficient tuning
-
-## Validation Strategy
-- Use Stratified K-Fold CV (k=5 or k=10) to maintain class distribution
-- ShuffleSplit with 60/30 train/test split (leaving 10% out) also works
-- Cross-validation score is more reliable than single train/test split
-- **Important:** CV score ~83-84% typically translates to ~80-81% LB score
-
-## Key Insights from Top Kernels
-1. **Sex is the most important feature** (females 74% survival vs males 19%)
-2. **Pclass strongly correlates with survival** (1st class 63%, 3rd class 24%)
-3. **Title extraction captures both sex and social status** - very powerful feature
-4. **Family size has non-linear relationship** with survival (medium families best)
-5. **Feature engineering is MORE important than model selection** for this dataset
-6. **Ensemble methods consistently outperform single models**
-7. **Hyperparameter tuning with grid search** provides incremental improvements
-
-## Advanced Techniques
-
-### Transformer-based Approach (Experimental)
-- Render each row as a string (concatenate all features)
-- Use pre-trained DistilBERT to extract 768-dim feature vector
-- Train XGBoost on transformer features
-- Achieved 80.1% (top 3%) with minimal feature engineering
-
-### Feature Interactions
-- Create interaction features: Sex * Pclass, Age * Pclass
-- Polynomial features for continuous variables
-
-### Target Encoding (Use with Caution)
-- Encode categorical features with target mean
-- Use K-fold target encoding to avoid leakage
-
-## Submission Tips
-- Always check submission format: PassengerId, Survived (0 or 1)
-- Ensure predictions are integers (0 or 1), not floats
-- Verify 418 rows in submission
-- Try multiple random seeds and average predictions
-- Submit best CV model, not necessarily best single-fold model
-
-## Expected Performance
-- Baseline (gender only): ~76-77%
-- Good feature engineering: ~79-80%
-- Tuned single model: ~80-82%
-- Ensemble methods: ~81-85%
-- State-of-the-art: ~84-85%
+Focus on reducing the CV-LB gap before optimizing CV score.
