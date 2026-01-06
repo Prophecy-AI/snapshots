@@ -8,33 +8,35 @@
 ## Response to Evaluator
 - **Technical verdict**: TRUSTWORTHY. exp_011 implementation is sound.
 - **Evaluator's top priority**: "Submit exp_011 and try GroupKFold next."
-- **I FULLY AGREE** with submitting exp_011:
+- **I AGREE** with submitting exp_011:
   1. exp_011 CV (0.82032) is the BEST achieved - exceeds exp_003's 0.81951
   2. Regularization IMPROVED CV (contrary to overfitting hypothesis) - suggests underfitting
   3. We have 6 submissions remaining - can afford to test
   4. Need LB feedback to calibrate CV-LB relationship with regularization
 
+- **Statistical Analysis** (from evolver_loop11_analysis.ipynb):
+  - CV improvement (0.00081) is NOT statistically significant (t=0.150)
+  - Predicted LB is 0.80422 - slightly BELOW best LB (0.80453)
+  - To beat best LB, need CV > 0.82089 - exp_011 is 0.00057 below threshold
+  - BUT: Regularization improved CV, so it might help generalization more than predicted
+
 - **On GroupKFold**: Worth trying as next experiment because:
   - High fold variance (4.4% range) suggests sensitivity to data splits
   - Passengers in same group may have correlated outcomes
   - Could give more realistic CV estimates
-
-- **Key concerns raised by evaluator**:
-  1. High fold variance (0.01408 std) - VALID, but 10-fold naturally has higher variance
-  2. Target (0.9642) is impossible - AGREED, recalibrating to beat 0.8045 LB
-  3. GroupKFold may help - WORTH TRYING as next experiment
+  - CAVEAT: 77.3% are solo travelers - may not dramatically change results
 
 ## Data Understanding
 - Reference notebooks:
   - `exploration/eda.ipynb` for initial EDA
-  - `exploration/evolver_loop11_analysis.ipynb` for group structure analysis
+  - `exploration/evolver_loop11_analysis.ipynb` for CV-LB analysis
 - Key patterns:
   - CryoSleep is the strongest predictor (81.8% transported when True)
   - Spending patterns strongly predict transport
   - **77.3% of groups are solo travelers** (size 1)
   - **56.4% of multi-person groups have mixed outcomes** (not perfectly correlated)
-  - **CV-LB model**: LB = 0.541 * CV + 0.360 (R²=0.916)
-  - **To beat 0.8045 LB, need CV > 0.82106**
+  - **CV-LB model**: LB = 0.547 * CV + 0.355 (R²=0.92)
+  - **To beat 0.8045 LB, need CV > 0.82089**
 
 ## Recommended Approaches (Priority Order)
 
@@ -65,7 +67,7 @@ for fold, (train_idx, val_idx) in enumerate(gkf.split(X, y, groups)):
 
 ### 2. KNN IMPUTATION (HIGH PRIORITY)
 **Rationale**:
-- Mentioned in top solutions (0.8066 LB) - see `research/kernels/arunklenin_space-titanic-eda-advanced-feature-engineering/`
+- Mentioned in top solutions (0.8066 LB)
 - Our current imputation is simple (mode/median)
 - KNN imputation captures relationships between features
 - Different data preprocessing approach (not model changes)
@@ -85,24 +87,22 @@ imputer = KNNImputer(n_neighbors=5, weights='distance')
 df_imputed = pd.DataFrame(imputer.fit_transform(df), columns=df.columns)
 ```
 
-### 3. PSEUDO-LABELING (MEDIUM PRIORITY)
+### 3. ENSEMBLE exp_003 + exp_011 (MEDIUM PRIORITY)
 **Rationale**:
-- Evaluator mentioned this as an alternative approach
-- Use confident test predictions to augment training data
-- Could help with distribution shift between train/test
+- Combine less regularized (exp_003: depth=8, l2_leaf_reg=3.52) with more regularized (exp_011: depth=6, l2_leaf_reg=7.0)
+- Different regularization levels may capture different patterns
+- Could provide diversity for ensembling
 
 **Implementation**:
 ```python
-# Get predictions on test set
-test_probs = model.predict_proba(X_test)[:, 1]
+# Model 1: exp_003 params (less regularized)
+model1_params = {'depth': 8, 'l2_leaf_reg': 3.52, 'learning_rate': 0.051, 'iterations': 755}
 
-# Select confident predictions (>0.9 or <0.1)
-confident_mask = (test_probs > 0.9) | (test_probs < 0.1)
-pseudo_labels = (test_probs[confident_mask] > 0.5).astype(int)
+# Model 2: exp_011 params (more regularized)
+model2_params = {'depth': 6, 'l2_leaf_reg': 7.0, 'subsample': 0.8, 'colsample_bylevel': 0.8}
 
-# Add to training data
-X_augmented = np.vstack([X_train, X_test[confident_mask]])
-y_augmented = np.concatenate([y_train, pseudo_labels])
+# Average predictions
+final_preds = 0.5 * model1_preds + 0.5 * model2_preds
 ```
 
 ### 4. NAME-BASED FEATURES (MEDIUM PRIORITY)
@@ -121,22 +121,23 @@ surname_counts = train['Surname'].value_counts().to_dict()
 train['FamilySize'] = train['Surname'].map(surname_counts)
 ```
 
-### 5. ENSEMBLE OF REGULARIZED + NON-REGULARIZED MODELS (MEDIUM PRIORITY)
+### 5. PSEUDO-LABELING (LOW PRIORITY)
 **Rationale**:
-- Combine exp_003 params (depth=8, less regularization) with exp_011 params (depth=6, more regularization)
-- Different regularization levels may capture different patterns
-- Could provide diversity for ensembling
+- Use confident test predictions to augment training data
+- Could help with distribution shift between train/test
 
 **Implementation**:
 ```python
-# Model 1: exp_003 params (less regularized)
-model1_params = {'depth': 8, 'l2_leaf_reg': 3.52, 'learning_rate': 0.051, 'iterations': 755}
+# Get predictions on test set
+test_probs = model.predict_proba(X_test)[:, 1]
 
-# Model 2: exp_011 params (more regularized)
-model2_params = {'depth': 6, 'l2_leaf_reg': 7.0, 'subsample': 0.8, 'colsample_bylevel': 0.8}
+# Select confident predictions (>0.9 or <0.1)
+confident_mask = (test_probs > 0.9) | (test_probs < 0.1)
+pseudo_labels = (test_probs[confident_mask] > 0.5).astype(int)
 
-# Average predictions
-final_preds = 0.5 * model1_preds + 0.5 * model2_preds
+# Add to training data
+X_augmented = np.vstack([X_train, X_test[confident_mask]])
+y_augmented = np.concatenate([y_train, pseudo_labels])
 ```
 
 ## What NOT to Try (Exhausted Approaches)
@@ -161,8 +162,8 @@ final_preds = 0.5 * model1_preds + 0.5 * model2_preds
 1. **Regularization IMPROVED CV** (0.82032 vs 0.81951) - we were underfitting, not overfitting
 2. **10-fold CV gives higher mean** but also higher variance
 3. **Fold range is 4.4%** (0.79862 - 0.84253) - suggests sensitivity to data splits
-4. **CV improvement is NOT statistically significant** (0.00081 is only 0.06x the fold std)
-5. **Predicted LB is ~0.8042** - slightly below best 0.8045
+4. **CV improvement is NOT statistically significant** (t=0.150)
+5. **Predicted LB is 0.80422** - slightly below best 0.8045
 
 ## Awaiting LB Feedback from exp_011 Submission
 We are submitting exp_011 to test if regularization helps with generalization.
@@ -172,7 +173,7 @@ We are submitting exp_011 to test if regularization helps with generalization.
 - Continue with regularization approach
 - Try even stronger regularization (depth=5, l2_leaf_reg=10.0)
 
-**If LB stays same (~0.8042-0.8045)**:
+**If LB stays same (~0.8040-0.8045)**:
 - Regularization is neutral
 - Try GroupKFold to reduce variance
 - Try KNN imputation (different data preprocessing)
