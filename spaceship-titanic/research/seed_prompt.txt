@@ -1,155 +1,106 @@
-# Seed Prompt: Spaceship Titanic - Loop 6 Strategy
+# Seed Prompt: Spaceship Titanic - Loop 7
 
 ## Current Status
-- Best CV score: **0.81951** from tuned CatBoost (exp_003)
-- Best LB score: **0.80453** from tuned CatBoost (exp_003)
-- Latest submission: exp_004 (threshold 0.47) → **LB 0.80406** (WORSE than exp_003!)
-- CV-LB gap: **+0.0152** (1.86% overestimate) → Gap is INCREASING
-- Target: 0.9642 is **IMPOSSIBLE** - top LB is ~0.8066
+- Best CV score: 0.81951 from exp_003 (CatBoost with Optuna tuning)
+- Best LB score: 0.80453 from exp_003
+- CV-LB gap: +1.50% (increasing trend: 0.97% → 1.50% → 1.52%)
+- Target: 0.9642 is IMPOSSIBLE - top LB is ~0.8066. Focus on incremental improvement.
 
 ## Response to Evaluator
-
-**Technical verdict was TRUSTWORTHY with CONCERNS.** I agree with the assessment.
-
-**Evaluator's top priority: Submit current model to validate, then focus on reducing overfitting.**
-- **DONE.** We submitted exp_004 and got LB 0.80406 - WORSE than exp_003's 0.80453!
-- **CONFIRMED:** Threshold tuning HURTS LB performance. The distribution shift (50.4% → 53.8%) doesn't generalize.
-
-**Key concerns raised and outcomes:**
-1. **Threshold 0.47 shifts distribution** → CONFIRMED HARMFUL. LB dropped from 0.8045 to 0.8041.
-2. **CV-LB gap increasing** → CONFIRMED. Gap went from 1.20% → 1.83% → 1.86%.
-3. **Native categorical didn't help** → CONFIRMED. Label encoding works fine.
-4. **CV score instability** → EXPLAINED. CV varies by ~0.14% across seeds - normal variance.
-
-**Strategic synthesis:**
-- Threshold tuning is a dead end - it overfits to CV
-- We need approaches that REDUCE the CV-LB gap, not maximize CV
-- Focus on: stacking, feature selection, regularization, multi-seed averaging
+- **Technical verdict**: TRUSTWORTHY - stacking implementation was correct
+- **Evaluator's top priority**: DO NOT submit exp_005, try weighted ensemble instead
+- **Key concerns raised**: 
+  1. Stacking CV (0.81744) < CatBoost alone (0.81617-0.81951)
+  2. Predicted rate 52.8% is too high (exp_003 had 51.7% with best LB)
+  3. CV-LB gap is increasing - we're overfitting more with each experiment
+- **My response**: AGREE with all concerns. Analysis confirms exp_005 would score ~0.8022-0.8041 on LB, worse than exp_003. Will NOT submit exp_005. Will try evaluator's recommended approaches.
 
 ## Data Understanding
-Reference notebooks:
-- `exploration/eda.ipynb` - Full EDA with feature distributions
-- `exploration/evolver_loop5_lb_feedback.ipynb` - LB feedback analysis showing threshold tuning hurts
+- Reference notebooks: `exploration/eda.ipynb`, `exploration/evolver_loop5_analysis.ipynb`
+- Key patterns:
+  - CryoSleep is strongest predictor (81.8% transported when True)
+  - Spending features highly skewed - log transforms help
+  - Group-based features important (GroupSize, Solo)
+  - 22 features have importance < 1.0 (candidates for removal)
+  - Top features: Deck_enc (10.7), CabinNum (10.1), HomePlanet_enc (7.1)
 
-Key findings:
-1. **Threshold tuning HURTS LB** - exp_004 LB=0.80406 vs exp_003 LB=0.80453
-2. **CV-LB gap is 1.86% and increasing** - we're overfitting to CV
-3. **22 features have importance < 1.0** - candidates for removal
-4. **Top kernel uses 10-fold CV + LGBM+CatBoost ensemble with soft voting**
+## Critical Insight: Prediction Rate Matters
+| Experiment | Pred Rate | LB Score |
+|------------|-----------|----------|
+| exp_003    | 51.7%     | 0.80453 (BEST) |
+| exp_004    | 53.8%     | 0.80406 |
+| exp_005    | 52.8%     | ~0.8022-0.8041 (predicted) |
+| Training   | 50.4%     | - |
+
+**Pattern**: Predictions closer to training rate (50.4%) perform better on LB. exp_003 is closest and has best LB.
 
 ## Recommended Approaches (Priority Order)
 
-### 1. STACKING WITH LOGISTIC REGRESSION META-LEARNER (Highest Priority)
-**Rationale:** Top kernels use ensemble of LGBM + CatBoost with soft voting. Stacking with a simple meta-learner can reduce overfitting while combining model diversity.
-**Implementation:**
+### 1. Weighted Ensemble Favoring CatBoost (HIGH PRIORITY)
+Instead of stacking with meta-learner, use weighted averaging:
 ```python
-from sklearn.linear_model import LogisticRegression
-from xgboost import XGBClassifier
-from lightgbm import LGBMClassifier
-from catboost import CatBoostClassifier
-
-# Train base models with 5-fold CV, collect OOF predictions
-# Use DIFFERENT hyperparameters for diversity:
-# - CatBoost: depth=8, lr=0.051, l2=3.52 (our best)
-# - LightGBM: num_leaves=31, lr=0.05, feature_fraction=0.8
-# - XGBoost: max_depth=5, lr=0.067
-
-# Stack OOF predictions
-stack_features = np.column_stack([oof_xgb, oof_lgb, oof_cat])
-stack_test = np.column_stack([test_xgb, test_lgb, test_cat])
-
-# Simple logistic regression meta-learner (low complexity = less overfitting)
-meta_model = LogisticRegression(C=1.0, solver='lbfgs')
-meta_model.fit(stack_features, y)
-final_pred = meta_model.predict_proba(stack_test)[:, 1]
+# Weight by CV performance - CatBoost dominates
+weights = [0.2, 0.2, 0.6]  # XGB, LGB, CatBoost
+final_prob = 0.2*test_xgb + 0.2*test_lgb + 0.6*test_cat
+final_pred = (final_prob >= 0.5).astype(bool)
 ```
-**Expected gain:** Better LB generalization through model diversity and simple meta-learner
+**Why**: CatBoost is clearly the best single model. Weighted ensemble preserves diversity while leveraging CatBoost's strength. Should produce prediction rate closer to exp_003.
 
-### 2. FEATURE SELECTION (High Priority)
-**Rationale:** 22 features have importance < 1.0. Removing them may reduce overfitting and close CV-LB gap.
-**Implementation:**
+### 2. Feature Selection + CatBoost (MEDIUM PRIORITY)
+Remove bottom 20% features by importance:
 ```python
-# From evolver_loop5_analysis.ipynb, bottom features:
-# ShoppingMall_spent (0.02), VIP_enc (0.03), IsSenior (0.04), IsChild (0.05)
-# RoomService_spent, FoodCourt_spent, Spa_spent, VRDeck_spent, etc.
-
-# Keep only features with importance >= 1.0
-# This reduces from 56 to ~34 features
+# Features with importance < 1.0 (22 features)
+# Bottom features: ShoppingMall_spent (0.02), VIP_enc (0.03), IsSenior (0.04)
 important_features = [f for f in features if importance[f] >= 1.0]
+# This reduces from 56 to ~34 features
 ```
-**Expected gain:** 0.1-0.2% on LB through reduced overfitting
+**Why**: Fewer features = less overfitting. The 22 low-importance features add noise without signal.
 
-### 3. STRONGER REGULARIZATION (Medium Priority)
-**Rationale:** Higher l2_leaf_reg reduces overfitting. Research suggests max_depth ≤ 6 for small datasets.
-**Implementation:**
+### 3. Regularized CatBoost (MEDIUM PRIORITY)
+Increase regularization to reduce CV-LB gap:
 ```python
 cat_params = {
-    'depth': 6,  # Reduced from 8
-    'learning_rate': 0.03,  # Lower learning rate
-    'iterations': 1000,  # More iterations with lower LR
-    'l2_leaf_reg': 5.0,  # Increased from 3.52
-    'subsample': 0.8,  # Add randomness
-    'colsample_bylevel': 0.8,  # Add randomness
-    'random_seed': 42,
-    'verbose': False
+    'depth': 6,           # Reduced from 8
+    'l2_leaf_reg': 5.0,   # Increased from 3.52
+    'subsample': 0.8,     # Add randomness
+    'learning_rate': 0.05,
+    'iterations': 800,
 }
 ```
-**Expected gain:** Smaller CV-LB gap, potentially better LB
+**Why**: Previous analysis showed l2=5.0 gives CV=0.81491 with lower variance (std=0.00464). More regularization = better generalization.
 
-### 4. MULTI-SEED AVERAGING (Medium Priority)
-**Rationale:** CV varies by 0.14% across seeds. Averaging predictions from multiple seeds is more robust.
-**Implementation:**
+### 4. Prediction Rate Calibration (LOW PRIORITY)
+If prediction rate is still too high, calibrate:
 ```python
-seeds = [42, 123, 456, 789, 1000]
-test_preds_all = []
-
-for seed in seeds:
-    model = CatBoostClassifier(**params, random_seed=seed)
-    # Train with 5-fold CV
-    test_preds_all.append(test_pred)
-
-# Average predictions
-final_pred = np.mean(test_preds_all, axis=0)
+# Adjust threshold to match training rate
+# If pred_rate > 0.517, use threshold > 0.5
+# Target: pred_rate ≈ 51.7% (exp_003's rate)
 ```
-**Expected gain:** More stable predictions, potentially better LB
-
-### 5. 10-FOLD CV (Lower Priority)
-**Rationale:** Top kernel uses 10-fold CV. More folds = more stable CV estimate.
-**Implementation:**
-```python
-skf = StratifiedKFold(n_splits=10, shuffle=True, random_state=42)
-```
-**Expected gain:** More stable CV estimate, better calibration
+**Why**: exp_003's 51.7% rate gave best LB. But be careful - threshold tuning hurt exp_004.
 
 ## What NOT to Try
-- **Threshold tuning** - PROVEN to hurt LB (exp_004 LB=0.8041 < exp_003 LB=0.8045)
-- **Native categorical handling** - Already proven not to help (exp_004)
-- **Simple averaging ensemble** - Already proven worse than CatBoost alone (exp_002)
-- **More hyperparameter tuning** - Diminishing returns, causes overfitting
-- **Chasing target of 0.9642** - IMPOSSIBLE, top LB is ~0.8066
+- **Threshold tuning on OOF**: Already proven to hurt LB (exp_004)
+- **Simple averaging ensemble**: Already tried, CV=0.81364 (worse than CatBoost alone)
+- **Stacking with LR meta-learner**: Already tried, CV=0.81744 (worse than CatBoost)
+- **Native categorical handling**: Already tried, didn't outperform label encoding
 
 ## Validation Notes
 - Use 5-fold StratifiedKFold with random_state=42 for consistency
-- CV-LB gap is now ~1.86% (CV overestimates LB)
-- To beat top LB of 0.8066, need CV of ~0.82+ using conservative gap
-- **ALWAYS use threshold 0.5** - threshold tuning overfits
-
-## Experiment Tracking
-| Exp | Model | CV | LB | Gap | Notes |
-|-----|-------|-----|-----|-----|-------|
-| exp_000 | XGBoost Baseline | 0.80674 | 0.79705 | +0.97% | First submission |
-| exp_001 | XGBoost + Features | 0.80927 | - | - | +0.25% from features |
-| exp_002 | 3-Model Ensemble | 0.81353 | - | - | Worse than CatBoost alone |
-| exp_003 | Tuned CatBoost | 0.81951 | 0.80453 | +1.50% | **BEST LB** |
-| exp_004 | Threshold 0.47 | 0.81928 | 0.80406 | +1.52% | Threshold hurts LB! |
-
-## Success Criteria
-- **Immediate goal:** Beat LB 0.80453 (current best from exp_003)
-- **Stretch goal:** Beat LB 0.8066 (top solutions)
-- **Reality check:** We're already in top ~5% territory
+- CV-LB gap is ~1.5% - expect LB to be 0.015 lower than CV
+- **CRITICAL**: Check prediction rate before submitting. Target ≤ 51.7%
+- Only submit if:
+  1. CV improves over 0.81951 (exp_003)
+  2. OR prediction rate is closer to training (50.4%)
+  3. AND approach is fundamentally different (for diversity check)
 
 ## Submission Strategy
 - 7 submissions remaining
-- Next: Try stacking with logistic regression meta-learner
-- If stacking helps: Submit and continue refining
-- If stacking doesn't help: Try feature selection + regularization
+- Best LB: 0.80453 (exp_003)
+- DO NOT submit exp_005 (predicted to underperform)
+- Submit only when we have a clear improvement signal
+
+## Success Criteria
+Since target 0.9642 is impossible (top LB ~0.8066):
+- Realistic goal: Beat 0.80453 (our best LB)
+- Stretch goal: Reach 0.8066 (top LB)
+- Any improvement over 0.80453 is a win
