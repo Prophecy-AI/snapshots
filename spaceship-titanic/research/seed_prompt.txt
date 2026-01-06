@@ -1,27 +1,37 @@
 ## Current Status
 - Best CV score: 0.81951 from exp_003 (CatBoost Optuna-tuned)
 - Best LB score: 0.8045 from exp_003
-- Latest exp_006: CV 0.8171, LB 0.8010 (CALIBRATION HYPOTHESIS REJECTED)
-- CV-LB gap: ~1.6% average, increasing trend (1.2% → 1.5% → 1.6% → 2.0%)
+- Latest exp_007: CV 0.81617 (feature selection - HURT performance)
+- CV-LB gap: ~1.6-2.0% average, increasing trend
 - Target: 0.9642 (IMPOSSIBLE - top LB is ~0.8066, our best 0.8045 is competitive)
 
 ## Response to Evaluator
 - Technical verdict: TRUSTWORTHY. Execution is sound.
-- Evaluator's top priority was: Submit exp_006 to test calibration hypothesis. DONE.
-- **RESULT**: Calibration hypothesis REJECTED. exp_006 had best calibration (50.9% vs 51.7%) but WORST LB (0.8010 vs 0.8045).
-- **KEY LEARNING**: CV is the primary driver of LB performance. Higher CV = higher LB (R²=0.92 across 4 submissions).
-- **NEW PRIORITY**: Focus on increasing CV above 0.8195 to beat exp_003's LB of 0.8045.
+- Evaluator's top priority: **Multi-seed CatBoost ensemble** to address CV variance (~0.3%).
+- **I AGREE** with this recommendation. The CV variance is a real problem:
+  - exp_003 (seed 42): CV = 0.81951
+  - exp_007 (same params, seed 42): CV = 0.81617
+  - This ~0.3% variance makes progress detection difficult
+- Key concerns raised:
+  1. CV variance is high - ADDRESSING with multi-seed ensemble
+  2. Feature selection hurt performance - CONFIRMED, keeping all features
+  3. We're in a local optimum - 4 experiments failed to beat exp_003
+- **SYNTHESIS**: Multi-seed ensemble is the right next step because:
+  a) It addresses the variance problem directly
+  b) It's quick to implement
+  c) Even if CV doesn't improve, we get more stable estimates
+  d) Reduced variance often improves LB performance
 
 ## Data Understanding
-- Reference notebooks: 
+- Reference notebooks:
   - `exploration/eda.ipynb` for initial EDA
-  - `exploration/evolver_loop5_analysis.ipynb` for feature importance and regularization analysis
-  - `exploration/evolver_loop7_lb_feedback.ipynb` for calibration vs CV analysis
+  - `exploration/evolver_loop5_analysis.ipynb` for feature importance
+  - `exploration/evolver_loop8_analysis.ipynb` for CV-LB analysis
 - Key patterns:
   - CryoSleep is the strongest predictor (81.8% transported when True)
-  - Spending patterns strongly predict transport (no spending = likely transported)
-  - Deck and CabinNum are important features
-  - **CV is the primary driver of LB** - calibration doesn't matter as much
+  - Spending patterns strongly predict transport
+  - **CV is the primary driver of LB** (R²=0.92)
+  - **To beat LB 0.8045, need CV > 0.82086** (from linear model)
 
 ## CV-LB Gap Analysis (4 submissions)
 | Experiment | CV | LB | Gap | Gap % |
@@ -31,42 +41,71 @@
 | exp_004 | 0.8193 | 0.8041 | 0.0152 | 1.86% |
 | exp_006 | 0.8171 | 0.8010 | 0.0161 | 1.97% |
 
-**Linear model**: LB ≈ 0.54 * CV + 0.36 (R²=0.92)
-**To beat LB 0.8045**: Need CV > 0.8195
+**Linear model**: LB = 0.543 * CV + 0.359 (R²=0.92)
+**To beat LB 0.8045**: Need CV > 0.82086
 
 ## Recommended Approaches (Priority Order)
 
-### 1. Feature Selection + CatBoost (HIGH PRIORITY - DO THIS FIRST)
-- 22 features have importance < 1.0 (see loop 5 analysis)
-- Bottom features: ShoppingMall_spent (0.02), VIP_enc (0.03), IsSenior (0.04), IsChild (0.05)
-- Remove low-importance features and retrain CatBoost
-- Expected benefit: Reduced overfitting, potentially higher CV
-- Use best CatBoost params: depth=8, lr=0.051, iterations=755, l2_leaf_reg=3.52
-- **Rationale**: Feature selection is a proven technique to reduce overfitting and can improve both CV and generalization.
+### 1. Multi-Seed CatBoost Ensemble (HIGH PRIORITY - DO THIS FIRST)
+**Rationale**: Evaluator's top recommendation. CV variance is ~0.3% which makes progress detection difficult.
+
+**Implementation**:
+```python
+seeds = [42, 123, 456, 789, 1000]
+test_preds = np.zeros(len(test))
+oof_preds = np.zeros(len(train))
+
+for seed in seeds:
+    # Use best params from exp_003
+    model = CatBoostClassifier(
+        depth=8, learning_rate=0.051, iterations=755, 
+        l2_leaf_reg=3.52, random_seed=seed, verbose=False
+    )
+    # 5-fold CV for each seed
+    for fold, (train_idx, val_idx) in enumerate(skf.split(X, y)):
+        model.fit(X[train_idx], y[train_idx])
+        oof_preds[val_idx] += model.predict_proba(X[val_idx])[:, 1] / len(seeds)
+        test_preds += model.predict_proba(X_test)[:, 1] / (len(seeds) * n_folds)
+```
+
+**Expected benefits**:
+- More stable CV estimate
+- Reduced variance in predictions
+- Potentially better LB due to reduced overfitting
 
 ### 2. Target Encoding (MEDIUM PRIORITY)
-- Currently using label encoding for categorical features
-- Target encoding captures more signal from categorical variables
+**Rationale**: Top kernels use target encoding. Currently using label encoding which doesn't capture category-target relationships.
+
+**Implementation**:
+- Use category_encoders.TargetEncoder
 - Apply with proper CV to avoid leakage
-- Could improve CV by capturing category-target relationships
-- **Rationale**: Top kernels mention target encoding as effective for this problem.
+- Encode: HomePlanet, Destination, Deck, Side, CryoSleep, VIP, interaction features
 
-### 3. Regularized CatBoost (MEDIUM PRIORITY)
-- Try depth=6 (vs 8), l2_leaf_reg=5.0 (vs 3.52)
-- Add subsample=0.8 for randomness
-- May reduce CV slightly but could reduce CV-LB gap
-- **Rationale**: The CV-LB gap is increasing (1.2% → 2.0%), suggesting overfitting.
+**Caution**: Must use CV-based encoding to avoid leakage.
 
-### 4. Multi-Seed CatBoost Ensemble (MEDIUM PRIORITY)
-- Train CatBoost with 5 different random seeds
-- Average predictions
-- Reduces variance without changing bias
-- **Rationale**: CV varies by ~0.14% across seeds (loop 5 analysis). Averaging could stabilize predictions.
+### 3. 10-Fold CV (MEDIUM PRIORITY)
+**Rationale**: Top kernels use 10-fold CV. Our 5-fold may have higher variance.
 
-### 5. Additional Feature Engineering (LOWER PRIORITY)
-- Interaction features not yet tried: Age × Spending, Deck × HomePlanet
-- Polynomial features on spending variables
-- **Rationale**: Feature engineering has shown consistent improvements in earlier experiments.
+**Implementation**:
+- Change from 5-fold to 10-fold StratifiedKFold
+- More stable CV estimates
+- May slightly improve generalization
+
+### 4. LGBM + CatBoost Ensemble (LOWER PRIORITY)
+**Rationale**: Top kernel uses LGBM + CatBoost with soft voting.
+
+**Implementation**:
+- Train both LGBM and CatBoost with best params
+- Average predictions (soft voting)
+- We tried this in exp_002 (CV=0.81353) but CatBoost alone was better (0.81951)
+- May be worth revisiting with better LGBM tuning
+
+### 5. KNN Imputation (LOWER PRIORITY)
+**Rationale**: Top kernels mention KNN imputation. We're using mode/median imputation.
+
+**Implementation**:
+- Use sklearn.impute.KNNImputer
+- May capture more complex relationships in missing data
 
 ## What NOT to Try (Exhausted Approaches)
 - **Threshold tuning**: Proven to hurt LB (exp_004: 0.8041 vs exp_003: 0.8045)
@@ -75,21 +114,34 @@
 - **Stacking with LR meta-learner**: CV lower than CatBoost alone (exp_005: 0.8174)
 - **Weighted ensemble**: Lower CV = lower LB (exp_006: 0.8010)
 - **Calibration optimization**: Doesn't improve LB (exp_006 proved this)
+- **Feature selection**: HURT CV by -0.00265 (exp_007)
 
 ## Validation Notes
 - Use 5-fold StratifiedKFold with random_state=42 for consistency
-- CV-LB gap is ~1.6% and increasing - need to reduce overfitting
+- CV-LB gap is ~1.6-2.0% and increasing - need to reduce overfitting
 - **Focus on CV**: Higher CV = higher LB (proven across 4 submissions)
 - LB improvement rate is ~60% of CV improvement
 
 ## Submission Strategy
 - 6 submissions remaining
-- Only submit if CV > 0.8195 (exp_003's CV)
-- Or if trying fundamentally different approach (e.g., neural network)
-- Next submission should be feature selection experiment if CV improves
+- Only submit if:
+  1. CV > 0.82086 (needed to beat exp_003's LB based on linear model)
+  2. OR multi-seed ensemble shows stable improvement with lower variance
+- Do NOT submit exp_007 (CV = 0.81617, lower than exp_003)
 
 ## Key Insight
-**CV is king.** The calibration hypothesis was rejected. To beat exp_003's LB of 0.8045, we need CV > 0.8195. Feature selection is the most promising path because:
-1. It can reduce overfitting (lower CV-LB gap)
-2. It can improve CV by removing noise
-3. It's quick to implement and test
+**We're in a local optimum.** The last 4 experiments (exp_004-007) all failed to beat exp_003's CV of 0.81951. The approaches that seemed promising (calibration, feature selection, ensembles) didn't work.
+
+**Multi-seed ensemble is the right next step** because:
+1. It directly addresses the CV variance problem
+2. It's a proven technique to reduce variance without changing bias
+3. Even if CV doesn't improve, we get more reliable estimates
+4. Reduced variance often improves LB performance
+
+**If multi-seed doesn't help**, try target encoding as a fundamentally different approach to feature encoding.
+
+## Reality Check
+- Target: 0.9642 is IMPOSSIBLE (top LB is ~0.8066)
+- Our best LB: 0.8045 (top ~7%)
+- Gap to top: 0.0021 (0.26%)
+- We're already competitive. Focus on incremental improvements.
