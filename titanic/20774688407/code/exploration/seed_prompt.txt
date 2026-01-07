@@ -9,12 +9,13 @@
 - Evaluation metric: Accuracy
 - Small dataset: 891 training samples, 418 test samples
 - Target distribution: ~38% survived, ~62% did not survive
+- Target score: 1.0 (100% accuracy) - extremely challenging, typical best scores are 80-82%
 
 ## Critical Feature Engineering (from top Kaggle kernels)
 
-### 1. Title Extraction from Name
+### 1. Title Extraction from Name (MOST IMPORTANT)
 Extract titles from passenger names using regex pattern ` ([A-Za-z]+)\.`:
-- Common titles: Mr, Miss, Mrs, Master
+- Common titles: Mr (15.7% survival), Miss (69.8%), Mrs (79.2%), Master (57.5%)
 - Group rare titles (Lady, Countess, Capt, Col, Don, Dr, Major, Rev, Sir, Jonkheer, Dona) into 'Rare'
 - Map Mlle/Ms → Miss, Mme → Mrs
 - Title is highly predictive of survival (Master = young boys, Miss = unmarried women)
@@ -22,35 +23,45 @@ Extract titles from passenger names using regex pattern ` ([A-Za-z]+)\.`:
 ### 2. Family Features
 - **FamilySize** = SibSp + Parch + 1
 - **IsAlone** = 1 if FamilySize == 1, else 0
-- Family size has non-linear relationship with survival (medium families survive better)
+- **FamilySize_Category**: Small (2-4) has best survival (55-72%), Alone (30%), Large (5+) poor (0-33%)
+- Non-linear relationship - consider binning: Alone, Small, Large
 
 ### 3. Cabin Features
 - **Has_Cabin** = 1 if Cabin is not null, else 0 (indicates higher class)
-- Can extract deck letter from Cabin (first character)
+- **Deck** = first character of Cabin (A, B, C, D, E, F, G, T)
+- Deck can indicate location on ship and proximity to lifeboats
 
-### 4. Name Length
-- **Name_length** = len(Name) - longer names may indicate higher status
+### 4. Ticket Features
+- **Ticket_Prefix** = extract alphabetic prefix from ticket
+- **Ticket_Frequency** = count of passengers with same ticket (family/group travel)
+- Shared tickets may indicate family groups
 
 ### 5. Age and Fare Binning
-- Bin Age into categories: 0-16, 16-32, 32-48, 48-64, 64+
+- Bin Age into categories: Child (0-16), Young (16-32), Middle (32-48), Senior (48-64), Elder (64+)
 - Bin Fare into quartiles or categories based on thresholds (7.91, 14.454, 31)
+- Children have higher survival rates
+
+### 6. Interaction Features
+- **Sex_Pclass** = Sex + '_' + str(Pclass) - captures class-gender interaction
+- **Age_Class** = Age_bin + Pclass interaction
+- Female in 1st/2nd class have very high survival
 
 ## Missing Value Handling
 
 ### Age (20% missing in train, 20% in test)
-- Option 1: Fill with median by Pclass and Sex
-- Option 2: Random values within mean ± std
-- Option 3: Predict using other features (Name title is useful - Master indicates young boy)
+- **Best approach**: Fill with median by Title (Master → young, Mr → adult male, etc.)
+- Alternative: Fill with median by Pclass and Sex
+- Alternative: Random values within mean ± std
 
 ### Cabin (77% missing)
 - Create Has_Cabin binary feature
-- Can impute deck based on Pclass
+- Can impute deck based on Pclass (1st class → upper decks)
 
 ### Embarked (2 missing in train)
 - Fill with mode ('S' - Southampton)
 
 ### Fare (1 missing in test)
-- Fill with median
+- Fill with median by Pclass
 
 ## Models to Use
 
@@ -58,6 +69,7 @@ Extract titles from passenger names using regex pattern ` ([A-Za-z]+)\.`:
 1. **Random Forest** - Most robust, handles feature interactions well
    - n_estimators: 100-500
    - max_depth: 4-8 (prevent overfitting on small dataset)
+   - min_samples_split: 2-10
    
 2. **Gradient Boosting** - Strong performance
    - learning_rate: 0.01-0.1
@@ -68,12 +80,23 @@ Extract titles from passenger names using regex pattern ` ([A-Za-z]+)\.`:
    - learning_rate: 0.01-0.05
    - max_depth: 4-6
    - n_estimators: 200-500
+   - reg_alpha, reg_lambda for regularization
 
-4. **SVM** - Works well with proper scaling
+4. **LightGBM** - Fast and effective
+   - num_leaves: 20-50
+   - learning_rate: 0.01-0.1
+   - n_estimators: 100-500
+
+5. **CatBoost** - Handles categorical features natively
+   - Good for this dataset with many categorical features
+
+6. **SVM** - Works well with proper scaling
    - Use RBF kernel
    - Tune C and gamma
+   - Requires feature scaling
 
-5. **Logistic Regression** - Good baseline, interpretable
+7. **Logistic Regression** - Good baseline, interpretable
+   - Use regularization (C parameter)
 
 ### Ensemble Methods (can achieve ~80-82% accuracy)
 
@@ -85,33 +108,49 @@ Extract titles from passenger names using regex pattern ` ([A-Za-z]+)\.`:
 #### Stacking (achieved 80.8% in top kernels)
 **Two-level stacking:**
 - Level 1 (base models): RandomForest, ExtraTrees, AdaBoost, GradientBoosting, SVC
-- Level 2 (meta-learner): XGBoost
+- Level 2 (meta-learner): XGBoost or Logistic Regression
 - Use out-of-fold predictions to prevent leakage
 - Uncorrelated base models produce better results
 
+#### Blending
+- Simple average or weighted average of predictions
+- Weight based on CV performance
+
 ## Feature Selection
-Drop these columns before modeling:
+**Drop these columns before modeling:**
 - PassengerId (identifier)
 - Name (after extracting Title)
-- Ticket (high cardinality, limited value)
+- Ticket (after extracting features)
 - Cabin (after extracting Has_Cabin/Deck)
 
-Keep/Create:
+**Keep/Create:**
 - Pclass, Sex, Age (binned), SibSp, Parch, Fare (binned), Embarked
 - Title, FamilySize, IsAlone, Has_Cabin
+- Interaction features
 
 ## Validation Strategy
-- Use Stratified K-Fold (k=5) to maintain class distribution
+- Use Stratified K-Fold (k=5 or k=10) to maintain class distribution
 - Small dataset means high variance in CV scores
 - Focus on robust features rather than complex models
+- Consider repeated K-fold for more stable estimates
 
 ## Key Insights from Top Solutions
-1. Feature engineering is more important than model selection for this dataset
+1. **Feature engineering is more important than model selection** for this dataset
 2. Simple models with good features often beat complex models
 3. Title extraction is one of the most powerful features
 4. Family size features capture important survival patterns
 5. Avoid overfitting - use regularization and limit tree depth
 6. The train/test distributions may differ slightly, causing CV-LB gap
+7. Women and children first - Sex and Age are critical features
+8. Class matters - 1st class passengers had priority for lifeboats
+
+## Hyperparameter Tuning
+- Use GridSearchCV or RandomizedSearchCV
+- Tune on cross-validation, not single train/test split
+- Key parameters to tune:
+  - Tree models: max_depth, n_estimators, min_samples_split
+  - Boosting: learning_rate, n_estimators, max_depth
+  - SVM: C, gamma, kernel
 
 ## Submission Strategy
 1. Start with baseline Random Forest (~78%)
@@ -119,6 +158,20 @@ Keep/Create:
 3. Try ensemble/stacking → ~80-82%
 4. Tune hyperparameters carefully
 5. Consider multiple submissions with different random seeds
+6. Ensemble multiple models for final submission
+
+## Advanced Techniques
+
+### Feature Importance Analysis
+- Use permutation importance or SHAP values
+- Remove low-importance features to reduce overfitting
+
+### Pseudo-labeling (if allowed)
+- Use high-confidence predictions on test set as additional training data
+
+### Cross-validation Averaging
+- Train multiple models with different random seeds
+- Average predictions for more stable results
 
 ## Code Patterns
 
@@ -137,6 +190,10 @@ def engineer_features(df):
     
     # Cabin
     df['Has_Cabin'] = df['Cabin'].notna().astype(int)
+    
+    # Age imputation by Title
+    title_age_median = df.groupby('Title')['Age'].median()
+    df['Age'] = df.apply(lambda x: title_age_median[x['Title']] if pd.isna(x['Age']) else x['Age'], axis=1)
     
     return df
 ```
