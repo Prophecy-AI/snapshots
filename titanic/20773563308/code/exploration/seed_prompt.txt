@@ -13,103 +13,164 @@
 
 ## Feature Engineering (Critical for High Scores)
 
-### Title Extraction from Name
+### Title Extraction from Name (Most Important Feature)
 Extract titles using regex pattern ` ([A-Za-z]+)\.`:
 - Group rare titles: Lady, Countess, Capt, Col, Don, Dr, Major, Rev, Sir, Jonkheer, Dona → 'Rare'
 - Map: Mlle/Ms → Miss, Mme → Mrs
 - Final categories: Mr, Miss, Mrs, Master, Rare
-- Title is highly predictive of survival
+- Title is highly predictive of survival (Master = young boys, high survival)
 
 ### Family Features
 - **FamilySize** = SibSp + Parch + 1
 - **IsAlone** = 1 if FamilySize == 1, else 0
-- Family size has non-linear relationship with survival (medium families survive better)
+- Family size has non-linear relationship with survival (medium families 2-4 survive better)
+- Consider creating FamilySize bins: 1 (alone), 2-4 (small), 5+ (large)
 
 ### Cabin Features
 - **Has_Cabin** = 1 if Cabin is not null, else 0 (having cabin correlates with higher class)
-- Can extract deck letter from Cabin (first character)
+- **Deck** = First character of Cabin (A, B, C, D, E, F, G, T, or 'U' for unknown)
+- Deck B, D, E have higher survival rates (~74-75%)
+- Deck U (unknown) has lowest survival (~30%)
 
 ### Name Length
 - **Name_length** = len(Name) - longer names may indicate higher social status
 
 ### Binning Continuous Features
-- **Age bands**: 0-16, 16-32, 32-48, 48-64, 64+ (or use pd.cut/qcut)
+- **Age bands**: 0-16, 16-32, 32-48, 48-64, 64+ (or use pd.cut/qcut with 5 bins)
 - **Fare bands**: Use pd.qcut(Fare, 4) for quartile-based binning
+- Binning helps tree models capture non-linear relationships
+
+### Ticket Features (Advanced)
+- Extract ticket prefix (letters before numbers)
+- Ticket frequency: count passengers sharing same ticket
+- Shared tickets indicate families/groups traveling together
 
 ## Missing Value Imputation
 
 ### Age Imputation (Critical - 20% missing)
-- Best approach: Impute using median Age grouped by Pclass and Sex
-- Alternative: Random values within mean ± std
-- Simple: Use overall median
+- **Best approach**: Use XGBoost/Random Forest to predict missing ages from other features
+- **Good approach**: Impute using median Age grouped by Pclass, Sex, and Title
+- **Simple**: Use overall median (~28)
+- Age imputation quality significantly affects model performance
 
 ### Embarked Imputation
 - Fill with mode ('S' - Southampton, most common)
+- Or analyze: passengers with Pclass=1 and Fare=80 likely embarked at 'C'
 
 ### Fare Imputation
-- Fill with median (only 1 missing in test)
+- Fill with median grouped by Pclass (only 1 missing in test)
 
 ## Models
 
 ### Base Models (for ensembling)
-From top kernels, these models work well:
-1. **Random Forest**: n_estimators=100-500, max_depth=6-10
-2. **Gradient Boosting**: learning_rate=0.1-0.25, max_depth=2-4, n_estimators=50-300
-3. **XGBoost**: learning_rate=0.01-0.1, max_depth=4-6, n_estimators=200-2000
-4. **Extra Trees**: Similar params to Random Forest
+From top kernels achieving 80%+ accuracy:
+
+1. **XGBoost** (Best single model):
+   - learning_rate=0.01-0.1, max_depth=4-6, n_estimators=200-2000
+   - gamma=0.9, subsample=0.8, colsample_bytree=0.8
+   - Can achieve 82-84% CV accuracy with proper tuning
+
+2. **Gradient Boosting**: 
+   - learning_rate=0.1-0.25, max_depth=2-4, n_estimators=50-300
+   - Best params from kernels: max_depth=4, n_estimators=200
+
+3. **Random Forest**: 
+   - n_estimators=100-500, max_depth=6-10
+   - max_features=5-7, min_samples_leaf=7, min_samples_split=3
+
+4. **Extra Trees**: Similar params to Random Forest, provides diversity for ensembles
+
 5. **AdaBoost**: n_estimators=100-300, learning_rate=0.1
-6. **SVC**: kernel='rbf', C=1.0
+
+6. **SVC**: kernel='rbf', C=1.0 (good for stacking due to different decision boundary)
+
+7. **Logistic Regression**: Good baseline, provides linear perspective for ensembles
 
 ### Ensembling Strategies (Key for High Scores)
 
-#### Voting Ensemble
+#### Voting Ensemble (Achieves ~0.78-0.81)
 - Hard voting: Majority vote from multiple classifiers
-- Soft voting: Average predicted probabilities (requires predict_proba)
-- Top kernels achieved ~0.78 with hard voting
+- Soft voting: Average predicted probabilities (often better)
+- Use 5-7 diverse models: RF, ExtraTrees, AdaBoost, GradientBoosting, XGBoost, SVC, LogReg
 
-#### Stacking (Best Results - 0.808 LB)
-1. **First level**: Train 5 diverse base models (RF, ExtraTrees, AdaBoost, GradientBoosting, SVC)
-2. **Out-of-fold predictions**: Use K-fold CV to generate meta-features
-3. **Second level**: XGBoost as meta-learner on first-level predictions
+#### Stacking (Best Results - 0.808+ LB)
+1. **First level**: Train 5+ diverse base models with out-of-fold predictions
+2. **Out-of-fold predictions**: Use StratifiedKFold (k=5-10) to generate meta-features
+3. **Second level**: XGBoost or Logistic Regression as meta-learner
 4. **Key insight**: More uncorrelated base models → better stacking results
+5. Can achieve top 0.6% (81.1% accuracy) with proper implementation
 
 ### Hyperparameter Tuning
-- Use GridSearchCV or RandomizedSearchCV
-- Cross-validation: StratifiedKFold with k=5-10
+- Use GridSearchCV with cv=10 for thorough search
+- RandomizedSearchCV for faster exploration
+- Bayesian optimization (Optuna, hyperopt) for efficient tuning
 - Scoring metric: 'accuracy' (matches competition metric)
 
 ## Validation Strategy
-- Use StratifiedKFold (k=5 or 10) to maintain class distribution
+- Use StratifiedKFold (k=10) to maintain class distribution
 - CV scores may differ from LB due to train/test distribution differences
-- Focus on consistent CV improvement
+- Focus on consistent CV improvement across folds
+- Watch for overfitting: large gap between train and CV scores
 
 ## Feature Selection
-Drop these columns before modeling:
+**Drop these columns before modeling:**
 - PassengerId (identifier)
-- Name (after extracting Title)
-- Ticket (high cardinality, limited value)
+- Name (after extracting Title, Name_length)
+- Ticket (after extracting features, or drop entirely)
 - Cabin (after extracting Has_Cabin/Deck)
 
-Keep/Create:
-- Pclass, Sex, Age (binned), SibSp, Parch, Fare (binned), Embarked
-- Title, FamilySize, IsAlone, Has_Cabin
+**Keep/Create (Final Feature Set):**
+- Pclass, Sex, Age (imputed/binned), SibSp, Parch, Fare (binned), Embarked
+- Title, FamilySize, IsAlone, Has_Cabin, Deck (optional)
+- Name_length (optional)
 
 ## Encoding
 - Sex: female=0, male=1
-- Embarked: S=0, C=1, Q=2
+- Embarked: S=0, C=1, Q=2 (or one-hot encoding)
 - Title: Mr=1, Miss=2, Mrs=3, Master=4, Rare=5
+- Deck: A=1, B=2, C=3, D=4, E=5, F=6, G=7, T=8, U=0
 - All features should be numeric for sklearn models
+
+## Advanced Techniques for Higher Accuracy
+
+### Feature Interactions
+- Create interaction features: Sex*Pclass, Age*Pclass
+- Tree models capture interactions automatically, but explicit features can help
+
+### Target Encoding (for categorical features)
+- Encode categorical features by their mean target value
+- Use with caution to avoid leakage (use out-of-fold encoding)
+
+### Feature Importance Analysis
+- Use Random Forest/XGBoost feature importance to identify key features
+- SelectFromModel or Recursive Feature Elimination for selection
+- Top features typically: Title, Sex, Pclass, Fare, Age
+
+### Cross-Validation Strategies
+- Repeated StratifiedKFold (e.g., 5 repeats of 10-fold) for robust estimates
+- Use same random_state across experiments for reproducibility
 
 ## Expected Performance
 - Simple models: ~0.75-0.77
-- Tuned single models: ~0.77-0.78
-- Voting ensemble: ~0.78
-- Stacking ensemble: ~0.80-0.81
-- Target: 1.0 (100% accuracy) - extremely challenging, requires perfect predictions
+- Tuned single models (XGBoost/GradientBoosting): ~0.78-0.82
+- Voting ensemble: ~0.78-0.80
+- Stacking ensemble: ~0.80-0.82
+- Top 0.6% leaderboard: ~0.811
+- **Target: 1.0 (100% accuracy)** - extremely challenging, requires perfect predictions
 
-## Key Insights from Top Kernels
+## Key Insights from Top Kernels and Research
 1. Feature engineering matters more than model choice for this dataset
-2. Title extraction is one of the most important engineered features
+2. Title extraction is the most important engineered feature
 3. Ensemble methods consistently outperform single models
 4. Stacking with diverse, uncorrelated base models gives best results
-5. Simple decision trees can match complex models after proper feature engineering
+5. XGBoost with proper tuning can achieve 82-84% CV accuracy
+6. 10-fold CV with extensive grid search is standard for top solutions
+7. Age imputation using ML models (XGBoost) outperforms simple median
+8. Cabin deck extraction provides additional predictive signal
+9. Family features (FamilySize, IsAlone) capture group survival dynamics
+
+## Implementation Priority
+1. **Essential**: Title extraction, FamilySize, IsAlone, proper Age imputation
+2. **Important**: Has_Cabin, Deck extraction, Fare/Age binning
+3. **Advanced**: Stacking ensemble, XGBoost tuning, feature interactions
+4. **Optional**: Name_length, Ticket features, target encoding
