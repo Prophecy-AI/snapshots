@@ -1,0 +1,142 @@
+# Titanic Survival Prediction - Evolved Strategy (Loop 1)
+
+## Current Status
+- Best CV score: 0.8339 from exp_000 (Baseline RF with Feature Engineering)
+- Best LB score: 0.7799 (from exp_000)
+- CV-LB gap: +0.054 (5.4%) → SIGNIFICANT - indicates overfitting or distribution shift
+- Target: 1.0 (100% accuracy) - **UNREALISTIC** - best known Titanic LB scores are 80-82%
+
+## Response to Evaluator
+- Technical verdict was **TRUSTWORTHY** with minor leakage caveat. Agreed - the leakage is minor but should be fixed.
+- Evaluator's top priority: Submit to get LB feedback. **DONE** - we now have LB score of 77.99%.
+- Key concerns raised:
+  1. Target of 1.0 is unrealistic → **ACKNOWLEDGED** - focusing on incremental improvements toward 80%+
+  2. Minor data leakage in Age imputation → **WILL FIX** in next experiment
+  3. Features not yet explored → **PRIORITIZING** in next experiments
+- Evaluator recommended stacking/ensemble after submission → **AGREE** - this is next priority
+
+## Critical Finding: Distribution Shift
+**Adversarial Validation AUC: 0.7025** - indicates SIGNIFICANT distribution shift between train and test.
+
+Features that distinguish train from test (by importance):
+1. **Age: 56.9%** - Primary source of shift! Train/test have different Age distributions
+2. Fare: 14.3%
+3. Embarked: 6.8%
+4. FamilySize: 4.8%
+
+**Implications:**
+- Our model may be overfitting to Age patterns in training data that don't generalize
+- The minor data leakage (using combined train+test for Age imputation) may have helped CV but hurt generalization
+- Need to reduce reliance on Age or use more robust features
+
+## Data Understanding
+**Reference notebooks:**
+- `exploration/eda.ipynb` - Full EDA with survival rates by features
+- `exploration/evolver_loop1_lb_feedback.ipynb` - Distribution shift analysis
+
+**Key patterns to exploit:**
+1. Sex is most predictive (30% importance) - Female 74.2% vs Male 18.9% survival
+2. Title extraction is highly valuable (19.3% importance) - Mrs 79.2%, Mr 15.7%
+3. Pclass matters - 1st: 63%, 2nd: 47%, 3rd: 24% survival
+4. FamilySize has non-linear relationship - medium families (2-4) survive best
+
+## Recommended Approaches (Priority Order)
+
+### Priority 1: Fix Data Leakage & Reduce Age Dependence
+**Why:** Age is causing distribution shift. Fix leakage and reduce model's reliance on Age.
+```python
+# Compute Age imputation from TRAINING data only
+title_age_median = train_df.groupby('Title')['Age'].median()
+# Apply to both train and test
+```
+- Consider binning Age into broad categories (Child/Adult/Senior) to reduce sensitivity
+- Or use Age only for creating robust features (e.g., IsChild = Age < 16)
+
+### Priority 2: Implement Stacking/Ensemble
+**Why:** Research shows stacking achieved 80.8% LB (top 9%). Our single RF got 78%.
+**Approach:**
+- Level 1 base models: RandomForest, ExtraTrees, GradientBoosting, SVC, AdaBoost
+- Level 2 meta-learner: XGBoost or LogisticRegression
+- Use out-of-fold predictions to prevent leakage
+- Ensure base models are diverse (different algorithms, not just different hyperparameters)
+
+### Priority 3: Add More Features
+**Why:** Several promising features from strategy haven't been tried yet.
+Features to add:
+1. **Ticket_Frequency** - count of passengers with same ticket (family/group travel)
+2. **Deck** - extract from Cabin first character (indicates location on ship)
+3. **Age_Bin** - broad categories: Child (0-16), Adult (16-50), Senior (50+)
+4. **Fare_Bin** - quartile-based binning
+5. **Sex_Pclass** - interaction feature (Female_1, Female_2, etc.)
+6. **Name_Length** - mentioned in stacking kernel as useful
+
+### Priority 4: Try Different Models
+**Why:** Model diversity is important for ensembling.
+Models to try:
+1. XGBoost - often best single model for tabular data
+2. LightGBM - fast and effective
+3. GradientBoosting - strong baseline
+4. SVC with RBF kernel - works well with proper scaling
+
+## What NOT to Try
+- Chasing 100% accuracy - impossible for Titanic
+- Complex neural networks - dataset too small (891 samples)
+- Hyperparameter tuning before fixing distribution shift issue
+- Adding more Age-related features without addressing shift
+
+## Validation Notes
+- Use Stratified 5-Fold CV (already doing this)
+- **IMPORTANT:** CV score of 83.4% is likely inflated due to distribution shift
+- Expect LB scores to be 3-5% lower than CV
+- Focus on LB improvement, not CV inflation
+- Consider using adversarial validation to identify and down-weight drifting features
+
+## Submission Strategy
+- Current LB: 77.99% (4 submissions remaining)
+- Target: 80%+ (realistic goal for Titanic)
+- Submit when CV improves by >0.5% AND approach is fundamentally different
+- Save submissions for ensemble/stacking experiments
+
+## Code Patterns
+
+### Proper Age Imputation (no leakage)
+```python
+# Compute from training data only
+title_age_median = train_df.groupby('Title')['Age'].median()
+
+# Apply to train
+for title in train_df['Title'].unique():
+    mask = (train_df['Title'] == title) & (train_df['Age'].isna())
+    train_df.loc[mask, 'Age'] = title_age_median.get(title, train_df['Age'].median())
+
+# Apply same values to test
+for title in test_df['Title'].unique():
+    mask = (test_df['Title'] == title) & (test_df['Age'].isna())
+    test_df.loc[mask, 'Age'] = title_age_median.get(title, train_df['Age'].median())
+```
+
+### Simple Stacking Implementation
+```python
+from sklearn.ensemble import StackingClassifier
+from sklearn.linear_model import LogisticRegression
+
+base_models = [
+    ('rf', RandomForestClassifier(n_estimators=100, max_depth=6, random_state=42)),
+    ('et', ExtraTreesClassifier(n_estimators=100, max_depth=6, random_state=42)),
+    ('gb', GradientBoostingClassifier(n_estimators=100, max_depth=3, random_state=42)),
+    ('svc', SVC(kernel='rbf', probability=True, random_state=42))
+]
+
+stacking_clf = StackingClassifier(
+    estimators=base_models,
+    final_estimator=LogisticRegression(),
+    cv=5
+)
+```
+
+## Next Experiment Recommendation
+**Experiment 002: Stacking Ensemble with Fixed Data Leakage**
+1. Fix Age imputation to use training data only
+2. Add Ticket_Frequency and Sex_Pclass features
+3. Implement stacking with diverse base models
+4. Target: CV ~82%, LB ~79-80%
