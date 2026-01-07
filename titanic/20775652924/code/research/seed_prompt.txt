@@ -1,28 +1,34 @@
-# Titanic Survival Prediction - Strategy Guide (Loop 3)
+# Titanic Survival Prediction - Strategy Guide (Loop 4)
 
 ## Current Status
 - Best CV score: 0.8372 from exp_001 (Voting Ensemble)
 - Best LB score: 0.7727 from exp_001 (Voting Ensemble)
-- CV-LB gap: +0.0645 (narrowed from +0.0732)
+- CV-LB gap: +0.0645 (CV overestimates LB by ~6.5%)
+- Latest experiment: exp_002 (Stacking) CV 0.8293 - WORSE than voting
 - Target: 1.0 (UNREALISTIC - top Kaggle solutions achieve 0.80-0.82)
 - Realistic target: 0.80 LB (need +0.0273 improvement)
-- Submissions remaining: 5/10
+- Submissions remaining: 1/10 today
 
 ## Response to Evaluator
 
 **Technical verdict was TRUSTWORTHY.** The evaluator confirmed:
-- Validation methodology is sound (10-fold Stratified CV)
-- No leakage detected in implementation
+- Stacking implementation was correct (OOF predictions generated properly)
+- No leakage detected
 - Score integrity verified
 
-**Evaluator's top priority: Submit ensemble and implement stacking.**
-- DONE: Submitted exp_001, got LB 0.7727 (+0.0143 improvement)
-- AGREE: Stacking is the clear next step - reference kernels achieved 0.808 LB
+**Evaluator's top priority: DO NOT SUBMIT STACKING. IMPROVE VOTING ENSEMBLE.**
+- AGREE: Stacking underperformed (CV 0.8293 vs 0.8372 voting)
+- AGREE: Save the remaining submission for a more promising candidate
 
-**Key concerns raised:**
-1. Target of 1.0 is unrealistic → ACKNOWLEDGED. Realistic target is 0.80 LB.
-2. Stacking not attempted → ADDRESSING in this loop
-3. Ticket features unexplored → Will add to stacking experiment
+**Key concerns raised and my response:**
+1. **OOF predictions highly correlated** → CONFIRMED. My analysis shows mean pairwise correlation of 0.851. RF-ET: 0.991, GB-XGB: 0.981. Only AdaBoost is different (0.60).
+2. **Try passthrough stacking** → TESTED. Passthrough (original + OOF) achieves CV 0.8271 - still worse than voting.
+3. **Add Name_Length and Ticket_Frequency to voting** → TESTED. Only +0.0011 improvement (0.8226 → 0.8237).
+
+**Synthesis:** Stacking approaches are exhausted for now. The high OOF correlation means base models are too similar. The voting ensemble remains our best model. Focus should shift to:
+1. Reducing the CV-LB gap (currently +0.0645)
+2. Finding features that generalize better to test set
+3. Regularization to prevent overfitting
 
 ## Data Understanding
 
@@ -30,121 +36,95 @@
 - `exploration/eda.ipynb` - Basic EDA, survival patterns
 - `exploration/evolver_loop1_analysis.ipynb` - Deck, Ticket, Name_Length analysis
 - `exploration/evolver_loop2_lb_feedback.ipynb` - CV-LB calibration analysis
-- `research/kernels/arthurtok_introduction-to-ensembling-stacking-in-python/` - Stacking reference (0.808 LB)
+- `exploration/evolver_loop3_analysis.ipynb` - OOF correlation analysis (NEW)
 
-**Key patterns to exploit:**
-1. **CV-LB Calibration**: LB = 2.55*CV - 1.37. Need CV ~0.8479 to achieve LB 0.80
-2. **Prediction calibration**: Baseline under-predicted survival. Ensemble correctly identified:
-   - 21 Pclass 3 females as survivors
-   - 10 Pclass 1 males as non-survivors
-3. **Ticket frequency**: 2-3 shared tickets have 57-70% survival, 5+ have 0%
-4. **Name_Length**: 0.33 correlation with survival (VeryLong: 62.6% vs Short: 23%)
+**Key findings from Loop 3 analysis:**
+1. **OOF predictions are HIGHLY correlated** (mean 0.851). This is why stacking doesn't help.
+2. **Passthrough stacking doesn't help** - CV 0.8271 vs voting 0.8372
+3. **Name_Length and Ticket_Frequency provide minimal lift** (+0.0011 CV)
+4. **Feature importance (RF)**: Title (0.246), Sex (0.202), Fare (0.090), Name_Length (0.081), Pclass (0.063)
+
+**Distribution shifts identified (from evolver_loop1_lb_feedback.ipynb):**
+- Embarked C: 24.4% in test vs 18.9% in train
+- Embarked S: 64.6% in test vs 72.4% in train
+- Mrs title: 17.2% in test vs 14.1% in train
 
 ## Recommended Approaches (Priority Order)
 
-### Priority 1: STACKING (Highest Impact)
-Reference kernel achieved 0.808 LB with stacking. Implementation:
+### Priority 1: ADVERSARIAL VALIDATION (Address CV-LB Gap)
+The CV-LB gap of +0.0645 suggests distribution shift. Use adversarial validation to:
+1. Train a classifier to distinguish train vs test samples
+2. Identify features that differ most between train/test
+3. Down-weight or remove features that cause the gap
+4. Re-weight training samples to match test distribution
 
-**Base models (5-7 diverse models):**
-- RandomForestClassifier (n_estimators=200, max_depth=6)
-- ExtraTreesClassifier (n_estimators=200, max_depth=6)
-- AdaBoostClassifier (n_estimators=100, learning_rate=0.5)
-- GradientBoostingClassifier (n_estimators=100, max_depth=3)
-- SVC (kernel='rbf', C=1.0, probability=True)
-- XGBClassifier (n_estimators=100, max_depth=3)
-- LogisticRegression (C=0.1)
+**Implementation:**
+```python
+# Combine train and test, label train=0, test=1
+combined = pd.concat([train[features], test[features]])
+labels = [0]*len(train) + [1]*len(test)
 
-**Meta-learner:**
-- XGBClassifier (n_estimators=2000, max_depth=4, gamma=0.9, subsample=0.8)
-- OR LogisticRegression (simpler, may generalize better)
+# Train classifier to distinguish train vs test
+from sklearn.ensemble import RandomForestClassifier
+clf = RandomForestClassifier(n_estimators=100)
+cv_scores = cross_val_score(clf, combined, labels, cv=5, scoring='roc_auc')
+print(f"Adversarial AUC: {cv_scores.mean():.3f}")
+# If AUC >> 0.5, there's significant distribution shift
 
-**Implementation steps:**
-1. Use StratifiedKFold (n_splits=5 or 10)
-2. For each fold, train all base models on training fold
-3. Generate out-of-fold predictions for training data
-4. Generate test predictions (average across folds)
-5. Stack OOF predictions as features for meta-learner
-6. Train meta-learner on stacked features
-7. Predict test using stacked test predictions
+# Get feature importances to identify shifting features
+clf.fit(combined, labels)
+importances = pd.DataFrame({'feature': features, 'importance': clf.feature_importances_})
+```
 
-### Priority 2: Add Ticket Features
-Strong signal identified but not yet exploited:
-- **Ticket_Frequency**: Count passengers sharing same ticket
-- **Ticket_Survival_Rate**: Mean survival rate of ticket group (use OOF to avoid leakage)
-- Ticket frequency 2-3 has 57-70% survival, 5+ has 0%
+### Priority 2: REGULARIZATION (Reduce Overfitting)
+The voting ensemble may be overfitting. Try:
+1. **Stronger regularization** in base models:
+   - LogisticRegression: C=0.01 (was 0.1)
+   - RandomForest: max_depth=4 (was 6), min_samples_leaf=8 (was 4)
+   - XGBoost: reg_alpha=1.0, reg_lambda=2.0
+2. **Feature selection** - remove low-importance or noisy features:
+   - IsAlone (importance 0.004) - redundant with FamilySize
+   - Parch (importance 0.009) - redundant with FamilySize
+   - Deck (77% unknown) - may add noise
 
-### Priority 3: Add Name_Length Feature
-- 0.33 correlation with survival
-- VeryLong names (>40 chars): 62.6% survival
-- Short names (<20 chars): 23% survival
-- Simple to add, may provide additional signal
+### Priority 3: SIMPLER MODEL ENSEMBLE
+Try a simpler ensemble with fewer, more regularized models:
+1. LogisticRegression (C=0.01, penalty='l2')
+2. RandomForest (max_depth=4, n_estimators=100)
+3. GradientBoosting (max_depth=2, n_estimators=50)
 
-### Priority 4: Feature Selection
-With 14+ features, some may be redundant:
-- Use feature importance from base models
-- Consider removing low-importance features
-- Deck has 77% unknown - may add noise
+Fewer models with stronger regularization may generalize better.
+
+### Priority 4: ENSEMBLE OF DIFFERENT RANDOM SEEDS
+The TF-DF kernel showed success with ensembling 100 models with different seeds.
+Try: Train 10-20 voting ensembles with different random seeds and average predictions.
+This reduces variance without increasing bias.
 
 ## What NOT to Try
 
-1. **Simple voting ensemble variations** - Already implemented, diminishing returns
-2. **Deeper trees** - Caused overfitting (CV-LB gap was 0.0732 with deeper trees)
-3. **More complex hyperparameter tuning** - Low ROI at this stage
-4. **Target of 1.0** - Impossible. Focus on 0.80 LB.
+1. **Pure stacking** - OOF predictions too correlated (0.851 mean correlation)
+2. **Passthrough stacking** - Already tested, CV 0.8271 < voting 0.8372
+3. **Adding Name_Length/Ticket_Frequency** - Only +0.0011 improvement
+4. **More complex models** - Will increase CV-LB gap
+5. **Target of 1.0** - Impossible. Focus on 0.80 LB.
 
 ## Validation Notes
 
-- Use StratifiedKFold (k=5 or 10) for all experiments
-- CV-LB calibration: LB ≈ 2.55*CV - 1.37
-- Current gap (+0.0645) is acceptable but watch for increases
-- Lower variance correlates with better generalization
-- Track prediction distributions (baseline under-predicted survival)
-
-## Implementation Checklist for Stacking
-
-```python
-# Stacking implementation outline
-from sklearn.model_selection import StratifiedKFold
-
-# 1. Define base models
-base_models = [
-    ('rf', RandomForestClassifier(...)),
-    ('et', ExtraTreesClassifier(...)),
-    ('ada', AdaBoostClassifier(...)),
-    ('gb', GradientBoostingClassifier(...)),
-    ('svc', SVC(probability=True, ...)),
-    ('xgb', XGBClassifier(...)),
-    ('lr', LogisticRegression(...))
-]
-
-# 2. Generate OOF predictions
-kfold = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-oof_train = np.zeros((len(X_train), len(base_models)))
-oof_test = np.zeros((len(X_test), len(base_models)))
-
-for i, (name, model) in enumerate(base_models):
-    oof_test_fold = np.zeros((len(X_test), kfold.n_splits))
-    for fold, (train_idx, val_idx) in enumerate(kfold.split(X, y)):
-        model.fit(X[train_idx], y[train_idx])
-        oof_train[val_idx, i] = model.predict_proba(X[val_idx])[:, 1]
-        oof_test_fold[:, fold] = model.predict_proba(X_test)[:, 1]
-    oof_test[:, i] = oof_test_fold.mean(axis=1)
-
-# 3. Train meta-learner
-meta_learner = XGBClassifier(n_estimators=2000, max_depth=4, ...)
-meta_learner.fit(oof_train, y)
-predictions = meta_learner.predict(oof_test)
-```
-
-## Expected Outcome
-
-If stacking works as in reference kernel:
-- CV should improve to ~0.84-0.85
-- LB should improve to ~0.78-0.80
-- This would be competitive with top 10% solutions
+- Use StratifiedKFold (k=10) for all experiments
+- CV-LB calibration: LB ≈ 2.55*CV - 1.37 (from 2 submissions)
+- Current gap (+0.0645) suggests overfitting - prioritize regularization
+- Lower variance correlates with better generalization (voting: 0.0239 vs stacking: 0.0360)
 
 ## Submission Strategy
 
-- Submit stacking result if CV improves significantly (>0.84)
-- 5 submissions remaining - use wisely
-- Focus on CV improvement, trust the calibration
+- **DO NOT SUBMIT** unless CV improves significantly (>0.84)
+- Only 1 submission remaining today - save it
+- Focus on reducing CV-LB gap through regularization/adversarial validation
+- If adversarial validation shows significant shift, consider importance weighting
+
+## Expected Outcome
+
+If regularization and adversarial validation work:
+- CV may decrease slightly (e.g., 0.83)
+- But LB should improve due to better generalization
+- Target: Reduce CV-LB gap from 0.0645 to <0.04
