@@ -1,0 +1,160 @@
+# Seed Prompt: Chemical Reaction Yield Prediction
+
+## Data Understanding
+**Reference notebooks for data characteristics:**
+- `exploration/eda.ipynb` - Contains full EDA: data shapes, target distributions, CV structure, solvent counts
+- Single solvent data: 656 samples, 24 unique solvents (leave-one-solvent-out CV = 24 folds)
+- Full/mixture data: 1227 samples, 13 unique ramps (leave-one-ramp-out CV = 13 folds)
+- Targets: SM, Product 2, Product 3 (yields in range 0-1, can slightly exceed 1)
+- Temperature range: 175-225°C, Residence Time: ~2-15 min
+
+## CRITICAL: Submission Structure Requirements
+The submission MUST follow the exact template structure from the competition. Only the model definition line can be changed in the last three cells. The model class must implement:
+- `train_model(X_train, Y_train)` method
+- `predict(X_test)` method returning predictions
+
+The utils.py file provides: `load_data()`, `load_features()`, `generate_leave_one_out_splits()`, `generate_leave_one_ramp_out_splits()`
+
+## STATE-OF-THE-ART APPROACH (MSE ~0.0039)
+Recent research (arXiv 2512.19530) achieved MSE of 0.0039 on this exact dataset using:
+- **Graph Attention Networks (GAT)** with molecular graph message-passing
+- **Differential Reaction Fingerprints (DRFP)** - 2048 features available in drfps_catechol_lookup.csv
+- **Mixture-aware solvent encodings** - continuous representation of solvent mixtures
+- Key insight: Explicit molecular graph message-passing and continuous mixture encoding are essential
+
+## Physics-Informed Feature Engineering (HIGHLY EFFECTIVE)
+
+### Arrhenius Kinetics Features
+Chemical reaction rates follow Arrhenius kinetics. Transform raw features:
+- `inv_temp = 1000 / (Temperature + 273.15)` - Inverse temperature in Kelvin
+- `log_time = ln(Residence Time)` - Logarithm of time  
+- `interaction = inv_temp * log_time` - Kinetic interaction term
+
+These physics-informed features significantly improve predictions by encoding the underlying chemistry.
+
+### Additional Feature Engineering
+- `Reaction_Energy = Temperature * Residence Time`
+- `B_Conc_Temp = SolventB% * Temperature` (for mixture data)
+- Polynomial features of temperature and time
+
+## Solvent Featurization
+Available pre-computed featurizations (use `load_features()` from utils):
+1. **spange_descriptors** (13 features) - Compact, interpretable: dielectric constant, ET(30), alpha, beta, pi*, SA, SB, SP, SdP, N, n, f(n), delta
+2. **acs_pca_descriptors** (5 features) - PCA-based from ACS Green Chemistry, very compact
+3. **drfps_catechol** (2048 features) - Differential reaction fingerprints, HIGH-DIMENSIONAL BUT POWERFUL
+4. **fragprints** (2133 features) - Fragment + fingerprint concatenation, high-dimensional
+
+For mixed solvents, use weighted average: `features = A * (1-pct) + B * pct`
+
+**Recommendation:** DRFP features (2048-dim) showed best results in GNN benchmarks. Consider combining with Arrhenius features.
+
+## Chemical Symmetry (CRITICAL FOR MIXTURES)
+
+### Training Data Augmentation
+For mixed solvents, a mixture of "Solvent A + Solvent B" is physically identical to "Solvent B + Solvent A". 
+- Train on BOTH (A,B) and (B,A flipped) versions to double training data
+- This respects the physical symmetry of mixtures
+
+### Test Time Augmentation (TTA)
+During inference for mixed solvents:
+1. Predict with input as (A, B)
+2. Predict with input as (B, A) flipped
+3. Final prediction = (Pred1 + Pred2) / 2
+
+This mathematically guarantees symmetry and reduces variance.
+
+## Model Architectures
+
+### Graph Neural Networks (BEST PERFORMANCE)
+GNNs with attention mechanisms achieve state-of-the-art:
+- Graph Attention Networks (GAT) for molecular graphs
+- Message-passing to capture solute-solvent interactions
+- Combine with DRFP features for best results
+
+### Neural Networks (MLP) - Strong Baseline
+Architecture that works well:
+- Input BatchNorm
+- Hidden layers: [128, 128, 64] with BatchNorm, ReLU, Dropout(0.2)
+- Output: 3 neurons with Sigmoid activation (yields are 0-1)
+- Loss: MSELoss or HuberLoss (more robust to outliers)
+- Optimizer: Adam with lr=5e-4, weight_decay=1e-5
+- Scheduler: ReduceLROnPlateau (factor=0.5, patience=20)
+- Epochs: 300
+- Batch size: 32
+- Gradient clipping: max_norm=1.0
+
+### Gradient Boosting (LightGBM/XGBoost)
+Alternative approach with per-target regressors:
+- 3 separate models (one per target)
+- LightGBM: lr=0.03, max_depth=6, early_stopping=100 rounds
+- XGBoost: n_estimators=1500, lr=0.015, max_depth=6
+- Can achieve MSE as low as 0.001 on some folds
+
+### Gaussian Processes
+For small datasets with LOO-CV, GPs with chemistry-aware kernels can be effective:
+- Use GAUCHE library for molecular kernels
+- Tune hyperparameters via LOO marginal likelihood
+- Good uncertainty quantification
+
+### Ensemble/Bagging
+Bagging multiple models (e.g., 7 MLPs) and averaging predictions improves robustness.
+Consider stacking different model types (MLP + LightGBM + GP).
+
+## Advanced Techniques
+
+### Multi-Task Learning
+The 3 targets (SM, Product 2, Product 3) are chemically related. Consider:
+- Shared hidden layers with task-specific heads
+- Multi-output models that learn correlations
+
+### Feature Concatenation
+Combine multiple featurizations:
+- DRFP (2048) + Arrhenius features (3) = powerful combination
+- Or: Spange (13) + ACS PCA (5) + Arrhenius features (3) = 21 features (compact)
+- Use PCA to reduce high-dimensional fingerprints if needed
+
+### Regularization
+- L2 regularization (weight_decay)
+- Dropout (0.2-0.3)
+- Early stopping based on validation loss
+
+## Post-Processing
+- Clip predictions to [0, 1] range
+- Optional: Normalize rows to sum to 1 (chemical constraint that yields should sum to ~1)
+
+## Imbalanced Regression Consideration
+Yield data is often skewed toward low-yield reactions. Consider:
+- Cost-sensitive reweighting to improve high-yield predictions
+- HuberLoss instead of MSELoss for robustness to outliers
+- SMOGN or similar techniques for regression imbalance
+
+## Validation Strategy
+The competition uses specific CV splits:
+- Single solvent: `generate_leave_one_out_splits()` - leaves one solvent out (24 folds)
+- Full data: `generate_leave_one_ramp_out_splits()` - leaves one solvent ramp out (13 folds)
+
+This tests generalization to UNSEEN solvents, making it challenging. The model must learn transferable representations.
+
+## Key Techniques Summary (Priority Order)
+1. **DRFP features** (2048-dim differential reaction fingerprints) - PROVEN BEST
+2. **Physics-informed features** (Arrhenius kinetics: 1/T, ln(t), interaction) - PROVEN EFFECTIVE
+3. **Chemical symmetry** (data augmentation + TTA for mixtures) - PROVEN EFFECTIVE
+4. **Graph Neural Networks** with attention - STATE-OF-THE-ART
+5. **Bagging/ensemble** (average 5-7 models) - PROVEN EFFECTIVE
+6. **Robust loss** (HuberLoss)
+7. **Proper architecture** (BatchNorm, Dropout, Sigmoid output)
+8. **Learning rate scheduling** (ReduceLROnPlateau)
+
+## Reference Scores
+- Baseline MLP: ~0.1 MSE
+- With Arrhenius + Symmetry + Bagging: ~0.098 MSE (public kernel)
+- LightGBM best folds: ~0.001-0.004 MSE
+- **GNN + DRFP + mixture encoding: ~0.0039 MSE** (state-of-the-art)
+- **Target to beat: 0.0333**
+
+## Implementation Notes
+- Use torch.set_default_dtype(torch.double) for numerical stability
+- The model must work with pandas DataFrames (X_train, Y_train)
+- Predictions should be torch tensors or numpy arrays with shape [N, 3]
+- Order of targets: Product 2, Product 3, SM (check TARGET_LABELS in utils.py)
+- For DRFP features, they are sparse - consider sparse matrix handling
