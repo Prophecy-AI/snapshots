@@ -1,0 +1,75 @@
+## Current Status
+- Best CV: 0.7851 from exp_000 (Baseline LightGBM)
+- Gap to gold: ~0.194 (target: 0.979080)
+- Only 1 experiment completed, far from gold threshold
+
+## Response to Evaluator
+- **Technical verdict was TRUSTWORTHY**. The baseline execution is sound with proper stratified CV and no leakage, but the model is underconfident (predictions cluster at 0.05-0.07).
+- **Evaluator's top priority: Implement actual text content analysis and user-level aggregations**. I completely agree - this is the highest ROI direction. The baseline only uses text length and "EDIT" presence, missing the actual semantic content that should be highly predictive.
+- **Key concerns raised**:
+  - *No text content analysis*: Will implement TF-IDF, sentiment, and key phrase extraction
+  - *No user-level aggregations*: Will create user history features (past success rate, request frequency, etc.)
+  - *No temporal features*: Addressed below - I found strong temporal patterns
+  - *No handling of strong categorical signals (flair patterns)*: Will use target encoding for high-cardinality features like usernames
+
+## Data Understanding
+- **Reference notebooks**: See `exploration/eda.ipynb` for feature distributions and `exploration/evolver_loop1_analysis.ipynb` for temporal patterns
+- **Key patterns discovered**:
+  - **Temporal effects**: Success rates peak at 15-17h (3-5pm), Thursday is highest, June is highest month. These are strong signals that need to be engineered as cyclical features (sin/cos transforms for hour/day/month).
+  - **Text matters**: "EDIT" presence shows 41.6% vs 22.6% success rate - actual content will be even more predictive
+  - **User flair patterns**: "shroom" and "PIF" flairs have 100% success rate - categorical signals are strong
+  - **Class imbalance**: 24.8% positive rate requires proper handling
+
+## Recommended Approaches (Priority Order)
+
+### 1. Text Content Feature Engineering (Highest Priority)
+**Because**: The evaluator correctly identified this as the biggest gap. Reddit posts explaining pizza need should contain strong predictive signal.
+- **TF-IDF features**: Extract top unigrams/bigrams from request_text (max 100-200 features to avoid sparsity)
+- **Sentiment analysis**: Use VADER or TextBlob to extract sentiment scores (positive/negative/neutral)
+- **Key phrases**: Count occurrences of words like "hungry", "broke", "student", "kids", "payday", etc.
+- **Reddit-specific**: Parse markdown, count URLs, user mentions, subreddit links
+- **Preprocessing**: Use Reddit-aware tokenizer from redditScore library to handle markdown/emojis properly
+
+### 2. User-Level Feature Engineering (High Priority)
+**Because**: User history should be highly predictive - repeat requesters, past success rates, etc.
+- **User aggregations**: For each requester_id, compute:
+  - Past success rate (target encoding with smoothing)
+  - Number of previous requests
+  - Average upvotes/downvotes on past posts
+  - Days since first/last request
+  - Success rate by subreddit
+- **Cross-validation**: Use nested CV to prevent leakage - compute aggregations only on training folds
+- **Smoothing**: Apply Bayesian smoothing for users with few requests to prevent overfitting
+
+### 3. Temporal Feature Engineering (Medium-High Priority)
+**Because**: My analysis found clear temporal patterns that models can exploit.
+- **Cyclical encoding**: Transform hour, day_of_week, month into sin/cos pairs to capture cyclical nature
+- **Time since events**: Days since user's first request, days since subreddit's first request
+- **Peak hours**: Binary flag for 15-17h (peak success time)
+- **Temporal aggregations**: Success rate by hour, day_of_week, month (target encoding with time groups)
+
+### 4. High-Cardinality Categorical Encoding (Medium Priority)
+**Because**: Usernames, subreddits, and flairs have high cardinality requiring proper encoding.
+- **Target encoding**: For requester_id, subreddit, user_flair with regularization/smoothing
+- **Frequency encoding**: For high-cardinality features where target encoding might overfit
+- **Count encoding**: Number of times user has posted, subreddit activity level
+- **Implementation**: Use category_encoders library with cross-validation to prevent leakage
+
+### 5. Advanced Model Architecture (Lower Priority)
+**Because**: Feature engineering will give bigger gains than model complexity at this stage.
+- **Model diversity**: Train LightGBM, CatBoost (handles categoricals natively), and XGBoost
+- **Class imbalance**: Use scale_pos_weight=3 (approx. (1-p)/p) or focal loss
+- **Hyperparameters**: Start with defaults, focus tuning on learning_rate and num_leaves after features mature
+- **Neural network**: Consider simple MLP or TabM for ensemble diversity later
+
+## What NOT to Try
+- **Don't spend time on**: Hyperparameter tuning before improving features - current gap is 0.194, which won't be closed by tuning alone
+- **Avoid**: One-hot encoding for high-cardinality features (usernames, subreddits) - causes dimensionality explosion
+- **Skip**: Complex deep learning architectures until simpler features are exhausted - baseline is too weak for DL to help
+- **Don't**: Use target leakage features like "number of pizzas given" that wouldn't be available at prediction time
+
+## Validation Notes
+- **CV scheme**: Continue with stratified 5-fold CV (proven stable with 0.0165 std)
+- **Leakage prevention**: All target encoding and user aggregations MUST use nested CV - fit encoders on train folds only
+- **Confidence**: Low confidence in current CV estimate (0.7851) because model is underconfident and missing key features. Expect significant improvement with text/user features.
+- **Target**: Aim for CV >0.85 in next iteration, then >0.90 before considering ensembling
