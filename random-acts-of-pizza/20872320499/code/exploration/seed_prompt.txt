@@ -1,38 +1,72 @@
 ## Problem Type
 This is a binary classification problem predicting whether a Reddit pizza request will be successful. The evaluation metric is AUC-ROC.
 
-## Data Characteristics (Reference: exploration/eda.ipynb)
-- **Multimodal data**: Text (request title, text) + tabular meta-data (user activity, votes, timestamps)
+## Critical Data Constraints (Reference: exploration/eda.ipynb)
+
+### Feature Availability at Prediction Time
+**CRITICAL**: Test set only contains 17 features vs 32 in train. Only use features available in both sets:
+
+**Safe features to use**:
+- `request_text_edit_aware` (NOT `request_text` - test only has edit-aware version)
+- `request_title`
+- `requester_account_age_in_days_at_request`
+- `requester_days_since_first_post_on_raop_at_request`
+- `requester_number_of_comments_at_request`
+- `requester_number_of_comments_in_raop_at_request`
+- `requester_number_of_posts_at_request`
+- `requester_number_of_posts_on_raop_at_request`
+- `requester_number_of_subreddits_at_request`
+- `requester_upvotes_minus_downvotes_at_request`
+- `requester_upvotes_plus_downvotes_at_request`
+- `requester_subreddits_at_request`
+- `requester_username`
+- `giver_username_if_known`
+- `unix_timestamp_of_request`
+- `unix_timestamp_of_request_utc`
+
+**DO NOT USE retrieval-time features** (leakage - not available at prediction):
+- Any feature ending in `_at_retrieval`
+- `request_text` (use `request_text_edit_aware` instead)
+- `post_was_edited`
+- `requester_user_flair`
+
+### Why Edit-Aware Text Matters
+The `request_text_edit_aware` field has been cleaned to remove outcome-leaking edits like "EDIT: Thanks for the pizza!". Using `request_text` would introduce leakage. Always use the edit-aware version.
+
+### Data Characteristics
+- **Multimodal data**: Text (request title, edit-aware text) + tabular meta-data (user activity, votes, timestamps)
 - **Moderate class imbalance**: ~25% positive rate (pizza received)
-- **Key predictive signals**: User activity in RAOP subreddit, user flair, text characteristics
-- **Missing data**: User flair missing for ~75% of samples
+- **Key predictive signals**: User activity in RAOP subreddit (strongest correlation), text characteristics
+- **Text length**: Varies significantly (0-4460 characters)
 
 ## Core Modeling Strategy
 
 ### 1. Multimodal Architecture
 **Primary approach**: Combine text embeddings with tabular features
-- **Text branch**: Use transformer models (BERT, RoBERTa) or social-media specialized models (BERTweet, SocBERT) to encode request text and title
+- **Text branch**: Use transformer models (BERT, RoBERTa) or social-media specialized models (BERTweet, SocBERT) to encode request title and edit-aware text
 - **Tabular branch**: Gradient boosting models (LightGBM, CatBoost, XGBoost) on numerical and categorical meta-data
 - **Fusion**: Concatenate text embeddings with tabular features and feed to final classifier, OR ensemble predictions from both branches
 
 **Alternative**: Serialize meta-data as text and prepend to request text, then use single transformer model
 
 ### 2. Text Feature Engineering
+- **Use edit-aware text**: Always use `request_text_edit_aware` to avoid leakage
 - **Preprocessing**: Preserve Reddit-specific tokens (usernames, subreddit mentions), handle URLs, emojis
 - **Length features**: Extract title length, text length, word count (strong signals in social media)
 - **Sentiment/LIWC**: Consider adding linguistic features, sentiment scores
 - **TF-IDF**: As backup for simpler models or hybrid approaches
 
 ### 3. Tabular Feature Engineering
-- **User activity features**: RAOP-specific activity (posts, comments) most predictive
-- **User flair encoding**: One-hot or target encoding (None/shroom/PIF highly predictive)
+- **User activity features**: RAOP-specific activity (posts, comments) most predictive (correlation ~0.46)
 - **Temporal features**: Extract day of week, hour from timestamps
 - **Vote ratios**: Upvote/downvote ratios and differences
-- **Interaction terms**: User activity × text length, flair × activity
+- **Interaction terms**: User activity × text length
+- **Username encoding**: Target encoding on requester_username (high cardinality)
 
 ### 4. Handling Class Imbalance
 - **Metric**: Optimize for AUC-ROC (given evaluation metric)
 - **Class weights**: Use scale_pos_weight (XGBoost/LightGBM) or class_weight='balanced'
+- **Scale pos weight**: Approximately 3:1 ratio (0.75/0.25 = 3)
 - **Resampling**: Consider SMOTE or borderline-SMOTE for minority class
 - **Threshold tuning**: Optimize decision threshold on validation set
 
@@ -49,20 +83,21 @@ This is a binary classification problem predicting whether a Reddit pizza reques
 - Simple averaging often effective for homogeneous models
 
 ### 6. Validation Strategy
-- **Stratified K-Fold**: Essential for maintaining class distribution
-- **5 folds**: Standard for this dataset size
+- **Stratified K-Fold**: Essential for maintaining class distribution (5 folds recommended)
 - **Early stopping**: Use AUC-ROC for monitoring
 - **Feature importance**: Analyze to identify leakage or overfitting
+- **Leakage check**: Ensure no retrieval-time features accidentally included
 
 ### 7. Key Insights from EDA
 Reference `exploration/eda.ipynb` for:
 - Feature correlation analysis (RAOP activity highly predictive)
 - Text length distributions and patterns
-- User flair impact on success rate
-- Missing value patterns
+- Safe vs leakage feature identification
+- Class imbalance analysis
 
 ### 8. Implementation Notes
 - **Memory management**: Text data can be large, use efficient tokenization
 - **Cross-validation**: Generate out-of-fold predictions for ensembling
 - **Submission**: Calibrate probabilities if needed, but AUC-ROC is ranking-based
-- **Leakage check**: Ensure no future information leaks into features
+- **Leakage prevention**: Double-check no `_at_retrieval` features in final model
+- **Feature engineering**: Focus on request-time features only
