@@ -1,31 +1,44 @@
 # Random Acts of Pizza - Competition Strategy Guide
 
 ## Problem Overview
-This is a binary classification problem predicting whether a Reddit pizza request will be successful. The dataset contains both text fields (request title, text) and meta features (user activity metrics, timestamps, flair).
+This is a binary classification problem predicting whether a Reddit pizza request will be successful. The dataset contains both text fields (request title, text) and meta features (user activity metrics, timestamps).
 
-**Key characteristics from EDA:**
-- Class imbalance: ~25% positive class (successful requests)
-- Text fields: request_title (avg 72 chars), request_text (avg 402 chars)
-- Meta features: user activity metrics, timestamps, subreddit participation
-- User flair highly predictive (PIF/shroom = 100% success)
+**Critical Data Leakage Finding:**
+- **User flair is NOT available in test set** but has perfect correlation with target (100% success for PIF/shroom)
+- **15 features are in train but not in test** - must exclude all at_retrieval features
+- **Only 17 features are available in test set** - must use exclusively these features
 
 **Reference notebooks for data characteristics:**
-- `eda.ipynb` - Contains full EDA: feature distributions, missing values, target distribution, correlations
+- `eda.ipynb` - Contains full EDA: feature distributions, missing values, target distribution, correlations, data leakage analysis
 
 ## Data Preprocessing
+
+### Critical: Feature Selection
+**ONLY use features available in test set (17 features):**
+- Text: request_title, request_text_edit_aware
+- User activity (at_request only): requester_number_of_comments_at_request, requester_number_of_posts_at_request, requester_number_of_comments_in_raop_at_request, requester_number_of_posts_on_raop_at_request, requester_number_of_subreddits_at_request
+- Votes: requester_upvotes_minus_downvotes_at_request, requester_upvotes_plus_downvotes_at_request
+- Temporal: unix_timestamp_of_request, unix_timestamp_of_request_utc, requester_account_age_in_days_at_request, requester_days_since_first_post_on_raop_at_request
+- Other: request_id, requester_username, giver_username_if_known, requester_subreddits_at_request
+
+**DO NOT use:**
+- Any feature ending with "_at_retrieval" (leakage)
+- requester_user_flair (not in test set, perfect predictor)
+- request_text (use edit_aware version instead)
+- post_was_edited, request_number_of_comments_at_retrieval, vote counts at retrieval
 
 ### Text Preprocessing
 - Remove Reddit-specific artifacts: URLs, subreddit tags (r/), user mentions (u/), markdown, HTML entities
 - Normalize case and expand contractions
 - Handle Reddit-specific tokens: hashtags, emojis, emoticons
 - Lemmatization or stemming to collapse inflectional forms
-- Remove edited comments that indicate success (use request_text_edit_aware field)
+- Use request_text_edit_aware (already cleaned of success indicators)
 
 ### Meta Features
-- Fill missing values in requester_user_flair (majority are None)
 - Engineer temporal features from timestamps (hour of day, day of week)
 - Create ratios: comments/posts, upvotes/downvotes, activity per day
-- Encode categorical features: requester_user_flair, subreddit participation
+- Account age categories: new (<30 days), established (>1 year)
+- Subreddit diversity: number of unique subreddits
 
 ## Modeling Approaches
 
@@ -35,16 +48,16 @@ This is a binary classification problem predicting whether a Reddit pizza reques
    - Use edit-aware version to avoid leakage
    
 2. **Gradient Boosting on meta features**: LightGBM/CatBoost/XGBoost
-   - Handle class imbalance with scale_pos_weight
-   - Target encoding for high-cardinality features
+   - Handle class imbalance with scale_pos_weight (~3:1 ratio)
+   - Target encoding for high-cardinality features (username, subreddits)
    
 3. **Neural Network on combined features**: MLP with text embeddings + meta features
 
 ### Handling Class Imbalance
-- Use ROC-AUC as evaluation metric (provided)
-- Algorithm-level: scale_pos_weight (XGBoost), class_weight (LightGBM)
+- Class distribution: ~25% positive (715/2878)
+- Algorithm-level: scale_pos_weight=3.0 (XGBoost), class_weight='balanced' (LightGBM)
 - Data-level: Consider SMOTE or random oversampling for minority class
-- Avoid accuracy as metric; focus on probability calibration
+- Focus on ROC-AUC (provided metric) and probability calibration
 
 ## Feature Engineering
 
@@ -52,20 +65,22 @@ This is a binary classification problem predicting whether a Reddit pizza reques
 - TF-IDF vectors (unigrams + bigrams) for baseline models
 - Text length statistics: char count, word count, avg word length
 - Sentiment analysis scores
-- Presence of specific keywords ("please", "thank", "desperate", etc.)
+- Presence of specific keywords ("please", "thank", "desperate", "hungry", "family", "kids")
 - Punctuation patterns and capitalization ratios
+- Readability scores (Flesch-Kincaid)
 
 ### Meta Features
 - User activity ratios: comments/posts, RAOP activity vs total activity
-- Account age categories: new (<30 days), established (>1 year)
-- Time-based features: hour of day, day of week, month
+- Account age categories: new (<30 days), medium (30-365 days), established (>365 days)
+- Time-based features: hour of day, day of week, month, is_weekend
 - Vote ratio features: upvotes/(upvotes+downvotes)
-- Subreddit diversity: number of unique subreddits
+- Subreddit diversity: number of unique subreddits, entropy of subreddit distribution
 
 ### Interaction Features
 - Text length × user activity interactions
 - Account age × request success patterns
-- Temporal patterns × user flair interactions
+- Temporal patterns × user activity interactions
+- Vote patterns × account age
 
 ## Ensembling Strategy
 
@@ -78,6 +93,7 @@ This is a binary classification problem predicting whether a Reddit pizza reques
 2. **Level-2 Meta-learner**: 
    - Weighted average or logistic regression on out-of-fold predictions
    - Use stratified K-fold (k=5) for robust validation
+   - Optimize ensemble weights via cross-validation
 
 ### Alternative: AutoGluon Multimodal
 - Automatically ensembles TextPredictor with tabular models
@@ -88,25 +104,27 @@ This is a binary classification problem predicting whether a Reddit pizza reques
 
 ### Cross-Validation
 - **Stratified K-Fold** (k=5) to maintain class distribution
-- **Time-based split** if temporal leakage is a concern
-- Monitor both ROC-AUC and PR-AUC (especially for minority class)
+- **Time-based split** if temporal patterns are strong
+- Monitor both ROC-AUC (primary) and PR-AUC (minority class performance)
 
 ### Key Considerations
-- Ensure no leakage from future information (use "at_request" features only)
+- **CRITICAL**: Ensure no leakage - only use at_request features
 - Validate probability calibration using reliability diagrams
-- Check for overfitting to highly predictive features (user flair)
+- Check for overfitting to specific temporal periods
+- Use early stopping based on validation ROC-AUC
 
 ## Optimization
 
 ### Hyperparameter Tuning
-- **Tree models**: Learning rate, max_depth, num_leaves, scale_pos_weight
-- **Transformers**: Learning rate, batch size, number of epochs, warmup steps
+- **Tree models**: Learning rate (0.01-0.1), max_depth (3-7), num_leaves (31-127), scale_pos_weight
+- **Transformers**: Learning rate (2e-5 to 5e-5), batch size (16-32), epochs (3-5)
 - Use Bayesian optimization (Optuna) for efficient search
+- Focus on features available in test set only
 
 ### Post-processing
 - Probability calibration using isotonic regression or Platt scaling
-- Adjust decision threshold based on business requirements
 - Ensemble weight optimization via cross-validation
+- Threshold adjustment for decision-making (if needed)
 
 ## Implementation Notes
 
@@ -120,9 +138,19 @@ This is a binary classification problem predicting whether a Reddit pizza reques
 - Transformers require GPU for reasonable training time
 - Use gradient accumulation if memory constrained
 - Consider distillation for faster inference
+- Tree models can run on CPU
 
 ### Key Success Factors
-- Proper handling of edited text (use edit_aware version)
-- Leverage user flair without overfitting
+- **AVOID DATA LEAKAGE**: Strictly use only test-available features
+- Engineer strong temporal and activity features
 - Capture sentiment and urgency in text
 - Balance simplicity with model complexity
+- Focus on ROC-AUC optimization
+
+## Common Pitfalls to Avoid
+
+1. **Using requester_user_flair**: Perfect predictor but not in test set
+2. **Using at_retrieval features**: Future information leakage
+3. **Overfitting to temporal patterns**: Validate across time periods
+4. **Ignoring class imbalance**: Use appropriate weights/metrics
+5. **Text preprocessing leakage**: Don't remove success indicators manually, use edit_aware version
