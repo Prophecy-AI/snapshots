@@ -1,75 +1,88 @@
 ## Current Status
 - Best CV: 0.7851 from exp_000 (Baseline LightGBM)
-- Gap to gold: ~0.194 (target: 0.979080)
-- Only 1 experiment completed, far from gold threshold
+- Gap to gold: ~0.194 (need 0.979080)
+- Both experiments below gold, TF-IDF made it worse
 
 ## Response to Evaluator
-- **Technical verdict was TRUSTWORTHY**. The baseline execution is sound with proper stratified CV and no leakage, but the model is underconfident (predictions cluster at 0.05-0.07).
-- **Evaluator's top priority: Implement actual text content analysis and user-level aggregations**. I completely agree - this is the highest ROI direction. The baseline only uses text length and "EDIT" presence, missing the actual semantic content that should be highly predictive.
+- **Technical verdict was TRUSTWORTHY** - execution is sound but model is underconfident
+- **Evaluator's top priority: Text content analysis** - I agree but my analysis reveals user flair is even MORE important
 - **Key concerns raised**:
-  - *No text content analysis*: Will implement TF-IDF, sentiment, and key phrase extraction
-  - *No user-level aggregations*: Will create user history features (past success rate, request frequency, etc.)
-  - *No temporal features*: Addressed below - I found strong temporal patterns
-  - *No handling of strong categorical signals (flair patterns)*: Will use target encoding for high-cardinality features like usernames
+  - *No text content analysis*: Will fix with Reddit-aware preprocessing and keyword features
+  - *No user-level aggregations*: **IMPOSSIBLE** - all usernames are unique (1 request per user), cannot create history features
+  - *No temporal features*: Will implement cyclical encoding for hour/day patterns
+  - *No handling of strong categorical signals*: This is CRITICAL - flair has 100% success rates
 
 ## Data Understanding
-- **Reference notebooks**: See `exploration/eda.ipynb` for feature distributions and `exploration/evolver_loop1_analysis.ipynb` for temporal patterns
-- **Key patterns discovered**:
-  - **Temporal effects**: Success rates peak at 15-17h (3-5pm), Thursday is highest, June is highest month. These are strong signals that need to be engineered as cyclical features (sin/cos transforms for hour/day/month).
-  - **Text matters**: "EDIT" presence shows 41.6% vs 22.6% success rate - actual content will be even more predictive
-  - **User flair patterns**: "shroom" and "PIF" flairs have 100% success rate - categorical signals are strong
-  - **Class imbalance**: 24.8% positive rate requires proper handling
+- **Reference notebooks**: See `exploration/evolver_loop2_analysis.ipynb` for latest findings
+- **CRITICAL FINDINGS**:
+  - User flair is EXTREMELY predictive: PIF (38/38, 100%) and shroom (677/677, 100%) flairs
+  - These cover 24.8% of data but pose massive overfitting risk
+  - No users have multiple requests - usernames are anonymized per-request
+  - Temporal patterns exist (3pm peak, Thursday best) but are moderate
+  - TF-IDF failed due to simple preprocessing without Reddit-specific handling
 
 ## Recommended Approaches (Priority Order)
 
-### 1. Text Content Feature Engineering (Highest Priority)
-**Because**: The evaluator correctly identified this as the biggest gap. Reddit posts explaining pizza need should contain strong predictive signal.
-- **TF-IDF features**: Extract top unigrams/bigrams from request_text (max 100-200 features to avoid sparsity)
-- **Sentiment analysis**: Use VADER or TextBlob to extract sentiment scores (positive/negative/neutral)
-- **Key phrases**: Count occurrences of words like "hungry", "broke", "student", "kids", "payday", etc.
-- **Reddit-specific**: Parse markdown, count URLs, user mentions, subreddit links
-- **Preprocessing**: Use Reddit-aware tokenizer from redditScore library to handle markdown/emojis properly
+### 1. SAFE FLAIR HANDLING (Highest Priority)
+- **Target encode user flair with aggressive smoothing**
+  - Use sklearn's TargetEncoder with internal cross-validation
+  - Set high smoothing parameter to prevent overfitting on perfect predictors
+  - Alternative: Create binary feature `has_perfect_flair` (1 if PIF or shroom, 0 otherwise)
+  - **Why**: These flairs are 100% predictive but may not exist in test set or may be different
+  - **Validation**: Must check if flair patterns exist in test set via adversarial validation
 
-### 2. User-Level Feature Engineering (High Priority)
-**Because**: User history should be highly predictive - repeat requesters, past success rates, etc.
-- **User aggregations**: For each requester_id, compute:
-  - Past success rate (target encoding with smoothing)
-  - Number of previous requests
-  - Average upvotes/downvotes on past posts
-  - Days since first/last request
-  - Success rate by subreddit
-- **Cross-validation**: Use nested CV to prevent leakage - compute aggregations only on training folds
-- **Smoothing**: Apply Bayesian smoothing for users with few requests to prevent overfitting
+### 2. REDDIT-AWARE TEXT FEATURES
+- **Implement Reddit-specific preprocessing**:
+  - Use redditScore's CrazyTokenizer or custom regex to handle:
+    - Markdown syntax (**bold**, *italic*, ~~strikethrough~~)
+    - Subreddit mentions (r/pizza, r/RandomActsOfPizza)
+    - User mentions (u/username)
+    - URLs and emails
+    - Emojis and emoticons
+  - **Create binary features for high-impact keywords**:
+    - From EDA: 'hungry', 'broke', 'student', 'paycheck', 'week', 'ramen'
+    - Also: 'edit', 'update', 'thank', 'please', 'help', 'need', 'family', 'kids', 'job', 'lost'
+    - 'EDIT' presence already shows 41.6% vs 22.6% success rate
+  - **Sentiment analysis**: Use VADER or TextBlob for sentiment scores
+  - **TF-IDF with proper preprocessing**: Try again with Reddit tokenization, limit to top 50-100 features
+  - **Why**: Previous TF-IDF failed due to naive preprocessing, but text is the main content
 
-### 3. Temporal Feature Engineering (Medium-High Priority)
-**Because**: My analysis found clear temporal patterns that models can exploit.
-- **Cyclical encoding**: Transform hour, day_of_week, month into sin/cos pairs to capture cyclical nature
-- **Time since events**: Days since user's first request, days since subreddit's first request
-- **Peak hours**: Binary flag for 15-17h (peak success time)
-- **Temporal aggregations**: Success rate by hour, day_of_week, month (target encoding with time groups)
+### 3. TEMPORAL FEATURES
+- **Extract cyclical time features**:
+  - Hour of day: use sin/cos transformation to capture 3pm peak
+  - Day of week: use sin/cos, Thursday shows 28.7% success rate
+  - Day of month: raw value or sin/cos
+  - Month: sin/cos, June shows 31.6% success rate
+- **Why**: Clear patterns exist and are easy to engineer safely
 
-### 4. High-Cardinality Categorical Encoding (Medium Priority)
-**Because**: Usernames, subreddits, and flairs have high cardinality requiring proper encoding.
-- **Target encoding**: For requester_id, subreddit, user_flair with regularization/smoothing
-- **Frequency encoding**: For high-cardinality features where target encoding might overfit
-- **Count encoding**: Number of times user has posted, subreddit activity level
-- **Implementation**: Use category_encoders library with cross-validation to prevent leakage
+### 4. LEAKAGE INVESTIGATION
+- **Test retrieval vs request features**:
+  - Create two versions: one with all features, one dropping `_at_retrieval` features
+  - Compare CV scores - if retrieval features cause overfitting, they'll show high train score but low val score
+  - **Why**: Features measured "at retrieval" may contain future information not available at request time
 
-### 5. Advanced Model Architecture (Lower Priority)
-**Because**: Feature engineering will give bigger gains than model complexity at this stage.
-- **Model diversity**: Train LightGBM, CatBoost (handles categoricals natively), and XGBoost
-- **Class imbalance**: Use scale_pos_weight=3 (approx. (1-p)/p) or focal loss
-- **Hyperparameters**: Start with defaults, focus tuning on learning_rate and num_leaves after features mature
-- **Neural network**: Consider simple MLP or TabM for ensemble diversity later
+### 5. MODEL DIVERSITY
+- **Try CatBoost**: Handles categorical features natively, may better capture flair signal
+- **Try XGBoost**: Different algorithm, good for ensembling
+- **Tune LightGBM**: Current model is underconfident (predictions 0.061-0.138), increase max_depth or reduce min_child_samples
+- **Why**: Single model likely insufficient, need diversity for ensemble
+
+### 6. FEATURE SELECTION
+- **Remove low-importance features**: Use feature importance from baseline to drop noise
+- **Create interaction features**: 
+  - `flair_encoded * hour` (maybe certain flairs work better at certain times)
+  - `text_length * number_of_comments`
+- **Why**: Reduce dimensionality and capture non-linear relationships
 
 ## What NOT to Try
-- **Don't spend time on**: Hyperparameter tuning before improving features - current gap is 0.194, which won't be closed by tuning alone
-- **Avoid**: One-hot encoding for high-cardinality features (usernames, subreddits) - causes dimensionality explosion
-- **Skip**: Complex deep learning architectures until simpler features are exhausted - baseline is too weak for DL to help
-- **Don't**: Use target leakage features like "number of pizzas given" that wouldn't be available at prediction time
+- **User history aggregations**: Impossible - all usernames are unique per request
+- **Simple TF-IDF**: Already failed, need Reddit-aware preprocessing first
+- **One-hot encoding for flair**: Will cause catastrophic overfitting on perfect predictors
+- **Ignoring flair signal**: Too strong to ignore, but must handle safely
 
 ## Validation Notes
-- **CV scheme**: Continue with stratified 5-fold CV (proven stable with 0.0165 std)
-- **Leakage prevention**: All target encoding and user aggregations MUST use nested CV - fit encoders on train folds only
-- **Confidence**: Low confidence in current CV estimate (0.7851) because model is underconfident and missing key features. Expect significant improvement with text/user features.
-- **Target**: Aim for CV >0.85 in next iteration, then >0.90 before considering ensembling
+- **CV Scheme**: Continue with stratified 5-fold CV (current approach is sound)
+- **Overfitting detection**: Monitor train/val gap - large gap indicates leakage (especially from flair)
+- **Test set check**: Use adversarial validation to verify flair patterns exist in test set
+- **Prediction calibration**: Ensure predictions span full [0,1] range, not clustered narrowly
+- **Confidence**: Medium - flair handling is risky but necessary for big gains
