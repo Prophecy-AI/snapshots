@@ -158,41 +158,45 @@ def validate(model, loader, criterion, device):
             correct += (preds == labels).sum().item()
             total += labels.size(0)
             
-            all_preds.extend(torch.sigmoid(outputs).cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
+            all_preds.extend(torch.sigmoid(outputs).cpu().numpy().flatten())
+            all_labels.extend(labels.cpu().numpy().flatten())
     
     val_loss = running_loss / total
     val_acc = correct / total
-    val_log_loss = log_loss(all_labels, all_preds, eps=1e-7)
     
-    return val_loss, val_acc, val_log_loss
+    # Clip predictions to avoid log(0) errors
+    clipped_preds = np.clip(all_preds, 1e-7, 1-1e-7)
+    val_log_loss = log_loss(all_labels, clipped_preds)
+    
+    return val_log_loss
 
 # Training loop
 print("\nStarting training...")
 num_epochs = 15
-best_val_loss = float('inf')
+best_val_log_loss = float('inf')
 
 for epoch in range(num_epochs):
     start_time = time.time()
     
     train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device)
-    val_loss, val_acc, val_log_loss = validate(model, val_loader, criterion, device)
+    val_log_loss = validate(model, val_loader, criterion, device)
     
-    scheduler.step(val_loss)
+    # Use validation log loss for scheduling
+    scheduler.step(val_log_loss)
     
     epoch_time = time.time() - start_time
     
     print(f"Epoch {epoch+1}/{num_epochs} - {epoch_time:.1f}s")
     print(f"  Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f}")
-    print(f"  Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f} | Val Log Loss: {val_log_loss:.4f}")
+    print(f"  Val Log Loss: {val_log_loss:.6f}")
     
-    # Save best model
-    if val_loss < best_val_loss:
-        best_val_loss = val_loss
+    # Save best model based on log loss
+    if val_log_loss < best_val_log_loss:
+        best_val_log_loss = val_log_loss
         torch.save(model.state_dict(), os.path.join(SUBMISSION_DIR, 'best_model.pth'))
-        print(f"  → Best model saved (Val Loss: {val_loss:.4f})")
+        print(f"  → Best model saved (Val Log Loss: {val_log_loss:.6f})")
 
-print(f"\nTraining completed! Best validation loss: {best_val_loss:.4f}")
+print(f"\nTraining completed! Best validation log loss: {best_val_log_loss:.6f}")
 
 # Load best model and predict on test set
 print("\nLoading best model and predicting on test set...")
@@ -252,5 +256,5 @@ print(f"Total predictions: {len(submission)}")
 print(f"Prediction range: [{min(predictions):.4f}, {max(predictions):.4f}]")
 
 # Final validation log loss
-final_val_loss, final_val_acc, final_val_log_loss = validate(model, val_loader, criterion, device)
+final_val_log_loss = validate(model, val_loader, criterion, device)
 print(f"\nFinal Validation Log Loss: {final_val_log_loss:.6f}")
