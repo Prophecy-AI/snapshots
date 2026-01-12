@@ -1,78 +1,113 @@
+## Current Status
+- Best CV: 1.0 from exp_000 (001_baseline_lgbm)
+- Experiments above gold: 0 (the 1.0 score is unreliable due to data leakage)
+
+## Response to Evaluator
+**Technical verdict was UNRELIABLE. I completely agree with this assessment.**
+
+The evaluator correctly identified critical data leakage through the user_flair feature. My analysis confirms:
+- PIF flair: 38/38 requests successful (100% success rate)
+- shroom flair: 677/677 requests successful (100% success rate)  
+- Feature importance: user_flair_encoded = 2347, next highest = 48 (50x difference)
+
+**This is textbook data leakage** - the flair encodes future information about request success that wouldn't be available at prediction time. The perfect 1.0 CV score is meaningless and cannot be trusted.
+
+**Evaluator's top priority: Fix data leakage by removing user_flair_encoded.** I fully agree and will:
+1. Remove user_flair_encoded entirely from all experiments
+2. Remove ALL "at_retrieval" features (they're from the future)
+3. Use ONLY "at_request" features that are available when the request is made
+4. Implement proper leakage checks in all future experiments
+
+**Key concerns addressed:**
+- **Leakage detection**: Will check for features with perfect separation or implausibly high importance
+- **Feature validation**: Will verify temporal validity - only use features available at request time
+- **Baseline comparison**: Will establish simple baselines (logistic regression) before complex models
+- **Stanford paper features**: Will implement explicit narrative features (gratitude, reciprocity, story markers) rather than relying solely on TF-IDF
+
 ## Data Understanding
-**Reference notebooks for data characteristics:**
-- `exploration/eda.ipynb` - Contains full EDA: class distribution (75% negative, 25% positive), text length statistics, metadata feature distributions
-- Moderate class imbalance (3:1 ratio) - see eda.ipynb for details
-- Text features: request_title, request_text (avg 71 chars and 402 chars respectively)
-- Metadata features: account age, karma scores, activity metrics, subreddit participation
-- User flair is highly predictive: None (75%, low success), shroom (23.5%, high success), PIF (1.3%, 100% success)
+**Reference notebooks:** See `exploration/evolver_loop1_analysis.ipynb` for leakage investigation
 
-## Models
-For text classification with metadata features, winning Kaggle solutions typically use:
+**Key patterns discovered:**
+- **Severe leakage**: user_flair has 100% success rate for both categories (PIF and shroom)
+- **Temporal validity**: Test set only contains "at_request" features, confirming we must use only these
+- **Valid features**: 13 request-time features available (account age, karma, activity metrics, text content, timestamp)
+- **Stanford narrative features**: Show predictive power in our data:
+  - story_markers: r=+0.113 with target
+  - reciprocity_count: r=+0.110 with target  
+  - first_person_count: r=+0.098 with target
+  - money_mentions: r=+0.087 with target
+  - gratitude_count: r=+0.082 with target
 
-**Primary Models:**
-- Gradient boosting (XGBoost/LightGBM) on engineered features - strong baseline for tabular data
-- Logistic regression with TF-IDF features - effective for text classification
-- Neural networks (BERT/RoBERTa) for text understanding, optionally combined with metadata
-- Random Forest on combined feature set
+**Class imbalance**: 75% negative, 25% positive - moderate imbalance to address
 
-**Ensembling Strategy:**
-- Blend 3-5 diverse models: tree-based + linear + neural
-- Weighted averaging based on validation performance
-- Stacking with logistic regression as meta-learner often improves results
+## Recommended Approaches
+Priority-ordered list of what to try next:
 
-## Feature Engineering
-**Text Features (from original Stanford paper & winning solutions):**
-- TF-IDF vectors (unigrams, bigrams) on request_title and request_text
-- Text length features: character count, word count, sentence count
-- Readability scores: Flesch-Kincaid, automated readability index
-- Politeness indicators: gratitude expressions ("thank", "appreciate"), apologies ("sorry")
-- Reciprocity promises: "will", "promise", "in return", "exchange"
-- Narrative markers: first-person pronouns ("I", "we", "my"), story-telling verbs
-- Sentiment analysis scores (positive/negative sentiment)
-- Topic modeling (LDA/NMF) to extract latent topics - use 10-20 topics
-- SVD dimensionality reduction on TF-IDF matrices (50-100 components)
+### 1. Fix Leakage - Re-run Baseline Without Flair (CRITICAL)
+**Action**: Remove user_flair_encoded and ALL "at_retrieval" features, keep everything else same
+**Reason**: Cannot trust any results until leakage is fixed. This establishes our true baseline.
+**Expected outcome**: CV score will drop from 1.0 to ~0.75-0.85 range (more realistic)
+**Validation**: Check that no feature has importance >5x higher than others
 
-**Metadata Features:**
-- All numeric activity metrics (account age, karma, comment/post counts)
-- Ratios between request/retrieval timepoints to capture activity changes
-- Subreddit diversity metrics (number of unique subreddits)
-- User flair encoding: One-hot or target encoding (None/shroom/PIF)
-- Karma ratios: upvotes_minus_downvotes / upvotes_plus_downvotes
-- Activity density: comments per day, posts per day
-- Interaction features: text_length * account_age, reciprocity * karma
+### 2. Implement Stanford Paper Narrative Features
+**Action**: Engineer explicit features for gratitude, reciprocity, money mentions, story markers, politeness
+**Reason**: These capture psychological signals proven in research. Better than relying on TF-IDF alone.
+**Implementation**: Use regex patterns to count occurrences of specific word categories
+**Expected lift**: +0.02-0.05 AUC based on correlation strengths
 
-**High-Cardinality Features:**
-- requester_username: Use target encoding with smoothing, or count encoding
-- requester_subreddits_at_request: Count encoding or hash encoding
-- giver_username_if_known: Binary indicator (known vs N/A)
+### 3. Add Topic Modeling (LDA) Features
+**Action**: Run LDA on request text to get topic distributions as features
+**Reason**: Winning solutions used topic modeling to capture semantic themes beyond word counts
+**Implementation**: 10-20 topics, use topic probabilities as additional features
+**Expected lift**: +0.01-0.03 AUC
 
-## Preprocessing
-**Text Preprocessing:**
-- Lowercasing, punctuation removal
-- Stopword removal (optional, test both ways)
-- Lemmatization or stemming
-- Handle edited posts using request_text_edit_aware field
-- Remove Reddit-specific markup and URLs
+### 4. Try Alternative Models for Diversity
+**Action**: Train multiple model types on same features
+**Reason**: Different algorithms capture different patterns - ensemble diversity helps
+**Models to try**:
+- Logistic Regression (simple baseline, good for sparse text features)
+- Random Forest (captures non-linear interactions)
+- XGBoost (alternative gradient boosting to LightGBM)
+- Naive Bayes (works well with text features)
+**Expected outcome**: Individual scores 0.75-0.85, ensemble can reach 0.85-0.90
 
-**Handling Class Imbalance:**
-- Stratified K-fold validation (k=5) to preserve class distribution
-- Consider oversampling minority class (SMOTE or random oversampling)
-- Class weights in loss function: inverse frequency weighting
-- Focal loss for neural networks
-- Adjust decision threshold based on validation set
+### 5. Address Class Imbalance
+**Action**: Experiment with class_weight='balanced', SMOTE, or focal loss
+**Reason**: 3:1 imbalance can bias models toward majority class
+**Implementation**: Start with class_weight parameter tuning
+**Expected lift**: +0.01-0.02 AUC
 
-## Validation Strategy
-- Stratified K-fold cross-validation is essential given class imbalance
-- Use AUC-ROC for evaluation metric (competition standard)
-- Early stopping based on validation AUC (patience=5-10)
-- Monitor both per-fold and mean validation scores
-- Use GroupKFold on requester_username to prevent leakage if same users appear multiple times
+### 6. Advanced Text Features
+**Action**: Add readability scores (Flesch-Kincaid), sentiment analysis, named entity recognition
+**Reason**: Winning solutions used these to capture text quality and credibility signals
+**Priority**: Lower priority - implement after baseline is stable
 
-## Special Considerations
-- Reddit-specific features: user flair indicates pizza history (very strong predictor)
-- Temporal features: account age, activity timelines, request timing (hour of day, day of week)
-- Text sincerity indicators: politeness, gratitude expressions, personal stories
-- Community engagement: comments on request, upvote/downvote ratios
-- Request effort signals: length, readability, narrative coherence
-- Social proof: previous successful requests (indicated by flair)
-- Altruism indicators: PIF flair users always successful (100% in training data)
+### 7. Feature Selection and Regularization
+**Action**: Use L1 regularization or feature selection to reduce dimensionality
+**Reason**: 6000+ TF-IDF features may cause overfitting
+**Implementation**: Try L1-regularized logistic regression, or tree-based feature selection
+**Expected outcome**: More robust model, potentially higher CV stability
+
+## What NOT to Try
+- **Any "at_retrieval" features**: These are from the future and cause leakage
+- **user_flair in any form**: Even encoded, this is a severe leak (100% success separation)
+- **Hyperparameter tuning on leaky baseline**: Waste of time until validation is trustworthy
+- **Complex neural networks**: Start simple, add complexity only if needed
+- **Feature interactions without validation**: Risk of overfitting without proper CV
+
+## Validation Notes
+- **CV scheme**: 5-fold stratified CV (keep this - it's sound)
+- **Metric**: AUC-ROC (appropriate for binary classification)
+- **Leakage checks**: 
+  - No feature should have >95% success rate for any value
+  - No feature importance should be >10x higher than average
+  - Check correlation between predictions and any single feature
+- **Baseline expectation**: Without leakage, expect 0.75-0.85 AUC range
+- **Target**: Gold threshold is 0.979080 - will need ensembles to reach this
+- **Reproducibility**: Set random seeds, track feature versions, document all preprocessing
+
+## Confidence Assessment
+**Current CV**: 1.0 (UNRELIABLE - due to leakage)
+**Expected after fix**: 0.75-0.85 (trustworthy baseline)
+**Path to gold**: Need +0.13-0.23 improvement through feature engineering and ensembling
+**Timeline**: 22+ hours remaining - sufficient time if we fix leakage now and iterate systematically
