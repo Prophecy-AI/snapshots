@@ -1,0 +1,111 @@
+## Current Status
+- Best CV: 0.4589 from baseline_lgbm
+- Experiments above gold: 0
+- **Gap to gold: 75.6% MAE reduction needed**
+
+## Response to Evaluator
+- Technical verdict was TRUSTWORTHY - baseline execution is sound
+- Evaluator's top priority: Not yet provided (first experiment)
+- Key concerns: None raised yet
+
+## Data Understanding
+- **Reference notebooks**: See `exploration/evolver_loop1_analysis.ipynb` for comprehensive analysis
+- **Problem type**: Time series regression simulating ventilator pressure dynamics
+- **Data scale**: 5.4M training samples, 603K test samples, 67K unique breaths
+- **Key patterns identified**:
+  1. **System dynamics**: Pressure lags u_in input with correlations increasing from 0.31 (lag 0) to 0.55 (lag 10)
+  2. **Phase-based scoring**: Only 38% inspiratory phase (u_out=0) is scored, 62% expiratory (u_out=1) is ignored
+  3. **Lung attributes**: R (5,20,50) and C (10,20,50) create distinct pressure profiles through interaction effects
+  4. **Physical simulation**: This is a control system where u_in drives pressure through lung mechanics
+  5. **Baseline gaps**: Used only lags 1-3, missing longer-term dynamics captured at lag 10
+
+## Recommended Approaches (Priority Order)
+
+### 1. EXTEND TEMPORAL FEATURES (Highest Impact)
+**Rationale**: Analysis shows pressure correlation with u_in increases up to lag 10, but baseline only used lags 1-3. Capturing longer-term dynamics is critical.
+
+**Specific actions**:
+- Add longer lags: u_in_lag_5, u_in_lag_10, u_out_lag_5, u_out_lag_10
+- Add pressure lags (target encoding): pressure_lag_1, pressure_lag_2, pressure_lag_5
+- Add rate of change features: u_in_diff_2, u_in_diff_5 (difference over multiple steps)
+- Add cumulative features with different windows: u_in_cumsum_5, u_in_cumsum_10
+- Add exponential moving averages: u_in_ewm_5, u_in_ewm_10
+
+**Expected impact**: High - directly addresses the temporal dynamics gap identified in analysis
+
+### 2. PHYSICS-INFORMED FEATURE ENGINEERING
+**Rationale**: This is a physical system simulation. Incorporating domain knowledge about lung mechanics should improve predictions.
+
+**Specific actions**:
+- **RC time constant**: Create feature `RC = R * C` representing the lung's time constant
+- **Normalized time**: `time_normalized = time_step / (R * C)` to account for different lung speeds
+- **Pressure derivative**: Since pressure is the target, create `pressure_rate` features from training data
+- **Control input integration**: `u_in_integral = cumsum(u_in * time_step)` (physical work done)
+- **Phase-specific features**: Separate feature sets for inspiratory vs expiratory phases
+- **Stiffness**: Create `stiffness = 1/C` feature representing lung stiffness
+
+**Expected impact**: High - leverages physical system structure that tree models can exploit
+
+### 3. IMPROVE CROSS-VALIDATION STRATEGY
+**Rationale**: Current CV uses random splits by breath_id. For time series, we should ensure temporal consistency and prevent leakage.
+
+**Specific actions**:
+- Use GroupKFold with `breath_id` groups to ensure no breath leakage
+- Consider time-based splits: Train on early breaths, validate on later breaths
+- Create separate validation sets for inspiratory phase only (since that's what's scored)
+- Add temporal gap between train/val to prevent leakage
+
+**Expected impact**: Medium-High - ensures reliable CV that matches competition scoring
+
+### 4. MODEL ARCHITECTURE ENHANCEMENTS
+**Rationale**: LightGBM is good, but this is a complex time series problem. Hybrid approaches may work better.
+
+**Specific actions**:
+- **Sequence models**: Try LSTM/GRU with attention mechanisms to capture long-term dependencies
+- **CNN-LSTM**: Use CNN to extract local patterns, LSTM for temporal dynamics
+- **Transformer**: Self-attention may better capture relationships across time steps
+- **Residual connections**: Add residual blocks to help with gradient flow in deep models
+- **Multi-task learning**: Predict both pressure and phase (u_out) simultaneously
+
+**Expected impact**: High - could capture patterns that tree models miss, but requires more compute
+
+### 5. TARGET TRANSFORMATION AND LOSS FUNCTION
+**Rationale**: MAE is the metric, but transforming the target or using custom loss might help.
+
+**Specific actions**:
+- **Log transform**: Try log(pressure) to handle heteroscedasticity
+- **Phase-weighted loss**: Weight inspiratory phase samples higher in loss function
+- **Huber loss**: More robust to outliers than MAE
+- **Custom physics-based loss**: Penalize violations of expected physical relationships
+
+**Expected impact**: Medium - may help optimization but won't fundamentally change model capacity
+
+### 6. ENSEMBLE AND STACKING
+**Rationale**: Multiple diverse models can capture different aspects of the problem.
+
+**Specific actions**:
+- Train models with different feature sets (temporal vs physics-based)
+- Train models with different architectures (LightGBM, LSTM, CNN)
+- Use stacking with meta-learner to combine predictions
+- Blend predictions from models trained on different R,C subsets
+
+**Expected impact**: Medium-High - ensembles typically improve robustness, but need good base models first
+
+## What NOT to Try
+- **Hyperparameter tuning only**: Current gap (75.6%) is too large for tuning alone to close
+- **Simple feature additions**: Random features without physical or temporal justification
+- **Complex ensembles of weak models**: Need strong base models before ensembling helps
+- **Ignoring the inspiratory phase focus**: Don't waste capacity on expiratory phase
+- **Shallow models**: Problem requires capturing complex temporal dynamics
+
+## Validation Notes
+- **CV scheme**: Use GroupKFold with `breath_id` as groups to prevent leakage
+- **Scoring**: Focus on inspiratory phase (u_out=0) MAE since that's competition metric
+- **Confidence**: Baseline CV is stable (±0.0017), suggesting reliable estimates
+- **Target**: Need to see consistent improvement across multiple folds, not just one lucky fold
+
+## Success Criteria
+- Next experiment should target 0.35-0.40 MAE (20-30% improvement)
+- Must show improvement on inspiratory phase specifically
+- Should demonstrate capture of longer-term temporal dynamics (lags > 3)
+- Feature importance should show new temporal features in top 10
