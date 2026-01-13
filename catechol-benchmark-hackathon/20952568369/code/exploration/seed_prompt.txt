@@ -1,0 +1,132 @@
+# Seed Prompt: Chemical Reaction Yield Prediction
+
+## Problem Overview
+This is a regression task predicting chemical reaction yields (SM, Product 2, Product 3) for the allyl-substituted catechol rearrangement under different solvent and process conditions. The challenge involves leave-one-out cross-validation where entire solvents or solvent ramps are held out.
+
+## Data Understanding
+**Reference notebooks for data characteristics:**
+- `exploration/eda.ipynb` - Contains full EDA: data shapes, target distributions, input ranges, solvent lookup tables
+
+**Key data characteristics:**
+- Single solvent data: 656 samples, 24 unique solvents (24-fold LOO CV)
+- Full mixture data: 1227 samples, 13 unique solvent ramps (13-fold LOO CV)
+- Targets are yields in [0,1] range but don't sum to 1 (mean ~0.8)
+- Inputs: Temperature (175-225°C), Residence Time (2-15 min), SolventB% (0-1)
+- Multiple solvent featurizations available: spange_descriptors (13 features), drfps (2048), fragprints (2133), acs_pca (5)
+
+## MANDATORY SUBMISSION STRUCTURE
+**CRITICAL: The submission must follow the template structure exactly:**
+- The last three cells must remain unchanged except for the model definition line
+- Only `model = MLPModel()` can be replaced with a new model definition
+- The model must implement: `train_model(X_train, y_train)` and `predict(X_test)` methods
+- For single solvent: `model = YourModel(data='single')`
+- For full data: `model = YourModel(data='full')`
+
+## Physics-Informed Feature Engineering (CRITICAL)
+
+### Arrhenius Kinetics Features
+Based on reaction kinetics principles, transform raw inputs:
+```python
+temp_k = Temperature + 273.15  # Convert to Kelvin
+inv_temp = 1000.0 / temp_k     # Inverse temperature (Arrhenius)
+log_time = np.log(Residence_Time + 1e-6)  # Log time
+interaction = inv_temp * log_time  # Interaction term
+```
+These features capture the exponential relationship between temperature and reaction rate (Arrhenius equation: k = A * exp(-Ea/RT)).
+
+### Additional Feature Engineering
+- `Reaction_Energy = Temperature * Residence_Time`
+- `B_Conc_Temp = SolventB% * Temperature`
+- Consider polynomial features of temperature and time
+
+## Chemical Symmetry (CRITICAL for Mixed Solvents)
+For solvent mixtures, A+B is physically identical to B+A. Exploit this:
+
+1. **Data Augmentation**: Train on both (A,B) and (B,A) orderings
+2. **Test Time Augmentation (TTA)**: Predict both orderings and average
+   - Prediction 1: Input as (A, B)
+   - Prediction 2: Input as (B, A) with flipped percentages
+   - Final = (Pred1 + Pred2) / 2
+
+This mathematically guarantees the model respects physical symmetry and reduces variance.
+
+## Model Architectures
+
+### Neural Network (MLP) - Recommended
+Best performing approach based on public kernels (score ~0.098):
+- Architecture: BatchNorm → Linear → BatchNorm → ReLU → Dropout(0.2) → repeat
+- Hidden layers: [128, 128, 64]
+- Output: Sigmoid activation (constrains to [0,1])
+- Loss: HuberLoss (robust to outliers) or MSELoss
+- Optimizer: Adam with lr=5e-4, weight_decay=1e-5
+- Scheduler: ReduceLROnPlateau (factor=0.5, patience=20)
+- Epochs: 300, batch_size=32
+- Gradient clipping: max_norm=1.0
+
+### Ensemble/Bagging (Recommended for Variance Reduction)
+- Use 5-7 bagged models for variance reduction
+- Average predictions across all models
+- Each model trained with different random initialization
+- Critical for small dataset with LOO-CV
+
+### LightGBM Alternative
+- 3 separate regressors (one per target)
+- Key hyperparameters: learning_rate=0.03, max_depth=6
+- Early stopping with 100 rounds patience
+- 12% validation split for early stopping
+
+### Gaussian Process Regression (Consider for Small Data)
+- Well-suited for small datasets with uncertainty quantification
+- Use RBF kernel with automatic relevance determination
+- Can provide calibrated uncertainty estimates
+
+## Solvent Featurization
+
+### Spange Descriptors (Recommended)
+- 13 physical/chemical properties: dielectric constant, ET(30), alpha, beta, pi*, SA, SB, SP, SdP, N, etc.
+- Best for linear mixing of solvent features
+- Interpretable and physics-based
+
+### For Mixed Solvents
+Weighted average based on mixture percentage:
+```python
+X_feat = X_A_feat * (1 - SolventB%) + X_B_feat * SolventB%
+```
+
+### Alternative Featurizations
+- DRFPS (2048 features): Differential reaction fingerprints
+- Fragprints (2133 features): Fragment + fingerprint concatenation
+- Consider combining multiple featurizations
+
+## Post-Processing
+- Clip predictions to [0, 1] range
+- Optional: Normalize rows so sum equals 1 (chemical constraint, but note targets don't naturally sum to 1)
+
+## Validation Strategy
+- Single solvent: Leave-one-solvent-out (24 folds)
+- Full data: Leave-one-ramp-out (13 folds)
+- **Same hyperparameters must be used across ALL folds (no per-fold tuning)**
+- Different hyperparameters allowed for different tasks (single vs full) or objectives (SM vs Products)
+
+## Key Techniques Summary (Priority Order)
+1. **Physics-informed features**: Arrhenius kinetics (1/T, ln(t), interaction)
+2. **Symmetry exploitation**: TTA for mixed solvents (data aug + inference aug)
+3. **Ensemble**: Bagged MLPs (5-7 models) for variance reduction
+4. **Robust training**: HuberLoss, BatchNorm, Dropout, gradient clipping
+5. **Proper featurization**: Spange descriptors with weighted mixing
+6. **Regularization**: Weight decay, dropout to prevent overfitting on small data
+
+## Advanced Techniques to Consider
+- **Multi-task learning**: Predict all 3 targets jointly (shared representation)
+- **Transfer learning**: Pre-train on full data, fine-tune for single solvent
+- **Uncertainty quantification**: Ensemble variance or MC Dropout
+- **Feature selection**: Remove uninformative solvent descriptors
+
+## Target Score
+Beat **0.017270** (lower is better). Current best public kernel achieves ~0.098.
+
+## Implementation Notes
+- Use torch.set_default_dtype(torch.double) for numerical stability
+- Ensure reproducibility with random seeds where possible
+- Monitor for overfitting given small dataset size
+- The evaluation metric appears to be MSE-based
