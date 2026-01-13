@@ -1,51 +1,81 @@
-## Problem Type
-Binary text classification with tabular meta-features. Goal: Predict pizza request success based on request text and user metadata.
+## Current Status
+- Best CV: 1.0 from exp_000 (meaningless due to data leakage)
+- Experiments above gold: 0
+- **Critical Issue**: Perfect score is caused by data leakage, not model quality
 
-## Data Characteristics (see eda.ipynb for details)
-- 2,878 training samples with class imbalance (24.8% positive rate)
-- Text features: request_title, request_text (edit-aware version available)
-- Meta-features: user activity metrics, vote counts, timestamps
-- Highly predictive feature: requester_user_flair (75% missing, but 'shroom'/'PIF' = 100% success)
+## Response to Evaluator
+- **Technical verdict was UNRELIABLE**: I completely agree. The 1.0 AUC is meaningless.
+- **Evaluator's top priority**: Rebuild baseline WITHOUT flair features - **This is my #1 priority**
+- **Key concerns raised**:
+  1. **Data leakage through flair**: Confirmed - 'shroom' (677 samples) and 'PIF' (38 samples) have 100% success rates. These are post-hoc indicators awarded AFTER successful requests.
+  2. **Lack of feature validation**: Correct - we must validate feature availability at prediction time
+  3. **No diagnostic analysis**: Right - we should have investigated the perfect score immediately
+  4. **Temporal split issue**: Confirmed - train has _at_retrieval columns, test has _at_request columns
 
-## Models
-For text + tabular data classification with ~3K samples:
-- **Gradient Boosting (XGBoost/LightGBM)**: Excellent for tabular features, handle mixed data types
-- **BERT/RoBERTa**: For text understanding, but may overfit on 3K samples - use with strong regularization
-- **Ensemble**: Combine text model (BERT) with tabular model (XGBoost) for best performance
-- **Logistic Regression with TF-IDF**: Strong baseline for text, works well with small datasets
+**My response**: I will rebuild from scratch using ONLY features available at request time, completely eliminating all leakage sources before proceeding.
 
-## Text Preprocessing
-- Use request_text_edit_aware to remove success indicators (EDIT: thanks...)
-- TF-IDF or CountVectorizer for traditional models
-- BERT tokenization for transformer models
-- Consider text length features (title length, text length correlate with success)
+## Data Understanding
+**Reference notebooks**: See `exploration/evolver_loop1_analysis.ipynb` for detailed leakage investigation
 
-## Tabular Feature Engineering
-- **Handle missing flair**: Create 'has_flair' indicator + impute missing as 'None'
-- **Activity ratios**: comments/posts ratios, RAOP-specific vs general activity
-- **Temporal features**: Hour of day, day of week from timestamps
-- **Vote ratios**: upvotes/(upvotes+downvotes) for request and user
-- **Subreddit diversity**: Number of unique subreddits posted in
+**Key patterns discovered**:
+- **Leakage confirmed**: 'shroom' flair = 100% success (677 samples), 'PIF' flair = 100% success (38 samples)
+- **Temporal split**: Train includes post-outcome features (_at_retrieval), test only has pre-outcome features (_at_request)
+- **Safe features** (available at request time):
+  - All _at_request features (account age, votes, comments, posts)
+  - Text features: TF-IDF, text_length (0.120 correlation), title_length
+  - Top correlations: requester_number_of_posts_on_raop_at_request (0.133), requester_number_of_comments_in_raop_at_request (0.132)
 
-## Handling Class Imbalance
-- **Stratified K-Fold**: Essential for reliable validation
-- **Class weights**: Use scale_pos_weight in XGBoost or class_weight in sklearn
-- **SMOTE**: Consider for tabular features (not for text)
-- **Evaluation**: Focus on ROC AUC, not accuracy
+**Critical insight**: Test data has NO flair column at all, confirming that flair is not available at prediction time.
 
-## Validation Strategy
-- **Stratified 5-fold CV**: Maintain class distribution across folds
-- **Time-based split**: If using temporal features, ensure no leakage
-- **Watch for flair leakage**: 'shroom'/'PIF' are post-hoc indicators of success
+## Recommended Approaches (Priority Order)
 
-## Ensembling
-- **Stacking**: Train meta-learner on predictions from diverse models
-- **Weighted averaging**: Give higher weight to best-performing models
-- **Model diversity**: Combine text-based (BERT) and tabular (XGBoost) models
-- **Blending**: Use out-of-fold predictions for robust stacking
+### 1. Rebuild Clean Baseline (HIGHEST PRIORITY)
+Remove ALL leakage sources and rebuild:
+- **Remove**: All flair features (has_flair, flair_shroom, flair_pif, flair_other)
+- **Remove**: All _at_retrieval features (post-outcome data)
+- **Keep**: Only _at_request features and text features
+- **Model**: Start with Logistic Regression, then try XGBoost/LightGBM
+- **Expected performance**: AUC in 0.75-0.85 range (reasonable for this problem)
 
-## Key Insights from EDA
-- request_number_of_comments_at_retrieval most correlated with target (0.29)
-- User flair is extremely predictive but mostly missing
-- Text length features may be useful
-- See eda.ipynb for full feature analysis and distributions
+### 2. Add Reddit-Specific Features
+Based on research, engineer features that work well for Reddit:
+- **Text features**: TF-IDF with ngrams (1,2), subreddit mentions (/r/ patterns)
+- **Readability scores**: Flesch-Kincaid, sentiment analysis
+- **User engagement**: Requester's historical activity patterns
+- **Temporal features**: Hour of day, day of week from timestamp
+
+### 3. Try Gradient Boosting Models
+XGBoost/LightGBM typically outperform logistic regression for mixed text + tabular:
+- Better handling of feature interactions
+- More robust to noisy features
+- Built-in feature importance for diagnostics
+
+### 4. Implement Proper Validation
+Consider time-based validation given temporal nature:
+- Stratified K-fold as baseline
+- But investigate if time-based split would be more appropriate
+- Monitor for leakage between folds
+
+### 5. Diagnostic Analysis
+For each experiment:
+- Check feature importances to identify suspicious features
+- Build ablated models (remove top features one by one)
+- Examine predictions distribution - should not be degenerate
+
+## What NOT to Try
+- **DO NOT use any flair features** - they're all post-hoc indicators
+- **DO NOT use _at_retrieval features** - they're post-outcome and cause leakage
+- **DO NOT trust perfect scores** - if AUC > 0.95, investigate immediately for leakage
+- **DO NOT skip feature validation** - verify every feature is available at request time
+
+## Validation Notes
+- **CV scheme**: Stratified 5-fold with shuffling (current implementation is correct)
+- **Confidence**: Low confidence in current 1.0 AUC (completely unreliable)
+- **Target**: Achieve stable AUC in 0.75-0.85 range without leakage
+- **Reproducibility**: Run multiple experiments with different seeds to verify stability
+
+## Expected Timeline
+1. **Immediate**: Rebuild clean baseline (1-2 experiments)
+2. **Next**: Add Reddit-specific features and try XGBoost
+3. **Then**: Ensemble approaches if single models plateau
+4. **Final**: Only submit when CV consistently exceeds gold threshold with clean features
