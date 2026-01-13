@@ -1,0 +1,153 @@
+# Protein Function Prediction - Techniques Guide
+
+## Data Understanding
+**Reference notebooks for data characteristics:**
+- `exploration/eda.ipynb` - Contains full EDA: protein counts, GO term distributions, sequence length statistics
+- Training: 82,404 proteins, 26,125 unique GO terms, 537K protein-term pairs
+- Test: 224,309 proteins to predict
+- Three aspects: Biological Process (P), Cellular Component (C), Molecular Function (F)
+- GO term frequency is highly skewed: only 33 terms in >1000 proteins, median frequency is 4
+
+## Evaluation Metric
+- Weighted F1-measure using Information Accretion (IA) weights
+- Evaluated separately for MF, BP, CC subontologies, then averaged
+- IA weights provided in IA.tsv - deeper/rarer GO terms have higher weights (range 0-16)
+- Must predict GO terms with confidence scores (0-1)
+
+## Protein Embeddings (CRITICAL)
+Pre-trained protein language models are essential for this task:
+
+1. **ESM2 (Recommended)**: 1280-dimensional embeddings
+   - State-of-the-art protein language model from Meta
+   - Best performance for protein function prediction
+   - Use mean pooling over sequence positions
+   - Models: esm2_t33_650M_UR50D or esm2_t36_3B_UR50D
+
+2. **ProtBERT**: 1024-dimensional embeddings
+   - Good alternative, well-tested on previous competitions
+   - Slightly faster than ESM2
+
+3. **T5 embeddings**: 1024-dimensional
+   - Another viable option
+
+## Model Architecture
+**Multi-Layer Perceptron on top of embeddings:**
+```
+Input (embeddings + features) -> Linear -> BatchNorm -> ReLU -> Dropout
+                              -> Linear -> BatchNorm -> ReLU -> Dropout
+                              -> Linear -> Output (num_classes)
+```
+
+**Key hyperparameters from top solutions:**
+- Hidden dimensions: [1024, 512] or [864, 712]
+- Dropout: 0.2-0.3
+- Batch size: 64-128
+- Learning rate: 1e-3 to 1e-2
+- Epochs: 10-15
+- Use BCEWithLogitsLoss for multi-label classification
+- CosineAnnealingLR scheduler works well
+
+## Feature Engineering
+**Hand-crafted features to combine with embeddings:**
+- Amino acid composition (20 features)
+- Sequence length
+- Molecular weight
+- Isoelectric point
+- Aromaticity
+- Instability index
+- Gravy (hydropathicity)
+
+## Training Strategy
+1. **Train separate models per aspect (MF, BP, CC)**
+   - Each aspect has different GO term distributions
+   - Use aspect-specific thresholds for predictions
+
+2. **Multi-label classification setup:**
+   - Use top N most frequent GO terms (500-1500)
+   - MultiLabelBinarizer for encoding (use sparse_output=True)
+   - BCEWithLogitsLoss or BCELoss
+
+3. **Validation:**
+   - 90/10 train/val split
+   - Monitor MultilabelF1Score
+
+## Ensembling (IMPORTANT)
+**Ensemble multiple approaches for best results:**
+
+1. **Model ensemble:**
+   - Train 3+ MLPs with different hyperparameters
+   - Average predictions from all models
+   - Different batch sizes, hidden dims, dropout rates
+
+2. **Embedding ensemble:**
+   - Combine predictions from ESM2-based and ProtBERT-based models
+
+3. **BLAST/Sequence similarity predictions:**
+   - Use sequence similarity to transfer annotations from known proteins
+   - Weight: DL_WEIGHT=0.6, BLAST_WEIGHT=0.4 for combining
+   - Diamond BLAST is faster than standard BLAST
+
+## Post-Processing (CRITICAL FOR SCORE)
+**GO Hierarchy Propagation:**
+- GO is a hierarchical ontology - parent terms must have scores >= child terms
+- Propagate predictions upward: if predicting GO:X, also predict all ancestors
+- Force root terms (GO:0003674, GO:0008150, GO:0005575) to confidence 1.0
+- Parse go-basic.obo for is_a and part_of relationships
+
+**Rank Normalization:**
+- If max prediction score is weak (< 0.95), scale up all scores
+- Target: make best non-root prediction at least 0.95
+- scale_factor = 0.95 / max_val
+
+**GOA Corrections (if available):**
+- Apply known positive annotations with confidence 1.0
+- Remove predictions conflicting with 'NOT' annotations
+- Propagate negative annotations to descendants
+
+## Temperature Scaling
+- Apply temperature scaling to logits before sigmoid: `sigmoid(logits / T)`
+- T=1.5 often improves calibration
+- Helps with confidence score distribution
+
+## Prediction Thresholds
+- Use aspect-specific thresholds:
+  - MF: 0.1-0.2
+  - BP: 0.1-0.2  
+  - CC: 0.1-0.2
+- Ensure minimum predictions per protein (e.g., MIN_PREDS=5)
+- Maximum predictions per protein: 1000-1500
+
+## Advanced Techniques (from literature)
+1. **GO-aware architectures:**
+   - Graph attention networks (GATs) to model GO hierarchy
+   - Multimodal transformers for sequence + GO term embeddings
+   - Contrastive learning for GO term relationships
+
+2. **Semantic entailment:**
+   - DeepGO-SE approach: predict truth values for GO statements
+   - Exploit GO axioms and hierarchical constraints
+
+3. **Zero-shot prediction:**
+   - Learn GO term embeddings from textual definitions
+   - Enables prediction of unseen GO terms
+
+## Key Implementation Notes
+1. Parse GO ontology from go-basic.obo using obonet library
+2. Build ancestor map for efficient propagation
+3. Handle variable-length sequences with mean pooling
+4. Use sparse matrices for large label spaces
+5. Memory management: process in batches, use gc.collect()
+6. Gradient clipping (max_norm=1.0) for stable training
+
+## Submission Format
+- TSV file: protein_id, GO_term, confidence
+- No header
+- Confidence scores between 0 and 1
+- Sort by protein_id, then by confidence (descending)
+- Drop extremely low scores (< 0.001) to reduce file size
+
+## Reference Kernels
+- `../research/kernels/taylorsamarel_cafa-6-protein-function-starter-eda-model/` - Starter with EDA and model
+- `../research/kernels/nihilisticneuralnet_protbert-ensemble/` - ProtBERT ensemble approach
+- `../research/kernels/khoatran512_ktdk-int3405e2-final/` - ESM2 + features + GOA corrections
+- `../research/kernels/yongsukprasertsuk_cafa-6-goa-propagation/` - GO propagation post-processing
