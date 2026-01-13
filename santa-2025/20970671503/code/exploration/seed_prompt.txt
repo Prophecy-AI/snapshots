@@ -1,0 +1,175 @@
+# Christmas Tree Packing Optimization - Techniques Guide
+
+## Problem Overview
+This is a 2D geometric packing optimization problem, NOT a machine learning problem. The goal is to pack Christmas tree-shaped polygons (15-vertex non-convex shapes) into the smallest square bounding box for configurations of 1-200 trees.
+
+**Score formula:** `sum(side_length^2 / n)` for each n-tree configuration (n=1 to 200)
+**Lower score is better.**
+
+## Reference Notebooks
+- `exploration/eda.ipynb` - Basic data structure analysis showing submission format
+
+## Key Optimization Approaches (from Competition Kernels)
+
+### 1. Binary Optimizer (bbox3)
+The most successful approach uses a compiled binary optimizer called `bbox3`:
+- Parameters: `-n <iterations>` and `-r <restarts>`
+- Typical values: `-n 1000 -r 96`, `-n 2000 -r 96`, `-n 5000 -r 16`
+- Multi-phase approach: short runs to find promising parameters, then longer runs on winners
+
+### 2. Simulated Annealing
+- Use swap moves between trees
+- Multi-angle restarts for exploration
+- Higher temperature for more aggressive exploration
+- Gradually decrease temperature for convergence
+
+### 3. Local Search Operators
+- **8-directional moves**: Try moving each tree in 8 directions (N, S, E, W, NE, NW, SE, SW)
+- **Rotation optimization**: Try small angle adjustments (±5°, ±2°, ±0.8°, ±0.3°, ±0.1°)
+- **Step sizes**: Use multiple step sizes (0.01, 0.004, 0.0015, 0.0006, 0.00025, 0.0001)
+
+### 4. Squeeze Operation
+Scale all trees toward center by factor (e.g., 0.9995) until collision detected:
+```
+for scale in [0.9995, 0.999, 0.9985, ...]:
+    move all trees toward center by scale factor
+    if collision: break
+```
+
+### 5. Compaction
+Move each tree toward the centroid in small steps until collision:
+- Step sizes: 0.02, 0.008, 0.003, 0.001, 0.0004
+- Only accept moves that reduce bounding box side length
+
+### 6. Rotation Tightening (fix_direction) - CRITICAL
+Optimize the global rotation angle of the entire configuration:
+- Use scipy.optimize.minimize_scalar on convex hull of all tree vertices
+- Search angles from 0.001° to 89.999°
+- Find angle that minimizes max(width, height) of bounding box
+- Based on Rotating Calipers algorithm: minimum bounding rectangle has a side collinear with one edge of convex hull
+
+### 7. Backward Propagation
+Use larger configurations to improve smaller ones:
+- Start from N=200, work down to N=2
+- For each config, try removing boundary-touching trees
+- If resulting (N-1) config is better than stored, update it
+
+## Advanced Techniques (from Literature)
+
+### Rotating Calipers for Minimum Square Bounding Box
+1. Compute convex hull of all tree vertices
+2. For each edge of hull, rotate to align edge with axis
+3. Compute axis-aligned bounding box
+4. For square: side = max(width, height)
+5. Keep orientation with minimum square area
+6. O(n) time after hull computation
+
+### No-Fit Polygon (NFP) and Inner-Fit Polygon (IFP)
+- NFP describes non-overlapping positions between two polygons with boundaries in contact
+- IFP determines minimum translation to place polygon inside container
+- Use for precise overlap detection and minimum separation calculation
+
+### Overlap Minimization via Nonlinear Programming
+- Define overlap as minimum translation to separate polygons
+- Use L-BFGS to minimize sum of squared overlaps
+- Converges to local optimum but depends on initial layout
+
+### Selection + Placement Heuristics
+- **Selection**: Order pieces by height, area, or DJD (Djang-Finch) heuristic
+- **Placement**: Bottom-left strategy, shelf-packing
+- Combine with meta-heuristics for refinement
+
+### Genetic Algorithm / Differential Evolution
+- Encode placement order as chromosome
+- Crossover and mutation on ordering
+- Evaluate fitness as bounding box area
+
+## Collision Detection
+- Use Shapely library with STRtree for efficient spatial indexing
+- Check `polygon.intersects(other) and not polygon.touches(other)`
+- Use high precision Decimal arithmetic (scale_factor = 1e15 to 1e18)
+
+## Tree Geometry
+The Christmas tree is a 15-vertex polygon with:
+- Tip at (0, 0.8)
+- Three tiers of branches at y=0.5, 0.25, 0
+- Trunk from y=0 to y=-0.2
+- Total height: 1.0, max width: 0.7 (at base)
+
+## Weighted Angle Distribution
+When placing new trees, use weighted random angles favoring diagonals:
+```python
+def generate_weighted_angle():
+    while True:
+        angle = random.uniform(0, 2*pi)
+        if random.uniform(0, 1) < abs(sin(2*angle)):
+            return angle
+```
+This helps fill corners better (square bounding box optimization).
+
+## Overlap Repair Strategy
+After optimization, validate for overlaps and repair:
+1. Check all configurations for overlapping trees
+2. For failed configurations, replace from a known-good donor file
+3. Re-validate after repair
+
+## Parallelization
+- Use OpenMP for C++ implementations
+- Process all n values (1-200) in parallel
+- Each configuration is independent
+- Partition large problems into subproblems (~300 polygons each)
+
+## Implementation Tips
+1. Start with a good baseline submission (from previous best)
+2. Run optimizer with multiple parameter combinations
+3. Apply fix_direction rotation optimization
+4. Validate for overlaps
+5. Repair any overlapping configurations from donor
+6. Iterate with longer runs on promising parameters
+
+## Phased Optimization Strategy
+**Phase A (Short runs):** 2 min each, many parameter combinations
+- n_values: [1000, 1200, 1500, 1800, 2000]
+- r_values: [30, 60, 90]
+- Keep top 6 candidates
+
+**Phase B (Medium runs):** 10 min each on top candidates
+- Apply fix_direction with 2 passes
+- Keep top 3 candidates
+
+**Phase C (Long runs):** 20 min each on best candidates
+- Apply fix_direction with 3 passes
+- Neighborhood sweep around best parameters
+
+## C++ Implementation Key Components
+From the smartmanoj kernel (tree_packer_v21):
+1. **FastRNG**: Custom fast random number generator
+2. **Poly struct**: Store polygon vertices and bounding box
+3. **Cfg struct**: Configuration with n trees, positions, angles
+4. **overlap()**: Point-in-polygon + segment intersection tests
+5. **squeeze()**: Scale toward center until collision
+6. **compaction()**: Move trees toward centroid
+7. **localSearch()**: 8-directional + rotation moves
+8. **backward_propagation()**: Remove boundary trees to improve smaller configs
+
+## Expected Score Range
+- Sample submission baseline: ~70-80
+- Good optimization: ~68-69
+- Target to beat: 68.947559
+
+## Key Insights from Top Kernels
+1. The bbox3 binary optimizer is critical - most top solutions use it
+2. fix_direction rotation optimization provides consistent improvements
+3. Backward propagation can improve smaller configurations using larger ones
+4. Multi-phase approach with escalating timeouts is effective
+5. Overlap repair from donor file ensures valid submissions
+6. Long runtime (hours) with iterative improvement yields best results
+
+## Recommended Approach
+1. **Start with baseline**: Use sample_submission.csv or a known good submission
+2. **Run bbox3 optimizer**: Multiple iterations with different n,r parameters
+3. **Apply fix_direction**: Rotate entire configuration to minimize square bbox
+4. **Validate & repair**: Check for overlaps, replace failed configs from donor
+5. **Iterate**: Repeat with longer runs on promising configurations
+6. **Backward propagation**: Use larger configs to improve smaller ones
+7. **Final validation**: Ensure no overlaps before submission
