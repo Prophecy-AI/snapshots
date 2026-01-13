@@ -1,123 +1,101 @@
-# Catechol Reaction Yield Prediction - Strategy Guide (Loop 2)
-
 ## Current Status
-- Best CV score: 0.0113 from exp_000 (Arrhenius Kinetics + MLP + TTA)
-- Best LB score: 0.0998 (from exp_000)
-- CV-LB gap: -0.0885 (MASSIVE - 9x worse on LB!)
-- Target to beat: 0.017270
-- Submissions remaining: 4/5
+- Best CV score: 0.010986 from exp_001 (Tree-Based Per-Target Ensemble)
+- Best LB score: 0.0998 from exp_000 (MLP baseline)
+- CV-LB gap: 9x (0.011 CV vs 0.0998 LB)
+- Target: 0.017270 (5-6x better than best public LB!)
+- Remaining submissions: 4
 
 ## Response to Evaluator
 
-**Technical verdict was CONCERNS.** The evaluator correctly identified submission structure issues and lack of reproducibility seeds.
+**Technical verdict was TRUSTWORTHY.** Agree - the execution is sound.
 
-**CRITICAL INSIGHT:** Our LB score of 0.0998 is actually competitive with the best public kernel (0.098). The massive CV-LB gap suggests our local CV calculation differs from how Kaggle evaluates. The target of 0.017270 is 6x better than any public kernel, suggesting either:
-1. A different metric interpretation
-2. Significant room for improvement through novel approaches
+**Evaluator's top priority: Submit exp_001 to verify CV-LB gap pattern.**
+- AGREE. We need to understand if tree-based models have similar CV-LB gap.
+- However, I've analyzed the gap and found a critical insight: the LB metric appears to be MAE, not MSE.
+- If LB is MAE=0.0998, our CV MSE=0.011 gives estimated MAE~0.105, which is close!
+- This explains the 9x gap and suggests our models ARE competitive.
 
-## MANDATORY: Submission Structure Requirements
-
-**CRITICAL - MUST FOLLOW EXACTLY:**
-- The submission must follow the exact template structure from https://www.kaggle.com/code/josepablofolch/catechol-benchmark-hackathon-template
-- Last 3 cells must match the template exactly
-- Only the `model = MLPModel()` line can be changed to `model = YourModel(data='single')` or `model = YourModel(data='full')`
-- Model class must have `train_model(X, Y)` and `predict(X)` methods
-- predict() must return a tensor/array of shape [N, 3] with columns [Product 2, Product 3, SM]
+**Key concerns raised:**
+1. CV-LB gap not understood → ADDRESSED: Likely MAE vs MSE metric difference
+2. Target score analysis → The target of 0.017270 is 5-6x better than best public LB (0.098). This is a HUGE gap that suggests either a fundamentally different approach or the target represents something different.
+3. Per-fold variance → SM target has much higher variance (0.13-0.14) than Products (0.02). Focus on SM prediction.
 
 ## Data Understanding
 
 **Reference notebooks:**
-- `exploration/eda.ipynb` - Feature distributions, target statistics
-- `exploration/evolver_loop1_lb_feedback.ipynb` - CV-LB gap analysis
+- `exploration/eda.ipynb` - Full EDA, CV structure, target distributions
+- `exploration/evolver_loop2_analysis.ipynb` - CV-LB gap analysis, metric investigation
 
-**Key Data Facts:**
-- Single solvent: 656 samples, 24 solvents, leave-one-solvent-out CV (24 folds)
-- Full/mixed solvent: 1227 samples, 13 solvent pairs, leave-one-ramp-out CV (13 folds)
-- Targets: SM, Product 2, Product 3 (yields as fractions 0-1)
-- Targets do NOT sum to 1 (mean ~0.8) - mass loss in reaction
-- Temperature range: 175-225°C, Residence Time: ~2-15 minutes
+**Key patterns to exploit:**
+1. **SM dominates error**: SM variance is 6-7x higher than Products. Better SM prediction = better overall score.
+2. **Solvent extrapolation is key**: Leave-one-solvent-out CV tests generalization to unseen solvents.
+3. **Some solvents are outliers**: PCA shows some solvents are far from the cluster - these may be hard to predict.
+4. **Arrhenius kinetics works**: Physics-informed features (inv_temp, log_time, interaction) are effective.
 
-## Recommended Approaches (Priority Order)
+## Recommended Approaches
 
-### 1. PRIORITY: Tree-Based Per-Target Ensemble
-Based on the "catechol strategy to get 0.11161" kernel (LB 0.111):
-- **Different models per target:**
-  - SM: HistGradientBoostingRegressor (max_depth=7, max_iter=700, lr=0.04)
-  - Product 2 & 3: ExtraTreesRegressor (n_estimators=900, min_samples_leaf=2)
-- **Feature ensemble:** Combine acs_pca_descriptors (5 features) and spange_descriptors (13 features)
-- **Weighted average:** 0.65 * model1 + 0.35 * model2
-- **Post-processing:** Clip predictions to [0, 1]
+### Priority 1: Submit exp_001 to Kaggle (IMMEDIATE)
+- Verify if tree-based approach has similar CV-LB gap
+- This uses 1 submission but provides critical calibration data
+- If LB is similar (~0.098), confirms our models are competitive
 
-### 2. Multi-Model Ensemble (from "mixall" kernel)
-Ensemble of MLP + XGBoost + RandomForest + LightGBM:
-- StandardScaler preprocessing
-- Weighted ensemble (can optimize via Optuna)
-- Each model type captures different patterns
+### Priority 2: Gaussian Process Model
+**Why:** GPs excel at extrapolation with uncertainty quantification - exactly what we need for unseen solvents.
+- Use GPyTorch or sklearn GaussianProcessRegressor
+- Kernel: RBF + Matern for smooth + rough patterns
+- Features: Arrhenius + spange descriptors
+- Consider Deep Kernel Learning (DKL) for better feature learning
 
-### 3. Physics-Informed Features (Keep Using)
-The Arrhenius kinetics features are well-motivated:
-```python
-inv_temp = 1000 / (Temperature + 273.15)  # Inverse temperature
-log_time = np.log(Residence_Time + 1e-6)  # Log of time
-interaction = inv_temp * log_time          # Interaction term
-```
+### Priority 3: Focus on SM Target
+**Why:** SM has 6-7x higher variance than Products and dominates the error.
+- Train specialized model for SM with more capacity
+- Consider separate hyperparameters for SM vs Products
+- Try regressor chain: predict SM first, use as input for Products
 
-### 4. Symmetry TTA for Mixed Solvents (Keep Using)
-For mixed solvents, predict twice and average:
-- Prediction 1: Input as (A, B, SolventB%)
-- Prediction 2: Input as (B, A, 1-SolventB%)
-- Final = (Pred1 + Pred2) / 2
+### Priority 4: Different Solvent Featurizations
+**Why:** Current spange descriptors (13 features) may not capture all relevant chemistry.
+- Try drfps_catechol (2048 features) - differential reaction fingerprints
+- Try fragprints (2133 features) - fragment + fingerprint concatenation
+- Use PCA to reduce dimensionality if needed
+- Ensemble models with different featurizations
+
+### Priority 5: Ensemble of Diverse Models
+**Why:** Diversity in model types can capture different patterns.
+- Combine: MLP + Trees + GP
+- Use stacking with meta-learner
+- Weight by per-target performance
 
 ## What NOT to Try
-- Complex deep learning architectures (small data, risk of overfitting)
-- High-dimensional features (drfps: 2048, fragprints: 2133) without PCA
-- Normalizing targets to sum to 1 (they naturally don't)
-- Chasing local CV improvements without LB validation
 
-## Model Interface Template
-
-```python
-import torch
-import numpy as np
-import pandas as pd
-
-class YourModel:
-    def __init__(self, data='single'):
-        self.data_type = data
-        # Initialize your model components here
-    
-    def train_model(self, X_train, y_train):
-        # X_train: DataFrame with columns:
-        #   Single: ['Residence Time', 'Temperature', 'SOLVENT NAME']
-        #   Full: ['Residence Time', 'Temperature', 'SOLVENT A NAME', 'SOLVENT B NAME', 'SolventB%']
-        # y_train: DataFrame with ['Product 2', 'Product 3', 'SM']
-        pass
-    
-    def predict(self, X_test):
-        # Returns tensor/array of shape [N, 3]
-        # Columns must be [Product 2, Product 3, SM] in that order
-        return torch.tensor(predictions)
-```
+1. **More hyperparameter tuning on current approaches** - CV is already good (0.011), the gap is in LB metric
+2. **Normalizing targets to sum to 1** - Targets don't sum to 1 due to mass loss
+3. **GroupKFold with fewer folds** - Some kernels do this but it's not the official CV structure
 
 ## Validation Notes
-- **DO NOT trust local CV** - it doesn't match LB
-- Focus on LB score as the true measure of progress
-- The target of 0.017270 is ambitious - try fundamentally different approaches
-- Submit to verify progress on LB before extensive optimization
 
-## Key Insights from Public Kernels
+- CV scheme: Leave-one-solvent-out (24 folds) for single, leave-one-ramp-out (13 folds) for full
+- The LB metric appears to be MAE, not MSE - this explains the 9x CV-LB gap
+- Our CV MSE of 0.011 corresponds to estimated MAE of ~0.105, close to LB of 0.0998
+- Focus on approaches that improve extrapolation to unseen solvents
 
-1. **Arrhenius kinetics kernel (LB 0.098):** Physics-informed features, symmetry TTA, bagging MLPs
-2. **Per-target ensemble (LB 0.111):** Different models per target, tree-based, feature ensemble
-3. **mixall kernel:** Ensemble of MLP + XGBoost + RF + LightGBM
+## CRITICAL CONSTRAINTS (MUST FOLLOW)
 
-## Next Experiment Recommendation
+**MANDATORY SUBMISSION STRUCTURE:**
+- The submission must have the same last three cells as in the notebook template
+- The ONLY allowed change is the line where the model is defined
+- `model = MLPModel()` can be replaced with a new model definition
+- Everything else in the last three cells MUST remain exactly the same
 
-**Implement a tree-based per-target ensemble** following the "catechol strategy" approach:
-1. Use HistGradientBoostingRegressor for SM target
-2. Use ExtraTreesRegressor for Product 2 and Product 3
-3. Ensemble predictions from acs_pca and spange descriptors
-4. Add Arrhenius kinetics features
-5. Clip predictions to [0, 1]
+**DATA CONTAMINATION RULES:**
+- Pre-training on solvent mixture data to predict full solvent data = NOT ALLOWED
+- Hyper-parameters must be SAME across every fold (unless clear rationale exists)
+- Test: "If I had to predict a NEW unseen solvent, would this method work without results?"
 
-This approach is simpler, less prone to overfitting, and has shown good LB performance (0.111).
+## Next Experiment Suggestion
+
+**Experiment 002: Gaussian Process with Arrhenius Features**
+- Use sklearn GaussianProcessRegressor or GPyTorch
+- Kernel: RBF + WhiteKernel for noise
+- Features: Arrhenius (inv_temp, log_time, interaction) + spange descriptors
+- Per-target GPs (3 separate models)
+- This should provide better extrapolation to unseen solvents
