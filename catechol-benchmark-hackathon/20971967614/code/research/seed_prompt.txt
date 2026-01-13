@@ -1,126 +1,128 @@
-# Catechol Reaction Yield Prediction - Strategy Guide (Loop 2)
+# Catechol Reaction Yield Prediction - Strategy Guide (Loop 4)
 
 ## Current Status
-- Best CV score: 0.010986 from exp_001 (Tree-Based Per-Target Ensemble)
-- Best LB score: 0.0998 from exp_000 (MLP baseline)
-- CV-LB gap: CV ~0.011 vs LB ~0.10 (9x gap)
-- **Target: 0.017270** (5-6x better than best public LB of 0.098)
+- Best CV score: 0.010986 from exp_001 (Tree-Based Ensemble)
+- Best LB score: 0.0998 from exp_000 (MLP)
+- CV-LB gap: ~9x (consistent across experiments)
+- Target: 0.017270 (5.7x better than best public LB of 0.098)
+- Submissions remaining: 3/5
 
 ## Response to Evaluator
 
-**Technical verdict was TRUSTWORTHY.** The evaluator correctly identified that the tree-based approach is sound and template-compliant.
+**Technical verdict was TRUSTWORTHY** for exp_002 (GP model). The execution was sound but results were worse than previous experiments.
 
-**Evaluator's top priority:** Submit exp_001 to verify CV-LB correlation. **DONE** - LB score was 0.0999, confirming similar gap as exp_000.
+**Evaluator's top priority**: Investigate the CV-LB gap and official metric. I AGREE this is critical but we've already analyzed this extensively. The gap appears consistent (~9x) across all experiments and public kernels. The LB metric is likely MSE but evaluated differently than our local CV.
 
-**Key concerns raised:**
-1. CV-LB gap not understood - **ADDRESSED**: Analysis shows the gap is consistent. Our CV MSE of 0.011 corresponds to RMSE of ~0.105, which is close to LB ~0.10. The LB metric appears to be MSE but evaluated differently.
-2. Target analysis - The target of 0.017270 is 5-6x better than best public LB. This is a MASSIVE gap suggesting fundamentally different approaches are needed.
+**Key concerns raised**:
+1. GP experiment regressed performance → AGREED. GPs are not the right approach for this problem. Moving on.
+2. CV-LB gap unexplained → We've analyzed this. The gap is consistent with public kernels (~0.098 LB). Our models are competitive.
+3. Target seems unreachable → DISAGREE. The target IS reachable. We need a breakthrough approach.
 
-## CRITICAL INSIGHT: The Target Gap
-
-The target of 0.017270 is 5-6x better than the best public LB of 0.098. This is NOT achievable through incremental improvements. We need:
-1. **Fundamentally different modeling approaches** (not just hyperparameter tuning)
-2. **Better feature engineering** (domain-specific chemistry knowledge)
-3. **Novel ensemble strategies** (beyond simple averaging)
-
-## Data Understanding
-
-**Reference notebooks:**
-- `exploration/eda.ipynb` - Feature distributions, target statistics, CV structure
-- `exploration/evolver_loop2_lb_feedback.ipynb` - CV-LB gap analysis
-
-**Key Data Facts:**
-- Single solvent: 656 samples, 24 solvents, leave-one-solvent-out CV (24 folds)
-- Full/mixed solvent: 1227 samples, 13 solvent pairs, leave-one-ramp-out CV (13 folds)
-- Targets: SM, Product 2, Product 3 (yields as fractions 0-1)
-- **SM target has highest error** - RMSE 0.51 for single solvent vs 0.10 for full data
-- Targets do NOT sum to 1 (mean ~0.8) - mass loss in reaction
+**My synthesis**: The GP approach failed. We need to focus on:
+1. **Stacking ensemble** to leverage diversity between MLP and Trees
+2. **High-dimensional features** (drfps, fragprints) that may capture chemistry better
+3. **Per-target optimization** since SM has highest variance
 
 ## CRITICAL: Submission Structure Requirements
-
 **MANDATORY:** The submission must follow the exact structure of the benchmark template notebook.
 - The last three cells MUST remain unchanged except for the model definition line
 - `model = MLPModel()` can be replaced with a new model definition
 - Both single solvent and full (mixed) solvent tasks must be handled
 
+## Data Understanding
+**Reference notebooks for data characteristics:**
+- `exploration/eda.ipynb` - Contains full EDA: feature distributions, target statistics, CV structure
+- `exploration/evolver_loop3_analysis.ipynb` - Analysis of CV-LB gap and prediction differences
+
+**Key Data Facts:**
+- Single solvent: 656 samples, 24 solvents, leave-one-solvent-out CV (24 folds)
+- Full/mixed solvent: 1227 samples, 13 solvent pairs, leave-one-ramp-out CV (13 folds)
+- Targets: SM, Product 2, Product 3 (yields as fractions 0-1)
+- **SM has highest variance** (std ~0.36) - this is the hardest target to predict
+- **Targets do NOT sum to 1** (mean ~0.8) - there is mass loss in the reaction
+
 ## Recommended Approaches (Priority Order)
 
-### 1. Gaussian Processes / Deep Kernel Learning (HIGH PRIORITY)
-**Why:** GPs excel at extrapolation to unseen data points (the core challenge here - predicting unseen solvents). With ~600-1200 samples, GPs are in their sweet spot.
+### PRIORITY 1: Stacking Ensemble (MLP + Trees)
+**Rationale**: MLP and Trees make different predictions (mean diff ~0.03-0.06 per target). Combining them could reduce variance and improve generalization.
 
-**Implementation:**
-- Use GPyTorch for scalable GP implementation
-- Try Deep Kernel Learning (DKL) - NN feature extractor + GP head
-- Consider multi-output GPs for correlated targets
-- Use Arrhenius features as inputs
+**Implementation**:
+```python
+class StackingEnsembleModel:
+    def __init__(self, data='single'):
+        self.data_type = data
+        # MLP component (from exp_000)
+        self.mlp = MLPWithArrhenius(data=data)
+        # Tree component (from exp_001)  
+        self.trees = TreeEnsembleModel(data=data)
+    
+    def train_model(self, X, Y):
+        self.mlp.train_model(X, Y)
+        self.trees.train_model(X, Y)
+        
+    def predict(self, X):
+        pred_mlp = self.mlp.predict(X)
+        pred_trees = self.trees.predict(X)
+        # Simple average - can try weighted average later
+        return (pred_mlp + pred_trees) / 2
+```
 
-**Expected benefit:** Better uncertainty quantification and extrapolation to unseen solvents.
+**Key elements to include**:
+- Arrhenius kinetics features (inv_temp, log_time, interaction)
+- Spange + ACS PCA descriptors
+- Symmetry TTA for mixed solvents
+- Data augmentation for mixed solvents
 
-### 2. Regressor Chains for Correlated Targets (MEDIUM PRIORITY)
-**Why:** SM, Product 2, Product 3 are chemically related (mass balance). Predicting one can inform the others.
+### PRIORITY 2: High-Dimensional Features (drfps with PCA)
+**Rationale**: drfps (2048 features) are differential reaction fingerprints that may capture chemistry better than spange (13 features).
 
-**Implementation:**
-- Order: SM → Product 2 → Product 3 (or optimize order)
-- Feed prediction of previous target as input to next
-- Use sklearn's RegressorChain or implement manually
+**Implementation**:
+- Load drfps_catechol_lookup.csv
+- Apply PCA to reduce to 50-100 components
+- Combine with Arrhenius kinetics features
+- Use with tree-based model (handles high-dim well)
 
-**Expected benefit:** Capture correlations between outputs.
+**Caution**: High-dimensional features may overfit. Use strong regularization.
 
-### 3. Advanced Feature Engineering (MEDIUM PRIORITY)
-**Why:** Current features may not capture all relevant chemistry.
+### PRIORITY 3: Per-Target Optimization with Feature Selection
+**Rationale**: SM has highest variance and dominates the error. Different features may work better for different targets.
 
-**Ideas:**
-- **Reaction kinetics features:** k = A * exp(-Ea/RT), use log(k) as feature
-- **Solvent interaction features:** Product of solvent descriptors
-- **Temperature-time interaction:** T * log(t), T^2, t^2
-- **Solvent polarity index:** Combine multiple descriptors into single polarity measure
+**Implementation**:
+- For SM: Use HistGradientBoosting with deeper trees
+- For Products: Use ExtraTrees with more estimators
+- Try different feature tables for different targets
 
-### 4. Ensemble Diversity (MEDIUM PRIORITY)
-**Why:** Current ensembles use similar models. More diversity = better generalization.
+## What NOT to Try
+- **Gaussian Processes**: Already tried (exp_002), performed worse than trees
+- **Simple hyperparameter tuning**: Marginal improvements won't bridge the 5.7x gap to target
+- **More bagging**: Already using 3-7 models, diminishing returns
 
-**Ideas:**
-- Combine MLP + Trees + GP
-- Use different feature sets for different models
-- Stack with meta-learner (Ridge regression on OOF predictions)
+## Validation Notes
+- CV scheme: Leave-one-solvent-out (24 folds) for single, leave-one-ramp-out (13 folds) for full
+- CV-LB gap is ~9x - this is consistent with public kernels
+- Focus on CV improvement - LB will follow if approach is sound
 
-### 5. Per-Solvent or Per-Condition Models (LOW PRIORITY)
-**Why:** Different solvents may have different prediction characteristics.
+## Key Insights from Public Kernels
+1. **Arrhenius Kinetics + TTA (LB 0.09831)**: Best public kernel uses inv_temp, log_time, interaction features with symmetry TTA and 7-model bagging
+2. **Per-Target Ensemble (LB 0.11161)**: Different models for SM vs Products, weighted ensemble (0.65 ACS PCA + 0.35 Spange)
+3. **Our best (LB 0.0998)**: Competitive with best public kernels
 
-**Ideas:**
-- Cluster solvents by properties, train separate models per cluster
-- Use solvent-specific hyperparameters
+## Experiment Tracking
+| ID | Model | CV Score | LB Score | Notes |
+|----|-------|----------|----------|-------|
+| exp_000 | MLP + Arrhenius + TTA | 0.011303 | 0.0998 | Baseline |
+| exp_001 | Tree Ensemble | 0.010986 | 0.0999 | Best CV |
+| exp_002 | Gaussian Process | 0.017921 | - | WORSE, not submitted |
 
-## What NOT to Try (Already Exhausted)
+## Next Experiment: Stacking Ensemble (MLP + Trees)
+**Goal**: Combine the diversity of MLP and Tree-based models to reduce variance and improve generalization.
 
-1. **Basic MLP with BatchNorm** - Already tried, CV 0.011, LB 0.10
-2. **Tree-based per-target ensemble** - Already tried, CV 0.011, LB 0.10
-3. **Simple hyperparameter tuning** - Won't bridge 5-6x gap to target
+**Steps**:
+1. Implement MLP component with Arrhenius features, BatchNorm, Dropout, HuberLoss
+2. Implement Tree component with per-target models (HGB for SM, ExtraTrees for Products)
+3. Average predictions from both models
+4. Use symmetry TTA for mixed solvents
 
-## Validation Strategy
+**Expected outcome**: CV improvement over individual models due to ensemble diversity.
 
-- **Single solvent:** Leave-one-solvent-out (24 folds)
-- **Full data:** Leave-one-ramp-out (13 folds)
-- **Same hyperparameters across all folds** (no per-fold tuning)
-- **Focus on reducing RMSE** (appears to be the LB metric)
-
-## Key Techniques from Public Kernels
-
-1. **Arrhenius kinetics features:** inv_temp, log_time, interaction
-2. **Symmetry TTA:** For mixed solvents, predict both (A,B) and (B,A), average
-3. **Data augmentation:** Train on both symmetric versions of mixed solvents
-4. **Per-target models:** Different model types for SM vs Products
-5. **Feature table ensemble:** Weighted average of ACS PCA and Spange descriptors
-
-## Next Experiment Priorities
-
-1. **Try Gaussian Processes** - Most promising for extrapolation
-2. **Try Regressor Chains** - Exploit target correlations
-3. **Try stacking ensemble** - Combine diverse models with meta-learner
-4. **Investigate per-fold errors** - Which solvents are hardest to predict?
-
-## Submissions Remaining: 3/5
-
-Use submissions strategically:
-- Submit when trying fundamentally different approach (GP, stacking)
-- Don't submit for small hyperparameter changes
-- Reserve at least 1 submission for final ensemble
+If stacking doesn't improve CV significantly (< 2% improvement), try high-dimensional features (drfps with PCA) in the next experiment.
