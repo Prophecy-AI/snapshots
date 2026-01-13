@@ -1,0 +1,172 @@
+# Catechol Reaction Yield Prediction - Seed Prompt
+
+## Problem Overview
+This is a chemistry reaction yield prediction task. The goal is to predict yields of starting material (SM) and two products (Product 2, Product 3) for the allyl substituted catechol reaction under different solvent and process conditions.
+
+**Two prediction tasks:**
+1. **Single solvent task**: Leave-one-solvent-out cross-validation (24 solvents, 656 data points)
+2. **Full/mixed solvent task**: Leave-one-ramp-out cross-validation (13 solvent ramps, 1227 data points)
+
+**CRITICAL SUBMISSION CONSTRAINT:**
+- The last three cells of the notebook MUST remain unchanged from the template
+- ONLY the model definition line can be modified: `model = MLPModel()` → `model = YourModel()`
+- Same hyperparameters must be used across all folds (no per-fold tuning)
+- The model class must have: `__init__`, `train_model(X_train, y_train)`, `predict(X_test)` returning torch tensor [N, 3]
+
+## Data Understanding
+**Reference notebooks:** See `exploration/eda.ipynb` for data characteristics.
+
+Key findings:
+- Temperature range: 175-225°C
+- Residence Time range: 2-15 minutes
+- Targets don't sum to 1 (mean ~0.8) - don't force normalization
+- Spange descriptors (13 features) are compact and effective for solvent representation
+- DRFP (2048 features) and fragprints (2133 features) are high-dimensional alternatives
+- Small dataset size (656-1227 samples) - consider GP models
+
+## Recommended Model Approaches
+
+### 1. Physics-Informed Feature Engineering (HIGH PRIORITY)
+From top-performing kernels, Arrhenius kinetics features significantly improve performance:
+```python
+temp_k = Temperature + 273.15  # Convert to Kelvin
+inv_temp = 1000.0 / temp_k     # Inverse temperature (Arrhenius)
+log_time = np.log(Residence_Time + 1e-6)  # Log of time
+interaction = inv_temp * log_time  # Kinetic interaction term
+```
+These features capture the physics of reaction kinetics (Arrhenius equation: k = A * exp(-Ea/RT)).
+
+Additional feature engineering ideas:
+- `Reaction_Energy = Temperature * Residence_Time`
+- `B_Conc_Temp = SolventB% * Temperature`
+
+### 2. Chemical Symmetry for Mixed Solvents (HIGH PRIORITY)
+For mixed solvent predictions, a mixture of "Solvent A + Solvent B" is physically identical to "Solvent B + Solvent A". Use Test-Time Augmentation (TTA):
+- Predict once with (A, B) input
+- Predict again with (B, A) flipped input  
+- Average the predictions
+
+This respects physical symmetry and reduces variance. Can also augment training data with both orderings.
+
+### 3. Ensemble Methods
+Top solutions use ensembles combining:
+- **MLP** (neural network with BatchNorm, ReLU, Dropout)
+- **XGBoost** with MultiOutputRegressor
+- **LightGBM** with MultiOutputRegressor
+- **RandomForest** with MultiOutputRegressor
+
+Weighted averaging of predictions (weights can be tuned via Optuna or set manually, e.g., [0.3, 0.3, 0.2, 0.2]).
+
+### 4. Model Architecture Recommendations
+
+**For MLP (proven architecture from top kernels):**
+```
+BatchNorm1d(input_dim)
+→ Linear(128) → BatchNorm1d(128) → ReLU → Dropout(0.2)
+→ Linear(128) → BatchNorm1d(128) → ReLU → Dropout(0.2)
+→ Linear(64) → BatchNorm1d(64) → ReLU → Dropout(0.2)
+→ Linear(3) → Sigmoid()
+```
+
+Training settings:
+- Loss: MSELoss or HuberLoss (robust to outliers)
+- Optimizer: Adam with lr=5e-4, weight_decay=1e-5
+- Gradient clipping: max_norm=1.0
+- Scheduler: ReduceLROnPlateau(factor=0.5, patience=20)
+- Epochs: 200-300
+- Batch size: 32
+
+**For Gradient Boosting:**
+- XGBoost: n_estimators=1500, learning_rate=0.015, max_depth=6, subsample=0.8
+- LightGBM: num_leaves=31-63
+- Use MultiOutputRegressor wrapper for multi-target prediction
+
+### 5. Gaussian Process Models (Alternative for Small Data)
+Given the small dataset size (<2000 samples), Gaussian Process models can be very effective:
+- GAUCHE library provides chemistry-specific kernels (Tanimoto, graph kernels)
+- Deep Kernel Learning (DKL) combines neural network feature learning with GP uncertainty
+- GPs provide reliable uncertainty estimates useful for understanding prediction confidence
+- Consider GPyTorch or sklearn's GaussianProcessRegressor
+
+### 6. Bagging for Robustness
+Train multiple models (5-7) with different random seeds and average predictions. This reduces variance significantly.
+
+### 7. Solvent Featurization
+Available pre-computed features:
+- **spange_descriptors** (13 features): Compact, interpretable solvent properties - RECOMMENDED
+- **acs_pca_descriptors** (5 features): PCA-reduced green chemistry descriptors
+- **drfps_catechol** (2048 features): Differential reaction fingerprints
+- **fragprints** (2133 features): Fragment + fingerprint concatenation
+
+For mixed solvents, use weighted average: `features = (1-pct) * feat_A + pct * feat_B`
+
+### 8. Post-Processing
+- Clip predictions to [0, 1] range
+- Do NOT normalize to sum to 1 (targets naturally don't sum to 1)
+
+## Advanced Techniques from Literature
+
+### Transformer-based approaches
+- BERT/Transformer models on reaction SMILES can be very effective for yield prediction
+- Consider using pre-trained molecular transformers if time permits
+
+### Hybrid Models
+- Combine mechanistic knowledge (Arrhenius kinetics) with ML
+- Use DFT-computed descriptors as additional features if available
+
+## Validation Strategy
+- Single solvent: Leave-one-solvent-out (24 folds)
+- Full data: Leave-one-ramp-out (13 folds)
+- Use the exact split generators from utils.py
+
+## Implementation Notes
+
+The model class must have:
+1. `__init__(self, data='single')` - initialize with data type
+2. `train_model(self, X_train, y_train)` - training method
+3. `predict(self, X_test)` - returns torch tensor of shape [N, 3]
+
+The featurizer must handle:
+- Single solvent: 'SOLVENT NAME' column
+- Mixed solvent: 'SOLVENT A NAME', 'SOLVENT B NAME', 'SolventB%' columns
+
+## Target Score
+Beat **0.017270** (lower is better). This is a very competitive target requiring sophisticated approaches.
+
+## Key Techniques Summary (Priority Order)
+1. ✅ Arrhenius kinetics features (1/T, ln(t), interaction) - CRITICAL
+2. ✅ Chemical symmetry TTA for mixed solvents - CRITICAL
+3. ✅ Ensemble of MLP + XGBoost + LightGBM + RF
+4. ✅ Bagging with multiple seeds (5-7 models)
+5. ✅ Spange descriptors for solvent features
+6. ✅ HuberLoss for robustness
+7. ✅ Sigmoid output with clipping to [0,1]
+8. ✅ BatchNorm + Dropout(0.2) architecture
+9. ✅ ReduceLROnPlateau scheduler
+10. ✅ Gradient clipping (max_norm=1.0)
+11. 🔄 Consider Gaussian Process models for uncertainty quantification
+
+## Reference Kernels
+- `../research/kernels/sanidhyavijay24_arrhenius-kinetics-tta-0-09831/` - Arrhenius + TTA approach (Score: 0.09831)
+- `../research/kernels/lishellliang_mixall-runtime-is-only-2m-15s-but-good-cv-lb/` - Ensemble approach
+- `../research/kernels/omarafik_system-malfunction-v1/` - Clean MLP implementation
+- `../research/kernels/josepablofolch_catechol-benchmark-hackathon-template/` - Official template
+
+## Code Template Structure
+The submission must follow this exact structure for the last 3 cells:
+
+```python
+# Cell -3: Single solvent task
+X, Y = load_data("single_solvent")
+split_generator = generate_leave_one_out_splits(X, Y)
+# ... loop with model = YourModel(data='single')
+
+# Cell -2: Full data task  
+X, Y = load_data("full")
+split_generator = generate_leave_one_ramp_out_splits(X, Y)
+# ... loop with model = YourModel(data='full')
+
+# Cell -1: Save submission
+submission = pd.concat([submission_single_solvent, submission_full_data])
+submission.to_csv("submission.csv", index=True)
+```
