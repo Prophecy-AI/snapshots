@@ -1,0 +1,129 @@
+## Current Status
+- Best CV: 0.8602 from 001_baseline_cnn
+- Experiments above gold: 0 (gold threshold: 0.0388)
+- **We are far from gold and need aggressive improvements**
+
+## Response to Evaluator
+- No evaluator feedback yet (Loop 1) - establishing baseline strategy
+
+## Data Understanding
+- **Reference notebooks**: See `exploration/evolver_loop1_analysis.ipynb` for comprehensive data analysis
+- **Key patterns**:
+  - Perfectly balanced dataset: 50% dogs (11,258), 50% cats (11,242) across 22,500 training images
+  - Variable image sizes: 59x64 to 500x500 pixels (mean: 402x355)
+  - All RGB images, no grayscale
+  - Stratified 80/20 validation split created at `/home/code/splits/stratified_split_20pct.pkl`
+
+## Critical Issues Identified from Baseline
+1. **Severe overfitting**: 98% train vs 86% validation accuracy
+2. **Numerical instability**: NaN log loss from log(0) probabilities
+3. **No transfer learning**: Simple CNN from scratch (biggest limitation)
+4. **No data augmentation**: Model memorizes training data
+5. **Low resolution**: 128x128 images lose fine details
+6. **Undertrained**: Only 2 epochs before timeout
+
+## Recommended Approaches (Priority Order)
+
+### 1. Transfer Learning with Fine-tuning (HIGHEST PRIORITY)
+**Why**: Research shows this is the #1 factor for winning this competition. Pretrained ImageNet models provide powerful features that dramatically outperform training from scratch.
+
+**Implementation**:
+- Use **ResNet50** or **EfficientNet-B0** as backbone (proven winners for this task)
+- **Two-phase training**:
+  - Phase 1: Freeze backbone, train only classification head for 5-10 epochs (LR: 1e-3)
+  - Phase 2: Unfreeze backbone, train full model for 10-15 epochs (LR: 1e-5 to 1e-4)
+- **Image resolution**: Increase to 224x224 (standard for these models)
+- **Optimizer**: AdamW with weight decay 1e-4
+- **Scheduler**: Cosine annealing or ReduceLROnPlateau
+
+**Expected impact**: Should improve score from 0.86 to ~0.10-0.15 based on competition history
+
+### 2. Fix Numerical Instability
+**Why**: NaN losses prevent proper training and evaluation
+
+**Implementation**:
+- Replace manual BCE loss with `torch.nn.BCEWithLogitsLoss()` (numerically stable)
+- If using probabilities: Clamp with `torch.clamp(probs, eps, 1-eps)` where eps=1e-7
+- Add gradient clipping: `torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)`
+- Monitor for NaNs during training and implement early stopping
+
+**Expected impact**: Enables reliable training and proper log loss calculation
+
+### 3. Aggressive Data Augmentation
+**Why**: Prevents overfitting and improves generalization
+
+**Implementation**:
+```python
+transform_train = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.RandomHorizontalFlip(p=0.5),
+    transforms.RandomRotation(15),
+    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+    transforms.RandomResizedCrop(224, scale=(0.8, 1.0)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+```
+- Use **RandAugment** for automatic augmentation search
+- Consider **CutMix** or **Mixup** for advanced regularization
+- Keep validation transforms simple (only resize, center crop, normalize)
+
+**Expected impact**: Reduce overfitting gap, improve validation accuracy by 5-10%
+
+### 4. Proper Training Configuration
+**Why**: Current setup causes timeouts and undertraining
+
+**Implementation**:
+- **Batch size**: 32 (current is OK, but ensure it fits in GPU memory)
+- **Epochs**: 20-30 total (10 frozen + 15 unfrozen)
+- **Early stopping**: Patience=5 epochs based on validation log loss
+- **Checkpointing**: Save best model based on validation score
+- **Timeout prevention**: Use tqdm progress bars, monitor per-epoch time
+- **Mixed precision**: Use `torch.cuda.amp` for faster training
+
+**Expected impact**: Complete training without timeouts, achieve convergence
+
+### 5. Validation and Monitoring
+**Why**: Need reliable CV scores to track progress
+
+**Implementation**:
+- Use the stratified split created in analysis notebook
+- **Primary metric**: Log loss (lower is better)
+- **Secondary metrics**: Accuracy, AUC-ROC
+- **Monitoring**: Track train/val gap to detect overfitting
+- **Cross-validation**: Consider 5-fold CV for final model selection
+
+**Expected impact**: Reliable progress tracking and model selection
+
+### 6. Ensemble Strategy (For Later)
+**Why**: Single models rarely win competitions
+
+**Implementation** (after achieving good single model):
+- Train 3-5 diverse models (different architectures, augmentations, seeds)
+- Use **weighted averaging** or **stacking** with logistic regression meta-learner
+- Diversity sources: ResNet50, EfficientNet-B0, ViT, different augmentation policies
+
+**Expected impact**: Final boost from ~0.05 to <0.04 (gold threshold)
+
+## What NOT to Try (Exhausted or Low ROI)
+1. **Training from scratch**: Proven inferior for this competition
+2. **Small architectures**: VGG16 is outdated; focus on modern architectures
+3. **Low resolution**: 128x128 loses too much detail
+4. **No augmentation**: Already causing overfitting
+5. **Grid search hyperparameters**: Too early - focus on architecture first
+
+## Validation Notes
+- **CV scheme**: Stratified 80/20 split (already created)
+- **Confidence**: Medium - need to verify split stability across seeds
+- **Target**: Achieve CV < 0.10 in next 2-3 experiments
+- **Gold threshold**: 0.038820 (still far, but transfer learning will close the gap)
+
+## Success Criteria for Next Experiment
+1. Use transfer learning (ResNet50 or EfficientNet-B0)
+2. Implement proper data augmentation
+3. Fix numerical instability
+4. Train for at least 15-20 epochs
+5. Achieve validation log loss < 0.20 (major improvement from 0.86)
+6. Reduce train/val gap to < 5% (from 12% currently)
+
+**Focus on items 1-3 - they will provide 80% of the improvement.**
