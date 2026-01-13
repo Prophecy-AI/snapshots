@@ -1,0 +1,147 @@
+# Christmas Tree Packing Optimization - Techniques Guide
+
+## Problem Overview
+This is a 2D geometric packing optimization problem: pack Christmas tree shapes (15-vertex polygons) into the smallest square bounding box for configurations of n=1 to 200 trees. The score is the sum of normalized areas: Σ(s²/n) where s is the side length of the bounding square. **Lower is better.** Target score to beat: **68.954209**
+
+## Data Understanding
+**Reference notebooks for data characteristics:**
+- See `../research/kernels/inversion_santa-2025-getting-started/santa-2025-getting-started.ipynb` for tree geometry definition and basic greedy algorithm
+- See `exploration/eda.ipynb` for submission structure analysis
+- Tree shape: 3-tier triangular tree with trunk (15 vertices)
+- Dimensions: trunk_w=0.15, trunk_h=0.2, base_w=0.7, mid_w=0.4, top_w=0.25, tip_y=0.8
+- Each tree has position (x, y) and rotation angle (deg)
+- Coordinates must be in range [-100, 100]
+- Total rows in submission: 20,100 = sum(1 to 200)
+
+## Core Optimization Approaches
+
+### 1. Greedy Placement Algorithms
+- **Bottom-left strategy**: Place trees one by one, moving from far away toward center until collision
+- **Weighted angle generation**: Use `abs(sin(2*angle))` distribution to favor diagonal placements (45°, 135°, etc.) - this helps fill square corners better
+- **Multi-start**: Try 10+ random starting angles per tree, keep the best placement
+- **Step refinement**: Use coarse steps (0.5) to find collision, then fine steps (0.05) to back up
+- **Lowest-gravity-center policy**: Place piece at position with lowest gravity center (results in flatter boundaries)
+
+### 2. Rotation Tightening (fix_direction)
+After placing all trees, optimize the rotation of the entire configuration:
+- Extract all polygon vertices and compute ConvexHull
+- Use `scipy.optimize.minimize_scalar` to find optimal rotation angle (0-90°)
+- Objective: minimize max(width, height) of axis-aligned bounding box
+- Apply rotation to all tree positions and angles
+- This can significantly reduce bounding box size without changing relative positions
+
+### 3. External Optimizer (bbox3)
+Top solutions use a compiled binary optimizer with parameters:
+- `-n`: number of iterations (typical: 1000-2000)
+- `-r`: radius parameter (typical: 30-96)
+- Multi-phase approach:
+  - Phase A: Short runs (2 min) with many (n, r) combinations to find promising settings
+  - Phase B: Medium runs (10 min) on top candidates
+  - Phase C: Long runs (20 min) on best few
+- Always validate and revert if score regresses
+
+### 4. Local Search and Meta-heuristics
+- **Swap neighborhoods**: Exchange positions of two trees
+- **Translation neighborhoods**: Move single tree to new position
+- **Simulated annealing**: Control temperature for accepting worse solutions
+- **Tabu search**: Avoid revisiting recent configurations
+- **Jostle algorithm**: Iteratively compact placement by small perturbations
+- **Nonlinear programming**: Use NLP to minimize overlap during search
+
+### 5. No-Fit Polygon (NFP) - Advanced Technique
+The NFP represents all positions a moving polygon can occupy relative to a fixed polygon without overlapping:
+- Pre-compute NFP for each pair of tree orientations
+- Replace costly pairwise overlap tests with simple point-in-polygon checks
+- Reduces computational complexity from O(nm+n+m) to O(k) for overlap detection
+- Methods: Minkowski sum, orbital/trace-line sliding
+- Handles degenerate cases: holes, interlocking concavities, jigsaw-type pieces
+
+## Collision Detection (Critical for Performance)
+
+### Shapely-based Detection
+```python
+from shapely.strtree import STRtree
+from shapely.geometry import Polygon
+
+# Build spatial index for efficient queries
+tree_index = STRtree(polygons)
+
+# Check for overlaps
+for i, poly in enumerate(polygons):
+    indices = tree_index.query(poly)
+    for idx in indices:
+        if idx != i:
+            if poly.intersects(polygons[idx]) and not poly.touches(polygons[idx]):
+                # Overlap detected!
+```
+
+### High Precision Arithmetic
+- Use `Decimal` with precision 25-30 for coordinates
+- Scale factor of 1e15 to 1e18 for internal calculations
+- Round to 6 decimal places for submission
+
+## Overlap Repair Strategy
+When optimization creates overlapping configurations:
+1. Validate all n-configurations (1 to 200)
+2. For any configuration with overlaps, replace with known-good baseline
+3. Keep best submission and revert on regressions
+4. Use donor file approach: copy valid configurations from baseline
+
+## Submission Format
+- Values must be prefixed with 's' (e.g., "s0.123456")
+- Format: `id,x,y,deg` where id is `NNN_T` (N=tree count, T=tree index)
+- Coordinates constrained to [-100, 100]
+
+## Optimization Strategy
+
+### For Small n (1-20)
+- These contribute most to score (s²/n with small n)
+- Worth spending more time on optimal placement
+- Consider exhaustive search for very small n
+
+### For Large n (100-200)
+- Approximate circular packing becomes more efficient
+- Focus on overall compactness rather than individual optimization
+- Rotation tightening has larger impact
+
+### Incremental Building
+- Build n-tree configuration from (n-1)-tree configuration
+- Reuse previous placements and add one tree
+- This ensures consistency across configurations
+
+## Key Techniques from Top Kernels
+
+1. **Multi-phase optimization**: Start with quick exploration, then focus on promising regions
+2. **Rotation optimization**: Always apply fix_direction after placement
+3. **Validation loop**: Score → Validate → Repair → Repeat
+4. **Parameter tuning**: Different (n, r) parameters work better for different tree counts
+5. **Time budgeting**: Allocate more time to configurations that contribute most to score
+
+## Implementation Tips
+
+1. Use Shapely for polygon operations (affinity.rotate, affinity.translate)
+2. Implement efficient collision detection with STRtree spatial indexing
+3. Track best score and always keep backup of best submission
+4. Log progress to monitor optimization
+5. Consider parallel processing for independent configurations
+6. Use convex hull for fast bounding box calculations
+
+## Algorithm Families for 2D Irregular Packing (from literature)
+
+1. **Geometric heuristics**: Bottom-left, shelf-packing, jostle/collision-free region
+2. **Local search + hybrid meta-heuristics**: Outperform older methods, especially with arbitrary rotations
+3. **Genetic algorithms**: Shape-based crossover, adaptive cooling schedules
+4. **Approximation algorithms**: For convex polygons, polynomial-time with constant-factor guarantees
+5. **Two-level/collision-free region methods**: Hierarchical scheme for efficient placement
+
+## Expected Score Improvements
+- Baseline greedy: ~75-80
+- With rotation tightening: ~70-72
+- With bbox3 optimization: ~68-69
+- With extensive tuning: <68
+
+## Reference Kernels
+- `../research/kernels/inversion_santa-2025-getting-started/` - Basic greedy algorithm, tree geometry
+- `../research/kernels/yongsukprasertsuk_santa-2025-best-keeping-bbox3-runner/` - Multi-phase bbox3 optimization
+- `../research/kernels/saspav_santa-submission/` - Rotation tightening (fix_direction)
+- `../research/kernels/jazivxt_why-not/` - Overlap repair, crystallization analysis
