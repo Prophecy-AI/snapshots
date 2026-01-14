@@ -1,0 +1,109 @@
+# Catechol Reaction Yield Prediction - Techniques Guide
+
+## Problem Overview
+This is a chemistry reaction yield prediction problem. The goal is to predict three yield outputs (SM, Product 2, Product 3) based on solvent conditions, temperature, and residence time. The evaluation uses a custom cross-validation procedure with two tasks:
+- Task 0: Single solvent data (leave-one-solvent-out CV, 24 folds)
+- Task 1: Full data with solvent mixtures (leave-one-ramp-out CV, 13 folds)
+
+**Target score to beat: 0.017270** (lower is better)
+
+## Data Understanding
+**Reference notebook:** `exploration/eda.ipynb`
+- Full data: 1227 samples, 19 columns
+- Single solvent data: 656 samples, 13 columns
+- 24 unique solvents, 13 unique solvent ramps
+- Targets are yields in range [0, 1] (some slightly exceed 1.0)
+- Temperature range: 175-225°C
+- Residence Time range: 2-15 minutes
+- SolventB% range: 0-1
+
+## Key Techniques from Top Solutions
+
+### 1. Physics-Informed Feature Engineering (CRITICAL)
+**Arrhenius Kinetics Features** - The most important technique from the top solution (0.09831 score):
+- Convert temperature to Kelvin: `temp_k = temp_c + 273.15`
+- Inverse temperature: `inv_temp = 1000.0 / temp_k`
+- Log time: `log_time = np.log(time + 1e-6)`
+- Interaction term: `interaction = inv_temp * log_time`
+
+This is based on the Arrhenius equation for reaction kinetics: k = A * exp(-Ea/RT)
+
+### 2. Chemical Symmetry and Test Time Augmentation (TTA)
+For mixed solvents, a mixture of "Solvent A + Solvent B" is physically identical to "Solvent B + Solvent A". 
+**TTA Strategy:**
+- During inference for mixed solvents, predict twice:
+  - Prediction 1: Input as (A, B)
+  - Prediction 2: Input as (B, A) with flipped concentration
+  - Final = (Pred1 + Pred2) / 2
+- Also train on both symmetries (data augmentation)
+
+### 3. Solvent Featurization
+Available lookup tables:
+- **spange_descriptors** (13 features): Best for linear mixing, most commonly used
+- **acs_pca_descriptors** (5 features): PCA-based from ACS Green Chemistry
+- **drfps_catechol** (2048 features): Differential reaction fingerprints
+- **fragprints** (2133 features): Fragment + fingerprint concatenation
+
+**Linear mixing for solvent mixtures:**
+```
+mixed_features = A_features * (1 - pct) + B_features * pct
+```
+
+### 4. Additional Numeric Feature Engineering
+- Polynomial features: rt², temp², rt*temp
+- Log transforms: log1p(rt), log1p(temp)
+- Reaction energy proxy: Temperature * Residence Time
+- Concentration-temperature interaction: SolventB% * Temperature
+
+### 5. Model Architecture
+**MLP (Most successful):**
+- BatchNorm at input
+- Hidden layers: [128, 128, 64] with BatchNorm, ReLU, Dropout(0.2)
+- Output: 3 neurons with Sigmoid activation (for bounded outputs)
+- Loss: HuberLoss (robust to outliers) or MSELoss
+- Optimizer: Adam with lr=5e-4, weight_decay=1e-5
+- Scheduler: ReduceLROnPlateau
+- Gradient clipping: max_norm=1.0
+- Epochs: 250-300
+
+**Model Bagging:**
+- Train 5-7 models with different seeds
+- Average predictions for robustness
+
+### 6. Post-Processing
+- Clip predictions to [0, 1]
+- Optional: Normalize rows so yields sum to 1 (chemical constraint)
+
+### 7. Validation Strategy
+The competition uses a specific CV structure:
+- Single solvent: Leave-one-solvent-out (24 folds)
+- Full data: Leave-one-ramp-out (13 folds)
+- Must use the exact split generators from utils.py
+
+### 8. Ensemble Strategies
+- Seed ensemble: Train same model with different random seeds (3-7 seeds)
+- Feature ensemble: Combine predictions from models using different featurizations
+- Model ensemble: Combine MLP with gradient boosting (XGBoost/LightGBM)
+
+### 9. Alternative Approaches
+**XGBoost/LightGBM:**
+- Can work but typically underperforms MLP for this problem
+- Use MultiOutputRegressor wrapper
+- Enable categorical features for solvent names
+
+**Gaussian Processes:**
+- Could leverage uncertainty quantification
+- May be computationally expensive for this dataset size
+
+## Implementation Priority
+1. Start with basic MLP + spange_descriptors
+2. Add Arrhenius kinetics features (1/T, ln(t), interaction)
+3. Implement TTA for chemical symmetry
+4. Add model bagging (5-7 seeds)
+5. Try combining multiple featurizations
+6. Experiment with ensemble of different model types
+
+## Code Structure Notes
+- The submission must follow the template structure with specific last 3 cells
+- Only the model definition line can be changed
+- Model must have train_model(X_train, Y_train) and predict(X) methods
