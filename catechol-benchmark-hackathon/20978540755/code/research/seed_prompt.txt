@@ -1,121 +1,183 @@
 ## Current Status
 - Best CV score: 0.0083 from exp_030 (GP+MLP+LGBM ensemble)
-- Best LB score: 0.0877 from exp_030 (NEW BEST!)
+- Best LB score: 0.0877 from exp_030
 - CV-LB gap: ~10.6x (LB = 4.30*CV + 0.0524, R²=0.97)
-- Target: 0.01727
-- Gap to target: 5.08x (408% worse than target)
+- Target: 0.01670
+- Gap to target: 5.25x (425% worse than target)
 - Submissions remaining: 2
 
 ## Response to Evaluator
 
-**Technical verdict was TRUSTWORTHY.** The evaluator correctly verified exp_030 was well-executed.
+**Technical verdict was TRUSTWORTHY.** The evaluator correctly verified exp_031 was well-executed.
 
-**Evaluator's top priority was: SUBMIT exp_030.** We did, and it achieved LB 0.0877 (BEST YET), improving from 0.0887.
+**Evaluator's top priority was: Try Kernel Ridge Regression with Tanimoto kernel.** This is a valid suggestion, but I'm prioritizing approaches that might fundamentally change the CV-LB relationship.
 
-**Key findings from LB feedback:**
-1. GP improved both CV (2.4%) and LB (1.1%)
-2. GP did NOT fundamentally change the CV-LB relationship
-3. The intercept (0.0524) > target (0.01727) - mathematically impossible to reach target by improving CV alone
-4. We need a fundamentally different approach
+**Key findings from exp_031:**
+1. Higher GP weight (0.4 vs 0.2) made CV 10.61% WORSE
+2. GP is complementary but not as accurate as MLP/LGBM
+3. The optimal GP weight is around 0.2, not higher
+4. Increasing GP weight does NOT improve generalization
 
-**Evaluator's concerns addressed:**
-- GP weight was 0.2 (lowest) - could try higher weight
-- ARD kernel could help - worth trying
-- The CV-LB gap is structural, not model-dependent
+**Critical insight from analysis:**
+- The CV-LB relationship is: LB = 4.30*CV + 0.0524 (R²=0.97)
+- Intercept (0.0524) > Target (0.01670)
+- To hit target, we would need CV = -0.0083 (IMPOSSIBLE!)
+- **We CANNOT reach target by improving CV alone**
+- We need an approach that fundamentally changes the CV-LB relationship
 
 ## Data Understanding
 
 **Reference notebooks:**
+- `exploration/evolver_loop32_analysis.ipynb` - CV-LB relationship analysis
 - `exploration/evolver_loop31_lb_feedback.ipynb` - LB feedback analysis
-- `exploration/evolver_loop27_analysis.ipynb` - CV-LB relationship analysis
-- `experiments/030_gp_ensemble/gp_ensemble.ipynb` - GP+MLP+LGBM implementation
+- `experiments/030_gp_ensemble/gp_ensemble.ipynb` - Best model implementation
 
-**Critical insight from analysis:**
-The CV-LB relationship is:
-- LB = 4.30*CV + 0.0524 (R²=0.97)
-- Intercept (0.0524) > Target (0.01727)
-- Even with CV=0, predicted LB would be 0.0524 > target
-- **We CANNOT reach target by improving CV alone**
-
-**Key insight from research:**
-1. The "mixall" kernel uses GroupKFold (5 splits) instead of Leave-One-Out
-2. Research suggests "out-of-scope" CV schemes give more realistic estimates
-3. Simple models with few parameters preserve generalizability better
-4. Data augmentation can help stabilize CV estimates
+**Key insight from "mixall" kernel:**
+The "mixall" kernel uses **GroupKFold (5 splits)** instead of Leave-One-Out!
+- This is a fundamentally different CV scheme
+- May give more realistic CV estimates
+- The LB evaluation still uses LOO, but different CV might correlate better
 
 ## Recommended Approaches
 
-### PRIORITY 1: Try GroupKFold CV Instead of Leave-One-Out
-**Why:** The "mixall" kernel uses GroupKFold (5 splits) instead of LOO. This might:
-- Give more realistic CV estimates
-- Better correlate with LB
-- Reduce the intercept in CV-LB relationship
+### PRIORITY 1: Pure GP Model (No MLP/LGBM)
+**Why:** GP has fundamentally different mathematical framework than neural networks.
+- GP is a Bayesian, non-parametric model
+- May have different CV-LB relationship
+- exp_030 showed GP helps (2.4% CV improvement, 1.1% LB improvement)
+- But GP was only 0.2 weight - try pure GP
 
 **Implementation:**
 ```python
-from sklearn.model_selection import GroupKFold
-
-def generate_leave_one_out_splits(X, Y):
-    groups = X["SOLVENT NAME"]
-    n_splits = min(5, len(groups.unique()))
-    gkf = GroupKFold(n_splits=n_splits)
-    for train_idx, test_idx in gkf.split(X, Y, groups):
-        yield (X.iloc[train_idx], Y.iloc[train_idx]), (X.iloc[test_idx], Y.iloc[test_idx])
+class PureGPModel:
+    def __init__(self, data='single'):
+        self.data_type = data
+        self.featurizer = SimpleFeaturizer(mixed=(data=='full'))  # 18 features
+        self.models = []
+        
+    def train_model(self, X_train, y_train):
+        X_feat = self.featurizer.featurize(X_train)
+        y_vals = y_train.values
+        
+        if self.data_type == 'full':
+            X_flip = self.featurizer.featurize(X_train, flip=True)
+            X_all = np.vstack([X_feat, X_flip])
+            y_all = np.vstack([y_vals, y_vals])
+        else:
+            X_all, y_all = X_feat, y_vals
+        
+        self.scaler = StandardScaler()
+        X_scaled = self.scaler.fit_transform(X_all)
+        
+        kernel = ConstantKernel(1.0) * Matern(length_scale=1.0, nu=2.5) + WhiteKernel(noise_level=0.1)
+        
+        for i in range(3):
+            gp = GaussianProcessRegressor(
+                kernel=kernel,
+                n_restarts_optimizer=5,
+                normalize_y=True,
+                random_state=42
+            )
+            gp.fit(X_scaled, y_all[:, i])
+            self.models.append(gp)
+    
+    def predict(self, X_test):
+        X_feat = self.featurizer.featurize(X_test)
+        X_scaled = self.scaler.transform(X_feat)
+        
+        if self.data_type == 'full':
+            X_flip = self.featurizer.featurize(X_test, flip=True)
+            X_flip_scaled = self.scaler.transform(X_flip)
+        
+        preds = []
+        for i, model in enumerate(self.models):
+            pred = model.predict(X_scaled)
+            if self.data_type == 'full':
+                pred_flip = model.predict(X_flip_scaled)
+                pred = (pred + pred_flip) / 2
+            preds.append(pred)
+        
+        return torch.clamp(torch.tensor(np.column_stack(preds)), 0, 1)
 ```
 
-**IMPORTANT:** This changes the CV scheme but keeps the model the same. The LB evaluation uses the original LOO scheme, so this tests if a different CV scheme gives better LB correlation.
+**Rationale:** If pure GP has a different CV-LB relationship, that's valuable information. Even if CV is worse, LB might be better.
 
-### PRIORITY 2: Simpler Model with Fewer Features
-**Why:** Research shows simple models preserve generalizability better.
-
-**Implementation:**
-- Use only Spange descriptors (13 features) + kinetics (5 features) = 18 features
-- Simple MLP [32, 16] or even linear model
-- Reduce dropout and regularization
-
-**Rationale:** Our CV is already 2x better than target LB. The problem is generalization, not model quality. Simpler models may generalize better.
-
-### PRIORITY 3: Higher GP Weight in Ensemble
-**Why:** GP weight was only 0.2 (lowest). If GP helps generalization, higher weight may help more.
+### PRIORITY 2: Ridge Regression with Simple Features
+**Why:** Simplest possible model may generalize better.
+- Our CV (0.0083) is already 2x better than target LB (0.01670)
+- The problem is generalization, not model quality
+- Simpler models have fewer parameters to overfit
 
 **Implementation:**
 ```python
-self.weights = {'gp': 0.4, 'mlp': 0.35, 'lgbm': 0.25}
+from sklearn.linear_model import Ridge
+
+class RidgeModel:
+    def __init__(self, data='single', alpha=1.0):
+        self.data_type = data
+        self.featurizer = SimpleFeaturizer(mixed=(data=='full'))  # 18 features
+        self.alpha = alpha
+        
+    def train_model(self, X_train, y_train):
+        X_feat = self.featurizer.featurize(X_train)
+        y_vals = y_train.values
+        
+        if self.data_type == 'full':
+            X_flip = self.featurizer.featurize(X_train, flip=True)
+            X_all = np.vstack([X_feat, X_flip])
+            y_all = np.vstack([y_vals, y_vals])
+        else:
+            X_all, y_all = X_feat, y_vals
+        
+        self.scaler = StandardScaler()
+        X_scaled = self.scaler.fit_transform(X_all)
+        
+        self.model = Ridge(alpha=self.alpha)
+        self.model.fit(X_scaled, y_all)
+    
+    def predict(self, X_test):
+        X_feat = self.featurizer.featurize(X_test)
+        X_scaled = self.scaler.transform(X_feat)
+        
+        if self.data_type == 'full':
+            X_flip = self.featurizer.featurize(X_test, flip=True)
+            X_flip_scaled = self.scaler.transform(X_flip)
+            pred = (self.model.predict(X_scaled) + self.model.predict(X_flip_scaled)) / 2
+        else:
+            pred = self.model.predict(X_scaled)
+        
+        return torch.clamp(torch.tensor(pred), 0, 1)
 ```
 
-### PRIORITY 4: Pure GP Model
-**Why:** Test if GP alone has different CV-LB relationship than ensemble.
+### PRIORITY 3: Ensemble with Different Weights
+**Why:** exp_030 used GP(0.2) + MLP(0.5) + LGBM(0.3). Try different combinations.
 
-**Implementation:**
-- GP with Matern kernel on Spange + kinetics features
-- No MLP or LGBM
-- May have fundamentally different generalization properties
+**Options to try:**
+- GP(0.3) + MLP(0.4) + LGBM(0.3) - Slightly higher GP
+- GP(0.15) + MLP(0.55) + LGBM(0.3) - Lower GP, higher MLP
+- GP(0.2) + MLP(0.4) + LGBM(0.4) - Equal MLP/LGBM
 
-### PRIORITY 5: ARD Kernel for GP
-**Why:** Automatic Relevance Determination learns per-feature importance.
-
-**Implementation:**
-```python
-from sklearn.gaussian_process.kernels import Matern
-kernel = Matern(length_scale=np.ones(n_features), nu=2.5)
-```
+### PRIORITY 4: Multi-Output GP with Correlations
+**Why:** Current GP treats each target independently. Multi-output GP captures correlations.
+- SM + P2 + P3 ≈ 0.8 on average (targets are correlated)
+- Multi-output GP can exploit this structure
 
 ## What NOT to Try
 
-1. **Just improving CV** - The intercept (0.0524) > target (0.01727) means CV improvement alone won't work
+1. **Higher GP weight (0.4+)** - PROVEN WORSE (exp_031 was 10.61% worse)
 2. **More complex models** - Already failed (exp_004 was 5x worse)
 3. **More models in ensemble** - Diminishing returns
-4. **Normalization constraints** - PROVEN WRONG. Targets don't sum to 1.0.
+4. **Just improving CV** - The intercept (0.0524) > target (0.01670) means CV improvement alone won't work
 
 ## Validation Notes
 
-**CV scheme options:**
-1. Leave-one-solvent-out (current) - 24 folds for single, 13 folds for mixtures
-2. GroupKFold (5 splits) - May give more realistic estimates
+**CV scheme:**
+- Leave-one-solvent-out (24 folds for single, 13 folds for mixtures)
+- This is the same as LB evaluation
 
 **CV-LB calibration:**
 - Linear fit: LB = 4.30*CV + 0.0524 (R²=0.97)
-- Intercept (0.0524) > target (0.01727)
+- Intercept (0.0524) > target (0.01670)
 - Need to fundamentally change the CV-LB relationship
 
 **Submission strategy:**
@@ -127,14 +189,22 @@ kernel = Matern(length_scale=np.ones(n_features), nu=2.5)
 
 **The problem is NOT model quality - our CV is already 2x better than the target LB.**
 
-The problem is the CV-LB relationship. The intercept (0.0524) is 3x larger than the target (0.01727), meaning:
+The problem is the CV-LB relationship. The intercept (0.0524) is 3x larger than the target (0.01670), meaning:
 - Even with CV = 0, the predicted LB would be 0.0524
 - We need an approach that fundamentally changes this relationship
 
 **Potential approaches to change CV-LB relationship:**
-1. Different CV scheme (GroupKFold instead of LOO)
-2. Simpler models with fewer features
-3. Pure GP model (different mathematical framework)
-4. Focus on features that generalize better
+1. Pure GP model (different mathematical framework)
+2. Ridge regression (simplest possible model)
+3. Different ensemble weights
+4. Multi-output GP with correlations
 
-**THE TARGET IS REACHABLE.** The top leaderboard score (0.01727) was achieved by someone. We need to find what they did differently. The key is NOT improving CV, but changing the CV-LB relationship.
+**THE TARGET IS REACHABLE.** The top leaderboard score (0.01670) was achieved by someone. We need to find what they did differently. The key is NOT improving CV, but changing the CV-LB relationship.
+
+## Experiment Order
+
+1. **First:** Try Pure GP Model - fundamentally different approach
+2. **Second:** Try Ridge Regression - simplest possible model
+3. **Third:** Try different ensemble weights if time permits
+
+Focus on approaches that might have a different CV-LB relationship, not just better CV.
