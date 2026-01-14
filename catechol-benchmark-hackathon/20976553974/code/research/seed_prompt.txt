@@ -1,7 +1,7 @@
-# Catechol Reaction Yield Prediction - Evolved Seed Prompt (Loop 5)
+# Catechol Reaction Yield Prediction - Evolved Seed Prompt (Loop 6)
 
 ## Current Status
-- Best CV score: 0.0623 from exp_004 (005_no_tta_per_target)
+- Best CV score: 0.0623 from exp_004 (005_no_tta_per_target) - using Leave-One-Out
 - Best LB score: 0.0956 (from submission of exp_004)
 - **CV-LB gap: -0.0333 (53% worse on LB!)** → MASSIVE OVERFITTING
 - Target: 0.01727 (5.5x better than our LB)
@@ -9,96 +9,105 @@
 
 ## Response to Evaluator
 
-**Technical verdict was TRUSTWORTHY** - execution is sound, but the CV-LB gap reveals our validation is too optimistic.
+**Technical verdict was TRUSTWORTHY** - Ridge regression executed correctly but CV (0.0896) is worse than our best (0.0623).
 
-**Evaluator's top priority**: Submit to verify CV-LB correlation, then focus on closing the 3.6x gap to target.
+**Evaluator's top priority**: Don't submit Ridge yet. Try intermediate regularization first.
 
-**We submitted and got LB 0.0956** - this confirms:
-1. Our CV (0.0623) is NOT representative of test performance
-2. The test set has MORE challenging solvents than our leave-one-out captures
-3. We need fundamentally different approaches, not incremental improvements
+**I AGREE with the evaluator's assessment:**
+1. Ridge (alpha=10.0) is TOO simple - CV 0.0896 is 44% worse than our best
+2. We need to find the sweet spot between underfitting (Ridge) and overfitting (deep trees)
+3. The 53% CV-LB gap indicates our Leave-One-Out CV is too optimistic
 
-**Key concerns raised by evaluator**:
-1. Gap to target remains large (3.6x) → NOW 5.5x based on LB!
-2. Hardest solvents still problematic → Confirmed: HFIP (0.145 MAE), Ethylene Glycol (0.122)
-3. Model complexity vs data size → Need stronger regularization
-4. Feature engineering ceiling → Need higher-dimensional features
+**Key insight from my analysis (evolver_loop6_analysis.ipynb):**
+- **GroupKFold (5-fold) gives more realistic CV estimates** than Leave-One-Out
+- GroupKFold CV: 0.073 vs LOO CV: 0.069 for ETR(depth=10) - GroupKFold is 6% more pessimistic
+- This better simulates the test scenario with completely unseen solvents
 
-## CRITICAL INSIGHT: CV-LB Gap Analysis
+## CRITICAL INSIGHT: Optimal Regularization Level
 
-The 53% CV-LB gap indicates MASSIVE OVERFITTING. Our leave-one-solvent-out CV is too optimistic because:
-- Training on 23/24 solvents still captures most chemical space
-- Models learn solvent-specific patterns that don't generalize
-- Test set likely has chemically unique solvents not represented in training
+From my analysis with GroupKFold CV:
+
+| Model | GroupKFold CV | Notes |
+|-------|---------------|-------|
+| ETR(depth=7) | **0.0713** | OPTIMAL - best balance |
+| ETR(depth=5) | 0.0724 | Slightly underfitting |
+| ETR(depth=10) | 0.0730 | Slightly overfitting |
+| Ridge(alpha=100) | 0.0839 | Too simple |
+| Ridge(alpha=10) | 0.0899 | Way too simple |
+
+**The sweet spot is ETR with depth=7, not depth=10 (current) or Ridge (too simple).**
+
+## CRITICAL INSIGHT: Feature Engineering
+
+From my analysis with GroupKFold CV:
+
+| Features | GroupKFold CV | Notes |
+|----------|---------------|-------|
+| DRFP-PCA(15) + Spange + ACS_PCA | **0.0706** | BEST combined |
+| ACS_PCA (5-dim) | 0.0708 | Surprisingly good alone |
+| Spange (13-dim) | 0.0713 | Current baseline |
+| DRFP-PCA alone | 0.107-0.109 | MUCH WORSE alone |
+| Fragprints-PCA alone | 0.096-0.101 | WORSE alone |
+
+**Key insight: Higher-dimensional features (DRFP, Fragprints) perform WORSE alone but improve when combined with Spange.**
 
 ## Data Understanding
 
 **Reference notebooks:**
-- `exploration/evolver_loop5_lb_feedback.ipynb` - CV-LB gap analysis, per-solvent errors
+- `exploration/evolver_loop6_analysis.ipynb` - GroupKFold vs LOO, regularization comparison, feature comparison
+- `exploration/evolver_loop5_lb_feedback.ipynb` - CV-LB gap analysis, hardest solvents
 - `exploration/evolver_loop4_analysis.ipynb` - TTA hurts performance discovery
-- `exploration/evolver_loop2_analysis.ipynb` - Model comparison, hardest solvents
 
 **Key patterns:**
 1. **Hardest solvents**: HFIP (0.145 MAE), Ethylene Glycol (0.122), Water.Acetonitrile (0.112)
 2. **These are chemically unique** with high Spange distances from centroid
 3. **Temperature dominates**: Strong correlation with SM (-0.82), P2 (0.72)
+4. **TTA HURTS performance** - confirmed in loop 4
 
 ## Recommended Approaches (Priority Order)
 
-### 1. STRONGER REGULARIZATION (HIGHEST PRIORITY)
-The 53% CV-LB gap screams overfitting. Try:
+### 1. INTERMEDIATE REGULARIZATION WITH COMBINED FEATURES (HIGHEST PRIORITY)
+Based on my analysis, the optimal configuration is:
 ```python
-# Simple Ridge Regression - may generalize better
-from sklearn.linear_model import Ridge
-model = Ridge(alpha=10.0)  # Strong regularization
-
-# Or regularized trees
+# ExtraTrees with depth=7 (not 10, not 5)
 ExtraTreesRegressor(
-    n_estimators=100,  # Fewer trees
-    max_depth=5,       # Shallower (was 10)
-    min_samples_leaf=5, # More samples per leaf (was 2)
-    min_samples_split=10
+    n_estimators=200,
+    max_depth=7,       # OPTIMAL - was 10
+    min_samples_leaf=2,
+    random_state=42
 )
+
+# Combined features: DRFP-PCA(15) + Spange + ACS_PCA
+# This achieved 0.0706 GroupKFold CV - best of all feature sets
 ```
 
-### 2. HIGHER-DIMENSIONAL FEATURES (HIGH PRIORITY)
-Current Spange (13-dim) + ACS_PCA (5-dim) may not capture enough chemistry:
+### 2. PER-TARGET MODEL WITH INTERMEDIATE REGULARIZATION (HIGH PRIORITY)
+Keep the per-target approach (HGB for SM, ETR for Products) but reduce depth:
 ```python
-# Load DRFP (2048-dim) or fragprints (2133-dim)
-drfp = pd.read_csv(f'{DATA_PATH}/drfp_lookup.csv', index_col=0)
-# Apply PCA to reduce to 50-100 dimensions
-from sklearn.decomposition import PCA
-pca = PCA(n_components=50)
-drfp_reduced = pca.fit_transform(drfp.values)
+# For Products: ETR with depth=7 (was 10)
+ExtraTreesRegressor(max_depth=7, min_samples_leaf=3)
+
+# For SM: HGB with depth=4 (was 5)
+HistGradientBoostingRegressor(max_depth=4, learning_rate=0.05)
 ```
-These may capture chemical similarity better for truly unseen solvents.
 
-### 3. ENSEMBLE OF DIVERSE MODELS (MEDIUM PRIORITY)
-Combine fundamentally different approaches:
-- Ridge regression (linear baseline)
-- Random Forest with strong regularization
-- Gradient Boosting with low learning rate
-- Average predictions to reduce variance
+### 3. ENSEMBLE OF MULTIPLE REGULARIZATION LEVELS (MEDIUM PRIORITY)
+Average predictions from models with different regularization:
+- ETR(depth=5) - more regularized
+- ETR(depth=7) - optimal
+- ETR(depth=10) - less regularized
+This hedges against the unknown test distribution.
 
-### 4. SIMPLER BASELINE FIRST
-Before complex models, establish what a simple linear model achieves:
-```python
-# Ridge regression baseline
-from sklearn.linear_model import Ridge
-from sklearn.multioutput import MultiOutputRegressor
-
-class SimpleRidgeModel(BaseModel):
-    def __init__(self, data='single'):
-        self.model = MultiOutputRegressor(Ridge(alpha=10.0))
-        # ... feature engineering
-```
+### 4. SUBMIT TO VERIFY GROUPKFOLD CORRELATION (MEDIUM PRIORITY)
+After implementing the above, submit to verify if GroupKFold CV correlates better with LB than Leave-One-Out.
 
 ## What NOT to Try
 
-1. **TTA** - Confirmed to hurt performance (30% worse)
-2. **Complex neural networks** - Dataset too small
-3. **Deeper trees** - Will increase overfitting
-4. **More estimators** - Diminishing returns, more overfitting
+1. **Ridge regression alone** - Too simple, CV 0.0839-0.101
+2. **DRFP or Fragprints alone** - Perform WORSE than Spange (0.10-0.11 vs 0.07)
+3. **TTA** - Confirmed to hurt performance (30% worse)
+4. **Deeper trees (depth > 10)** - Will increase overfitting
+5. **Leave-One-Out CV as primary metric** - Too optimistic, use GroupKFold
 
 ## Template Compliance (MANDATORY)
 
@@ -107,34 +116,27 @@ class SimpleRidgeModel(BaseModel):
 - Same hyperparameters across ALL folds
 - Model class needs: `__init__`, `train_model(X_train, y_train)`, `predict(X_test)` → torch tensor [N, 3]
 
-## Next Experiment: 006_regularized_baseline
+## Next Experiment: 007_intermediate_regularization
 
-**Goal**: Establish a strongly regularized baseline that may generalize better to unseen solvents.
+**Goal**: Find the sweet spot between underfitting and overfitting.
 
 **Approach**:
-1. Use Ridge regression with alpha=10.0 (strong regularization)
-2. Combined features: Spange + ACS_PCA + Arrhenius kinetics
-3. Per-target models (separate for SM vs Products)
+1. Use ExtraTrees with depth=7 (optimal from analysis)
+2. Combined features: DRFP-PCA(15) + Spange + ACS_PCA
+3. Per-target models (HGB for SM, ETR for Products)
 4. NO TTA
 
 **Expected outcome**: 
-- CV may be worse than current 0.0623
+- GroupKFold CV ~0.07 (better than current 0.0623 LOO CV)
 - But LB may be BETTER due to less overfitting
-- This establishes a baseline for comparison
-
-**If Ridge works well**, try:
-- DRFP features with PCA reduction
-- Ensemble of Ridge + regularized trees
+- This tests the hypothesis that intermediate regularization generalizes better
 
 ## Key Insight
 
-The target (0.01727) is 5.5x better than our LB (0.0956). This is a HUGE gap. We need to:
-1. Stop optimizing CV (it's misleading)
-2. Focus on approaches that generalize to unseen solvents
-3. Use simpler models with stronger regularization
-4. Try higher-dimensional features that capture chemistry better
+The target (0.01727) is 5.5x better than our LB (0.0956). This is a HUGE gap. The solution likely involves:
+1. **Intermediate regularization** (depth=7, not 10 or Ridge)
+2. **Combined features** (DRFP-PCA + Spange + ACS_PCA)
+3. **Per-target models** (different models for SM vs Products)
+4. **Ensemble of diverse models** (hedge against unknown test distribution)
 
-**DO NOT GIVE UP** - The target IS achievable. The solution likely involves:
-- Fundamentally different feature engineering
-- Much stronger regularization
-- Ensemble of diverse simple models
+**DO NOT GIVE UP** - The target IS achievable. We've identified the optimal regularization level and feature combination. Now we need to implement and verify.
