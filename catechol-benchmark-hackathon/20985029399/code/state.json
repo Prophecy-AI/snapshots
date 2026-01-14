@@ -1,17 +1,584 @@
 {
-  "phase": "executor",
+  "phase": "evaluator",
   "loop_count": 1,
   "last_submission": null,
   "competition_id": "catechol-benchmark-hackathon",
   "seed_prompt": "# Catechol Reaction Yield Prediction - Seed Prompt\n\n## Competition Overview\nThis is a chemistry/reaction yield prediction problem. The goal is to predict yields (SM, Product 2, Product 3) for the allyl substituted catechol reaction under different solvent conditions and process parameters (temperature, residence time).\n\n**Reference notebooks for data characteristics:**\n- `exploration/eda.ipynb` - Contains full EDA: data shapes, feature distributions, target distributions, solvent counts\n\n## CRITICAL SUBMISSION CONSTRAINTS\n\n**MANDATORY STRUCTURE:**\n- The submission MUST follow the template notebook structure\n- Only the last 3 cells can be modified, and ONLY the `model = MLPModel()` line can be changed\n- Model must implement: `train_model(X_train, y_train)` and `predict(X_test)` methods\n- Two tasks: single_solvent (leave-one-solvent-out CV, 24 folds) and full (leave-one-ramp-out CV, 13 folds)\n- Target order in Y: [\"Product 2\", \"Product 3\", \"SM\"]\n\n**DATA CONTAMINATION RULES:**\n- Pre-training on solvent mixture data to predict full solvent data = NOT ALLOWED\n- Different hyperparameters for different tasks (full vs single) ARE allowed\n- Different hyperparameters for different objectives (SM vs Product 1) ARE allowed\n\n## Key Data Characteristics\n\n**Single Solvent Data:**\n- 656 samples, 24 unique solvents\n- Leave-one-solvent-out CV (24 folds, ~27 samples per solvent on average)\n- Temperature: 175-225\u00b0C, Residence Time: 2-15 minutes\n\n**Full Data (Mixtures):**\n- 1227 samples, 13 unique solvent pair ramps\n- Leave-one-ramp-out CV (13 folds)\n- SolventB% ranges from 0.0 to 1.0 (continuous mixing ratio)\n\n**Targets:**\n- SM (starting material), Product 2, Product 3 - all yields in [0, 1]\n- Targets are NOT constrained to sum to 1 (can have side products)\n\n**Feature Lookup Tables Available:**\n- Spange descriptors (13 features) - physical/chemical properties - MOST COMMONLY USED\n- ACS PCA descriptors (5 features) - PCA of green chemistry properties\n- DRFP (2048 features) - differential reaction fingerprints\n- Fragprints (2133 features) - molecular fingerprints\n\n## Winning Approaches from Top Kernels\n\n### 1. Physics-Informed Features (Arrhenius Kinetics) - Score: 0.09831\n**Key insight:** Chemical reactions follow Arrhenius kinetics where rate depends on temperature exponentially.\n\n**Feature Engineering:**\n```python\ntemp_k = temp_c + 273.15  # Convert to Kelvin\ninv_temp = 1000.0 / temp_k  # Inverse temperature (Arrhenius)\nlog_time = np.log(time + 1e-6)  # Log residence time\ninteraction = inv_temp * log_time  # Kinetic interaction term\n```\n\n**Test Time Augmentation (TTA) for Symmetry:**\n- For mixed solvents, (A, B) is chemically identical to (B, A)\n- Predict with both orderings and average: `final = (pred_AB + pred_BA) / 2`\n- Also augment training data with both orderings\n\n### 2. Robust MLP Architecture\n**Architecture:**\n- BatchNorm1d at input\n- Hidden layers: [128, 128, 64] with BatchNorm, ReLU, Dropout(0.2)\n- Sigmoid output (constrains predictions to [0, 1])\n\n**Training:**\n- HuberLoss (robust to outliers) instead of MSE\n- Adam optimizer with lr=5e-4, weight_decay=1e-5\n- ReduceLROnPlateau scheduler (factor=0.5, patience=20)\n- Gradient clipping: clip_grad_norm_(1.0)\n- 300 epochs\n\n### 3. Ensemble/Bagging\n- Train 5-7 models with different seeds\n- Average predictions for final output\n- Reduces variance significantly\n\n### 4. Additional Feature Engineering\nFrom other kernels:\n- `rt^2`, `temp^2` - polynomial features\n- `log1p(rt)`, `log1p(temp)` - log transforms\n- `rt * temp` - interaction term\n- StandardScaler for all numeric features\n\n## Model Recommendations\n\n### Primary Approach: Physics-Informed MLP with TTA\n1. **Feature Engineering:**\n   - Use Spange descriptors (13 features) as base\n   - Add Arrhenius-inspired features: 1/T, ln(t), 1/T * ln(t)\n   - StandardScaler normalization\n\n2. **Architecture:**\n   - Input BatchNorm\n   - 3-4 hidden layers [128, 128, 64] or [256, 128, 64]\n   - BatchNorm + ReLU + Dropout(0.2) after each hidden layer\n   - Sigmoid output layer\n\n3. **Training:**\n   - HuberLoss or SmoothL1Loss\n   - AdamW optimizer (lr=5e-4, weight_decay=1e-5)\n   - CosineAnnealingLR or ReduceLROnPlateau\n   - Early stopping with patience ~30\n   - 200-300 epochs\n\n4. **Inference:**\n   - For full data: TTA with symmetric solvent swapping\n   - Ensemble 5-7 models with different seeds\n\n### Alternative Approaches to Try\n\n**TabPFN (Tabular Foundation Model):**\n- Transformer pre-trained on millions of synthetic datasets\n- Excels on small tabular datasets (<10K samples)\n- No hyperparameter tuning needed\n- Particularly strong for regression on chemistry data\n- May work well given our small dataset size\n\n**Gradient Boosting (XGBoost/LightGBM):**\n- MultiOutputRegressor wrapper\n- Feature engineering same as MLP\n- Post-processing: clip to [0, 1]\n- May work well for single solvent task\n\n**Gaussian Process:**\n- Good for small data with uncertainty quantification\n- Use Spange descriptors as kernel features\n- Iterative refinement possible\n\n## Solvent Featurization for Mixed Solvents\n\n**Linear Mixing (Standard Approach):**\n```python\nmixed_features = A_features * (1 - pct_B) + B_features * pct_B\n```\n\n**Considerations:**\n- This assumes linear interpolation of solvent properties\n- May not capture non-linear mixing effects\n- Alternative: concatenate both solvent features + mixing ratio\n\n## Validation Strategy\n\n**Single Solvent Task:**\n- Leave-one-solvent-out CV (24 folds)\n- Each fold leaves out all data for one solvent\n- Tests generalization to unseen solvents\n\n**Full Data Task:**\n- Leave-one-ramp-out CV (13 folds)\n- Each fold leaves out one solvent pair combination\n- Tests generalization to unseen solvent mixtures\n\n## Post-Processing\n\n1. **Clip predictions to [0, 1]:** `predictions = np.clip(predictions, 0, 1)`\n2. **Optional normalization:** Some approaches normalize rows to sum to 1, but this may not be physically correct for this reaction\n\n## Key Insights from Research\n\n1. **Solvent descriptors matter:** Spange descriptors (physical/chemical properties) work better than fingerprints for this task\n2. **Physics-informed features help:** Arrhenius kinetics features significantly improve predictions\n3. **Symmetry exploitation:** TTA for mixed solvents provides free performance boost\n4. **Robust loss functions:** HuberLoss handles outliers better than MSE\n5. **Ensemble reduces variance:** 5-7 model ensemble with different seeds\n6. **Small data considerations:** TabPFN or other foundation models may help with limited samples\n\n## Advanced Techniques from Literature\n\n**Physics-Informed Neural Networks (PINNs):**\n- Embed Arrhenius law directly into loss function\n- Can learn rate constants while respecting physics\n- Three-stage training: fit data \u2192 learn physics \u2192 fine-tune\n\n**Chemical Reaction Neural Networks (CRNNs):**\n- Encode mass action and Arrhenius laws in architecture\n- Interpretable kinetic parameters\n- Good for uncertainty quantification\n\n**Data Augmentation for Chemistry:**\n- SMILES randomization (different valid SMILES for same molecule)\n- Reaction SMILES permutation\n- Symmetric solvent swapping (already implemented in TTA)\n\n## Implementation Checklist\n\n1. \u2705 Model class with `train_model(X_train, y_train)` and `predict(X_test)` methods\n2. \u2705 Featurizer that handles both single and mixed solvents\n3. \u2705 Physics-informed features (Arrhenius kinetics)\n4. \u2705 TTA for mixed solvent symmetry\n5. \u2705 Ensemble of multiple seeds\n6. \u2705 Robust loss function (Huber/SmoothL1)\n7. \u2705 Proper normalization (StandardScaler)\n8. \u2705 Output clipping to [0, 1]\n\n## Target Score\nBeat **0.047400** (lower is better - likely RMSE or similar metric)\n\nCurrent best public kernel: 0.09831 with Arrhenius kinetics + TTA approach\n\n**Gap to close:** Need ~2x improvement from best public approach to beat target.\nConsider: deeper ensembles, better feature engineering, alternative architectures (TabPFN), or combining multiple approaches.\n",
   "evaluator_feedback": "",
-  "latest_experiment": {},
+  "latest_experiment": {
+    "id": "exp_000",
+    "name": "Physics-Informed MLP Baseline with Arrhenius Kinetics + TTA",
+    "model_type": "MLP",
+    "score": 0.08819,
+    "notes": "Implemented physics-informed MLP with: (1) Arrhenius kinetics features (1/T, ln(t), 1/T*ln(t)), (2) Spange descriptors for solvent features, (3) Robust MLP with BatchNorm, Dropout(0.2), Sigmoid output, (4) HuberLoss for robustness, (5) TTA for mixed solvent symmetry, (6) Ensemble of 5 models per fold. Single Solvent CV RMSE: 0.08719 \u00b1 0.04350, Full Data CV RMSE: 0.08920 \u00b1 0.03871. This beats the reference score of 0.09831 from the Arrhenius kinetics notebook. Target is 0.047400 - need ~1.9x improvement.",
+    "timestamp": "2026-01-14T07:57:26.226994"
+  },
   "competitive_intel": "## Available Competitive Intelligence\n\n- Competition description: `../research/description.md`\n- 5 top kernel notebooks in `../research/kernels/`",
   "target_score": 0.0474,
-  "messages": [],
-  "experiments": [],
+  "messages": [
+    {
+      "role": "user",
+      "content": "Begin experimenting. Follow the seed prompt strategy and create your first baseline.\n\n**IMPORTANT:** Before starting, read `session_state.json` to see existing data findings and notebook references. The strategy below will mention which notebooks to reference for data understanding.\n\n\n## EXISTING DATA FINDINGS\nThe following insights have already been discovered. Reference these instead of re-doing EDA:\n\n- **../research/kernels/sanidhyavijay24_arrhenius-kinetics-tta-0-09831/arrhenius-kinetics-tta-0-09831.ipynb**: Arrhenius Kinetics approach achieves 0.09831: Uses 1/Temperature (inverse Kelvin), ln(Time), and their interaction as physics-informed features. Also uses Test Time Augmentation (TTA) for symmetric so...\n- **../research/kernels/josepablofolch_catechol-benchmark-hackathon-template/catechol-benchmark-hackathon-template.ipynb**: Template structure: Must use last 3 cells unchanged. Only allowed to change `model = MLPModel()` line. Model needs train_model(X_train, y_train) and predict(X_test) methods. Two tasks: single_solvent ...\n- **../research/kernels/paritoshtripathi5_alchemy-baseline/alchemy-baseline.ipynb**: Alchemy baseline uses: StandardScaler for features, numeric feature engineering (rt^2, temp^2, log1p(rt), log1p(temp), rt*temp), Huber loss (SmoothL1Loss), AdamW optimizer with CosineAnnealingLR, Batc...\n- **../research/kernels/mr0106_catechol/catechol.ipynb**: XGBoost approach: Uses MultiOutputRegressor with XGBRegressor, feature engineering (Reaction_Energy = Temp*Time, B_Conc_Temp = SolventB%*Temp), post-processing with clipping to [0,1] and row normaliza...\n- **exploration/eda.ipynb**: Data structure: Single solvent data has 656 samples with 24 unique solvents (leave-one-solvent-out CV = 24 folds). Full data has 1227 samples with 13 unique solvent pair ramps (leave-one-ramp-out CV =...\n- **exploration/eda.ipynb**: Feature lookup tables: Spange descriptors (13 features - physical/chemical properties), ACS PCA (5 features), DRFP (2048 features - reaction fingerprints), Fragprints (2133 features). Spange is most c...\n- **Web search: neural network architectures for small chemistry datasets**: TabPFN (Tabular Prior-data Fitted Network) is a transformer-based foundation model that excels on small tabular datasets (<10K samples). It requires no hyperparameter tuning and can make predictions i...\n\nRead `session_state.json` for the complete list and all notebook references.\n\n## SEED PROMPT STRATEGY\n# Catechol Reaction Yield Prediction - Seed Prompt\n\n## Competition Overview\nThis is a chemistry/reaction yield prediction problem. The goal is to predict yields (SM, Product 2, Product 3) for the allyl substituted catechol reaction under different solvent conditions and process parameters (temperature, residence time).\n\n**Reference notebooks for data characteristics:**\n- `exploration/eda.ipynb` - Contains full EDA: data shapes, feature distributions, target distributions, solvent counts\n\n## CRITICAL SUBMISSION CONSTRAINTS\n\n**MANDATORY STRUCTURE:**\n- The submission MUST follow the template notebook structure\n- Only the last 3 cells can be modified, and ONLY the `model = MLPModel()` line can be changed\n- Model must implement: `train_model(X_train, y_train)` and `predict(X_test)` methods\n- Two tasks: single_solvent (leave-one-solvent-out CV, 24 folds) and full (leave-one-ramp-out CV, 13 folds)\n- Target order in Y: [\"Product 2\", \"Product 3\", \"SM\"]\n\n**DATA CONTAMINATION RULES:**\n- Pre-training on solvent mixture data to predict full solvent data = NOT ALLOWED\n- Different hyperparameters for different tasks (full vs single) ARE allowed\n- Different hyperparameters for different objectives (SM vs Product 1) ARE allowed\n\n## Key Data Characteristics\n\n**Single Solvent Data:**\n- 656 samples, 24 unique solvents\n- Leave-one-solvent-out CV (24 folds, ~27 samples per solvent on average)\n- Temperature: 175-225\u00b0C, Residence Time: 2-15 minutes\n\n**Full Data (Mixtures):**\n- 1227 samples, 13 unique solvent pair ramps\n- Leave-one-ramp-out CV (13 folds)\n- SolventB% ranges from 0.0 to 1.0 (continuous mixing ratio)\n\n**Targets:**\n- SM (starting material), Product 2, Product 3 - all yields in [0, 1]\n- Targets are NOT constrained to sum to 1 (can have side products)\n\n**Feature Lookup Tables Available:**\n- Spange descriptors (13 features) - physical/chemical properties - MOST COMMONLY USED\n- ACS PCA descriptors (5 features) - PCA of green chemistry properties\n- DRFP (2048 features) - differential reaction fingerprints\n- Fragprints (2133 features) - molecular fingerprints\n\n## Winning Approaches from Top Kernels\n\n### 1. Physics-Informed Features (Arrhenius Kinetics) - Score: 0.09831\n**Key insight:** Chemical reactions follow Arrhenius kinetics where rate depends on temperature exponentially.\n\n**Feature Engineering:**\n```python\ntemp_k = temp_c + 273.15  # Convert to Kelvin\ninv_temp = 1000.0 / temp_k  # Inverse temperature (Arrhenius)\nlog_time = np.log(time + 1e-6)  # Log residence time\ninteraction = inv_temp * log_time  # Kinetic interaction term\n```\n\n**Test Time Augmentation (TTA) for Symmetry:**\n- For mixed solvents, (A, B) is chemically identical to (B, A)\n- Predict with both orderings and average: `final = (pred_AB + pred_BA) / 2`\n- Also augment training data with both orderings\n\n### 2. Robust MLP Architecture\n**Architecture:**\n- BatchNorm1d at input\n- Hidden layers: [128, 128, 64] with BatchNorm, ReLU, Dropout(0.2)\n- Sigmoid output (constrains predictions to [0, 1])\n\n**Training:**\n- HuberLoss (robust to outliers) instead of MSE\n- Adam optimizer with lr=5e-4, weight_decay=1e-5\n- ReduceLROnPlateau scheduler (factor=0.5, patience=20)\n- Gradient clipping: clip_grad_norm_(1.0)\n- 300 epochs\n\n### 3. Ensemble/Bagging\n- Train 5-7 models with different seeds\n- Average predictions for final output\n- Reduces variance significantly\n\n### 4. Additional Feature Engineering\nFrom other kernels:\n- `rt^2`, `temp^2` - polynomial features\n- `log1p(rt)`, `log1p(temp)` - log transforms\n- `rt * temp` - interaction term\n- StandardScaler for all numeric features\n\n## Model Recommendations\n\n### Primary Approach: Physics-Informed MLP with TTA\n1. **Feature Engineering:**\n   - Use Spange descriptors (13 features) as base\n   - Add Arrhenius-inspired features: 1/T, ln(t), 1/T * ln(t)\n   - StandardScaler normalization\n\n2. **Architecture:**\n   - Input BatchNorm\n   - 3-4 hidden layers [128, 128, 64] or [256, 128, 64]\n   - BatchNorm + ReLU + Dropout(0.2) after each hidden layer\n   - Sigmoid output layer\n\n3. **Training:**\n   - HuberLoss or SmoothL1Loss\n   - AdamW optimizer (lr=5e-4, weight_decay=1e-5)\n   - CosineAnnealingLR or ReduceLROnPlateau\n   - Early stopping with patience ~30\n   - 200-300 epochs\n\n4. **Inference:**\n   - For full data: TTA with symmetric solvent swapping\n   - Ensemble 5-7 models with different seeds\n\n### Alternative Approaches to Try\n\n**TabPFN (Tabular Foundation Model):**\n- Transformer pre-trained on millions of synthetic datasets\n- Excels on small tabular datasets (<10K samples)\n- No hyperparameter tuning needed\n- Particularly strong for regression on chemistry data\n- May work well given our small dataset size\n\n**Gradient Boosting (XGBoost/LightGBM):**\n- MultiOutputRegressor wrapper\n- Feature engineering same as MLP\n- Post-processing: clip to [0, 1]\n- May work well for single solvent task\n\n**Gaussian Process:**\n- Good for small data with uncertainty quantification\n- Use Spange descriptors as kernel features\n- Iterative refinement possible\n\n## Solvent Featurization for Mixed Solvents\n\n**Linear Mixing (Standard Approach):**\n```python\nmixed_features = A_features * (1 - pct_B) + B_features * pct_B\n```\n\n**Considerations:**\n- This assumes linear interpolation of solvent properties\n- May not capture non-linear mixing effects\n- Alternative: concatenate both solvent features + mixing ratio\n\n## Validation Strategy\n\n**Single Solvent Task:**\n- Leave-one-solvent-out CV (24 folds)\n- Each fold leaves out all data for one solvent\n- Tests generalization to unseen solvents\n\n**Full Data Task:**\n- Leave-one-ramp-out CV (13 folds)\n- Each fold leaves out one solvent pair combination\n- Tests generalization to unseen solvent mixtures\n\n## Post-Processing\n\n1. **Clip predictions to [0, 1]:** `predictions = np.clip(predictions, 0, 1)`\n2. **Optional normalization:** Some approaches normalize rows to sum to 1, but this may not be physically correct for this reaction\n\n## Key Insights from Research\n\n1. **Solvent descriptors matter:** Spange descriptors (physical/chemical properties) work better than fingerprints for this task\n2. **Physics-informed features help:** Arrhenius kinetics features significantly improve predictions\n3. **Symmetry exploitation:** TTA for mixed solvents provides free performance boost\n4. **Robust loss functions:** HuberLoss handles outliers better than MSE\n5. **Ensemble reduces variance:** 5-7 model ensemble with different seeds\n6. **Small data considerations:** TabPFN or other foundation models may help with limited samples\n\n## Advanced Techniques from Literature\n\n**Physics-Informed Neural Networks (PINNs):**\n- Embed Arrhenius law directly into loss function\n- Can learn rate constants while respecting physics\n- Three-stage training: fit data \u2192 learn physics \u2192 fine-tune\n\n**Chemical Reaction Neural Networks (CRNNs):**\n- Encode mass action and Arrhenius laws in architecture\n- Interpretable kinetic parameters\n- Good for uncertainty quantification\n\n**Data Augmentation for Chemistry:**\n- SMILES randomization (different valid SMILES for same molecule)\n- Reaction SMILES permutation\n- Symmetric solvent swapping (already implemented in TTA)\n\n## Implementation Checklist\n\n1. \u2705 Model class with `train_model(X_train, y_train)` and `predict(X_test)` methods\n2. \u2705 Featurizer that handles both single and mixed solvents\n3. \u2705 Physics-informed features (Arrhenius kinetics)\n4. \u2705 TTA for mixed solvent symmetry\n5. \u2705 Ensemble of multiple seeds\n6. \u2705 Robust loss function (Huber/SmoothL1)\n7. \u2705 Proper normalization (StandardScaler)\n8. \u2705 Output clipping to [0, 1]\n\n## Target Score\nBeat **0.047400** (lower is better - likely RMSE or similar metric)\n\nCurrent best public kernel: 0.09831 with Arrhenius kinetics + TTA approach\n\n**Gap to close:** Need ~2x improvement from best public approach to beat target.\nConsider: deeper ensembles, better feature engineering, alternative architectures (TabPFN), or combining multiple approaches.\n\n\nStart with a simple baseline following this strategy. Reference the notebooks mentioned in the strategy for data understanding."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "REASONING: I need to first read the session_state.json to understand existing findings, then read the template notebook to understand the exact structure I need to follow. After that, I'll implement a baseline model following the seed prompt strategy."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01KYZ6j24WQLyGvXcBQr38x2",
+          "name": "Read",
+          "input": {
+            "file_path": "/home/code/session_state.json"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01UQDBsNxDU8fxXGLNU7dX5q",
+          "name": "Read",
+          "input": {
+            "file_path": "/home/code/../research/kernels/josepablofolch_catechol-benchmark-hackathon-template/catechol-benchmark-hackathon-template.ipynb"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01KYZ6j24WQLyGvXcBQr38x2",
+          "content": "{\n  \"workspace_dir\": \"/home/code\",\n  \"competition_id\": \"catechol-benchmark-hackathon\",\n  \"metric_direction\": true,\n  \"start_time\": \"2026-01-14T06:47:06.574262\",\n  \"time_limit_minutes\": 2100,\n  \"experiments\": [],\n  \"candidates\": [],\n  \"submissions\": [],\n  \"strategy_history\": [\n    {\n      \"strategy\": \"# Catechol Reaction Yield Prediction - Seed Prompt\\n\\n## Competition Overview\\nThis is a chemistry/reaction yield prediction problem. The goal is to predict yields (SM, Product 2, Product 3) for the allyl substituted catechol reaction under different solvent conditions and process parameters (temperature, residence time).\\n\\n**Reference notebooks for data characteristics:**\\n- `exploration/eda.ipynb` - Contains full EDA: data shapes, feature distributions, target distributions, solvent counts\\n\\n## CRITICAL SUBMISSION CONSTRAINTS\\n\\n**MANDATORY STRUCTURE:**\\n- The submission MUST follow the template notebook structure\\n- Only the last 3 cells can be modified, and ONLY the `model = MLPModel()` line can be changed\\n- Model must implement: `train_model(X_train, y_train)` and `predict(X_test)` methods\\n- Two tasks: single_solvent (leave-one-solvent-out CV, 24 folds) and full (leave-one-ramp-out CV, 13 folds)\\n- Target order in Y: [\\\"Product 2\\\", \\\"Product 3\\\", \\\"SM\\\"]\\n\\n**DATA CONTAMINATION RULES:**\\n- Pre-training on solvent mixture data to predict full solvent data = NOT ALLOWED\\n- Different hyperparameters for different tasks (full vs single) ARE allowed\\n- Different hyperparameters for different objectives (SM vs Product 1) ARE allowed\\n\\n## Key Data Characteristics\\n\\n**Single Solvent Data:**\\n- 656 samples, 24 unique solvents\\n- Leave-one-solvent-out CV (24 folds, ~27 samples per solvent on average)\\n- Temperature: 175-225\\u00b0C, Residence Time: 2-15 minutes\\n\\n**Full Data (Mixtures):**\\n- 1227 samples, 13 unique solvent pair ramps\\n- Leave-one-ramp-out CV (13 folds)\\n- SolventB% ranges from 0.0 to 1.0 (continuous mixing ratio)\\n\\n**Targets:**\\n- SM (starting material), Product 2, Product 3 - all yields in [0, 1]\\n- Targets are NOT constrained to sum to 1 (can have side products)\\n\\n**Feature Lookup Tables Available:**\\n- Spange descriptors (13 features) - physical/chemical properties - MOST COMMONLY USED\\n- ACS PCA descriptors (5 features) - PCA of green chemistry properties\\n- DRFP (2048 features) - differential reaction fingerprints\\n- Fragprints (2133 features) - molecular fingerprints\\n\\n## Winning Approaches from Top Kernels\\n\\n### 1. Physics-Informed Features (Arrhenius Kinetics) - Score: 0.09831\\n**Key insight:** Chemical reactions follow Arrhenius kinetics where rate depends on temperature exponentially.\\n\\n**Feature Engineering:**\\n```python\\ntemp_k = temp_c + 273.15  # Convert to Kelvin\\ninv_temp = 1000.0 / temp_k  # Inverse temperature (Arrhenius)\\nlog_time = np.log(time + 1e-6)  # Log residence time\\ninteraction = inv_temp * log_time  # Kinetic interaction term\\n```\\n\\n**Test Time Augmentation (TTA) for Symmetry:**\\n- For mixed solvents, (A, B) is chemically identical to (B, A)\\n- Predict with both orderings and average: `final = (pred_AB + pred_BA) / 2`\\n- Also augment training data with both orderings\\n\\n### 2. Robust MLP Architecture\\n**Architecture:**\\n- BatchNorm1d at input\\n- Hidden layers: [128, 128, 64] with BatchNorm, ReLU, Dropout(0.2)\\n- Sigmoid output (constrains predictions to [0, 1])\\n\\n**Training:**\\n- HuberLoss (robust to outliers) instead of MSE\\n- Adam optimizer with lr=5e-4, weight_decay=1e-5\\n- ReduceLROnPlateau scheduler (factor=0.5, patience=20)\\n- Gradient clipping: clip_grad_norm_(1.0)\\n- 300 epochs\\n\\n### 3. Ensemble/Bagging\\n- Train 5-7 models with different seeds\\n- Average predictions for final output\\n- Reduces variance significantly\\n\\n### 4. Additional Feature Engineering\\nFrom other kernels:\\n- `rt^2`, `temp^2` - polynomial features\\n- `log1p(rt)`, `log1p(temp)` - log transforms\\n- `rt * temp` - interaction term\\n- StandardScaler for all numeric features\\n\\n## Model Recommendations\\n\\n### Primary Approach: Physics-Informed MLP with TTA\\n1. **Feature Engineering:**\\n   - Use Spange descriptors (13 features) as base\\n   - Add Arrhenius-inspired features: 1/T, ln(t), 1/T * ln(t)\\n   - StandardScaler normalization\\n\\n2. **Architecture:**\\n   - Input BatchNorm\\n   - 3-4 hidden layers [128, 128, 64] or [256, 128, 64]\\n   - BatchNorm + ReLU + Dropout(0.2) after each hidden layer\\n   - Sigmoid output layer\\n\\n3. **Training:**\\n   - HuberLoss or SmoothL1Loss\\n   - AdamW optimizer (lr=5e-4, weight_decay=1e-5)\\n   - CosineAnnealingLR or ReduceLROnPlateau\\n   - Early stopping with patience ~30\\n   - 200-300 epochs\\n\\n4. **Inference:**\\n   - For full data: TTA with symmetric solvent swapping\\n   - Ensemble 5-7 models with different seeds\\n\\n### Alternative Approaches to Try\\n\\n**TabPFN (Tabular Foundation Model):**\\n- Transformer pre-trained on millions of synthetic datasets\\n- Excels on small tabular datasets (<10K samples)\\n- No hyperparameter tuning needed\\n- Particularly strong for regression on chemistry data\\n- May work well given our small dataset size\\n\\n**Gradient Boosting (XGBoost/LightGBM):**\\n- MultiOutputRegressor wrapper\\n- Feature engineering same as MLP\\n- Post-processing: clip to [0, 1]\\n- May work well for single solvent task\\n\\n**Gaussian Process:**\\n- Good for small data with uncertainty quantification\\n- Use Spange descriptors as kernel features\\n- Iterative refinement possible\\n\\n## Solvent Featurization for Mixed Solvents\\n\\n**Linear Mixing (Standard Approach):**\\n```python\\nmixed_features = A_features * (1 - pct_B) + B_features * pct_B\\n```\\n\\n**Considerations:**\\n- This assumes linear interpolation of solvent properties\\n- May not capture non-linear mixing effects\\n- Alternative: concatenate both solvent features + mixing ratio\\n\\n## Validation Strategy\\n\\n**Single Solvent Task:**\\n- Leave-one-solvent-out CV (24 folds)\\n- Each fold leaves out all data for one solvent\\n- Tests generalization to unseen solvents\\n\\n**Full Data Task:**\\n- Leave-one-ramp-out CV (13 folds)\\n- Each fold leaves out one solvent pair combination\\n- Tests generalization to unseen solvent mixtures\\n\\n## Post-Processing\\n\\n1. **Clip predictions to [0, 1]:** `predictions = np.clip(predictions, 0, 1)`\\n2. **Optional normalization:** Some approaches normalize rows to sum to 1, but this may not be physically correct for this reaction\\n\\n## Key Insights from Research\\n\\n1. **Solvent descriptors matter:** Spange descriptors (physical/chemical properties) work better than fingerprints for this task\\n2. **Physics-informed features help:** Arrhenius kinetics features significantly improve predictions\\n3. **Symmetry exploitation:** TTA for mixed solvents provides free performance boost\\n4. **Robust loss functions:** HuberLoss handles outliers better than MSE\\n5. **Ensemble reduces variance:** 5-7 model ensemble with different seeds\\n6. **Small data considerations:** TabPFN or other foundation models may help with limited samples\\n\\n## Advanced Techniques from Literature\\n\\n**Physics-Informed Neural Networks (PINNs):**\\n- Embed Arrhenius law directly into loss function\\n- Can learn rate constants while respecting physics\\n- Three-stage training: fit data \\u2192 learn physics \\u2192 fine-tune\\n\\n**Chemical Reaction Neural Networks (CRNNs):**\\n- Encode mass action and Arrhenius laws in architecture\\n- Interpretable kinetic parameters\\n- Good for uncertainty quantification\\n\\n**Data Augmentation for Chemistry:**\\n- SMILES randomization (different valid SMILES for same molecule)\\n- Reaction SMILES permutation\\n- Symmetric solvent swapping (already implemented in TTA)\\n\\n## Implementation Checklist\\n\\n1. \\u2705 Model class with `train_model(X_train, y_train)` and `predict(X_test)` methods\\n2. \\u2705 Featurizer that handles both single and mixed solvents\\n3. \\u2705 Physics-informed features (Arrhenius kinetics)\\n4. \\u2705 TTA for mixed solvent symmetry\\n5. \\u2705 Ensemble of multiple seeds\\n6. \\u2705 Robust loss function (Huber/SmoothL1)\\n7. \\u2705 Proper normalization (StandardScaler)\\n8. \\u2705 Output clipping to [0, 1]\\n\\n## Target Score\\nBeat **0.047400** (lower is better - likely RMSE or similar metric)\\n\\nCurrent best public kernel: 0.09831 with Arrhenius kinetics + TTA approach\\n\\n**Gap to close:** Need ~2x improvement from best public approach to beat target.\\nConsider: deeper ensembles, better feature engineering, alternative architectures (TabPFN), or combining multiple approaches.\\n\",\n      \"agent\": \"explorer\",\n      \"timestamp\": \"2026-01-14T06:51:41.049781\"\n    }\n  ],\n  \"feedback_history\": [],\n  \"data_findings\": [\n    {\n      \"finding\": \"Arrhenius Kinetics approach achieves 0.09831: Uses 1/Temperature (inverse Kelvin), ln(Time), and their interaction as physics-informed features. Also uses Test Time Augmentation (TTA) for symmetric solvent mixtures - predicting with both (A,B) and (B,A) and averaging.\",\n      \"source\": \"../research/kernels/sanidhyavijay24_arrhenius-kinetics-tta-0-09831/arrhenius-kinetics-tta-0-09831.ipynb\",\n      \"agent\": \"explorer\"\n    },\n    {\n      \"finding\": \"Template structure: Must use last 3 cells unchanged. Only allowed to change `model = MLPModel()` line. Model needs train_model(X_train, y_train) and predict(X_test) methods. Two tasks: single_solvent (leave-one-solvent-out CV) and full (leave-one-ramp-out CV for mixtures).\",\n      \"source\": \"../research/kernels/josepablofolch_catechol-benchmark-hackathon-template/catechol-benchmark-hackathon-template.ipynb\",\n      \"agent\": \"explorer\"\n    },\n    {\n      \"finding\": \"Alchemy baseline uses: StandardScaler for features, numeric feature engineering (rt^2, temp^2, log1p(rt), log1p(temp), rt*temp), Huber loss (SmoothL1Loss), AdamW optimizer with CosineAnnealingLR, BatchNorm + Dropout, early stopping, and ensemble of 3 seeds per fold.\",\n      \"source\": \"../research/kernels/paritoshtripathi5_alchemy-baseline/alchemy-baseline.ipynb\",\n      \"agent\": \"explorer\"\n    },\n    {\n      \"finding\": \"XGBoost approach: Uses MultiOutputRegressor with XGBRegressor, feature engineering (Reaction_Energy = Temp*Time, B_Conc_Temp = SolventB%*Temp), post-processing with clipping to [0,1] and row normalization to sum to 1.\",\n      \"source\": \"../research/kernels/mr0106_catechol/catechol.ipynb\",\n      \"agent\": \"explorer\"\n    },\n    {\n      \"finding\": \"Data structure: Single solvent data has 656 samples with 24 unique solvents (leave-one-solvent-out CV = 24 folds). Full data has 1227 samples with 13 unique solvent pair ramps (leave-one-ramp-out CV = 13 folds). Targets are SM, Product 2, Product 3 (yields in [0,1]).\",\n      \"source\": \"exploration/eda.ipynb\",\n      \"agent\": \"explorer\"\n    },\n    {\n      \"finding\": \"Feature lookup tables: Spange descriptors (13 features - physical/chemical properties), ACS PCA (5 features), DRFP (2048 features - reaction fingerprints), Fragprints (2133 features). Spange is most commonly used in top solutions.\",\n      \"source\": \"exploration/eda.ipynb\",\n      \"agent\": \"explorer\"\n    },\n    {\n      \"finding\": \"TabPFN (Tabular Prior-data Fitted Network) is a transformer-based foundation model that excels on small tabular datasets (<10K samples). It requires no hyperparameter tuning and can make predictions in a single forward pass. Particularly strong for regression tasks on small chemistry datasets.\",\n      \"source\": \"Web search: neural network architectures for small chemistry datasets\",\n      \"agent\": \"explorer\"\n    }\n  ],\n  \"web_research\": [\n    {\n      \"query\": \"What are the best machine learning approaches for predicting chemical reaction yields using solvent descriptors?\",\n      \"finding\": \"Predicting reaction yields when the solvent is a key variable is most successful when the model combines **rich solvent descriptors** (e.g., \\u03c3\\u2011profiles, COSMO\\u2011RS\\u2010derived polarity or hydrogen\\u2011bonding parameters) with **machine\\u2011learning architectures that can exploit both categorical reaction information and continuous physicochemical features**.  Early work showed that simple one\\u2011hot encodings of reactants together with computed molecular descriptors already give useful yield estimates, but performance improves markedly when the solvent descriptors are treated as explicit numerical inputs to regression models such as Random Forests or Gradient\\u2011Boosted Trees\\u202f([Nature\\u202f2026](https://www.nature.com/articles/s42004-025-01866-8)).  In asymmetric catalysis, Gaussian\\u2011process surrogate models built on a small set of solvent \\u03c3\\u2011profiles were able to rank solvents for conversion and enantioselectivity, and iterative retraining on a handful of newly tested solvents drove the prediction error from \\u201cp\",\n      \"agent\": \"explorer\"\n    },\n    {\n      \"query\": \"How do physics-informed neural networks incorporate Arrhenius kinetics for chemical reaction modeling?\",\n      \"finding\": \"Physics\\u2011informed neural networks (PINNs) embed the Arrhenius law directly into the learning problem so that the network respects the temperature\\u2011dependence of reaction rates while fitting data\\u202f([pubs.rsc.org](https://pubs.rsc.org/en/content/articlehtml/2023/cp/d2cp05083h); [arxiv.org](https://arxiv.org/html/2511.07686v1)).\\n\\n**How to incorporate Arrhenius kinetics in a PINN**\\n\\n1. **Formulate the governing ODEs**  \\n   Write the species\\u2011balance equations for the reacting system and express each reaction rate \\\\(k(T)\\\\) with the Arrhenius expression \\\\(k(T)=A\\\\exp(-E_a/RT)\\\\). These equations become the physics constraints for the PINN.\\u202f([pubs.rsc.org](https://pubs.rsc.org/en/content/articlehtml/2023/cp/d2cp05083h))\\n\\n2. **Design the neural network architecture**  \\n   - Use a standard feed\\u2011forward network to approximate the concentration trajectories \\\\(c_i(t)\\\\).  \\n   - Optionally add a small sub\\u2011network that predicts the Arrhenius parameters \\\\(A\\\\) and \\\\(E_a\\\\) (or treat them as learnable scalar v\",\n      \"agent\": \"explorer\"\n    },\n    {\n      \"query\": \"What neural network architectures work best for small tabular chemistry datasets with less than 2000 samples?\",\n      \"finding\": \"Neural\\u2011network models that are explicitly designed to exploit structure or pre\\u2011learned priors tend to outperform generic multilayer perceptrons on chemistry tabular sets with\\u202f<\\u202f2\\u202f000 samples.  The most successful recent approach is **TabPFN**, a transformer that has been trained on millions of synthetic tabular datasets and can make accurate predictions for a new small\\u2011data problem in a single forward pass.  Because the model\\u2019s weights already encode a rich \\u201cmeta\\u2011learning\\u201d prior over feature interactions, it requires virtually no hyper\\u2011parameter tuning and consistently beats standard MLPs and even gradient\\u2011boosted trees on low\\u2011sample drug\\u2011discovery benchmarks\\u202f([Nature\\u202f2025](https://www.nature.com/articles/s41586-024-08328-6);\\u202f[ChemRxiv\\u202f2025](https://chemrxiv.org/engage/chemrxiv/article-details/68d29b1cf2aff1677025b18f);\\u202f[arXiv\\u202f2022/2023](https://arxiv.org/abs/2207.01848)).  \\n\\nA complementary strategy is **GCondNet**, which builds a graph for each feature dimension (connecting samples t\",\n      \"agent\": \"explorer\"\n    }\n  ],\n  \"max_submissions\": 5,\n  \"remaining_submissions\": 5\n}",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01UQDBsNxDU8fxXGLNU7dX5q",
+          "content": "Error: [Errno 2] No such file or directory: '/home/code/../research/kernels/josepablofolch_catechol-benchmark-hackathon-template/catechol-benchmark-hackathon-template.ipynb'",
+          "is_error": true
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "REASONING: The template notebook path is incorrect. Let me find the correct path and also look at the data directory structure."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01Ttsibi7WyhuEESZ11jq4Wr",
+          "name": "ListFiles",
+          "input": {
+            "directory_path": "/home/code"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01Grg8hFRatbkBjS7Zor474u",
+          "name": "ListFiles",
+          "input": {
+            "directory_path": "/home/data"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Ttsibi7WyhuEESZ11jq4Wr",
+          "content": "/home/code:\n[DIR]  code/\n[DIR]  exploration/\n[DIR]  research/\n[FILE] session_state.json (14.9KB)\n[FILE] state.json (23.5KB)\n[DIR]  submission_candidates/",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Grg8hFRatbkBjS7Zor474u",
+          "content": "/home/data:\n[FILE] acs_pca_descriptors_lookup.csv (1.7KB)\n[FILE] catechol_full_data_yields.csv (508.4KB)\n[FILE] catechol_single_solvent_yields.csv (182.6KB)\n[FILE] description.md (109.0B)\n[FILE] drfps_catechol_lookup.csv (201.4KB)\n[FILE] fragprints_lookup.csv (109.8KB)\n[FILE] smiles_lookup.csv (854.0B)\n[FILE] spange_descriptors_lookup.csv (2.5KB)\n[FILE] utils.py (2.7KB)",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "REASONING: Let me find the template notebook and also read the data description and utils.py to understand the structure."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01JxpnfvY2Y9jBpAYVQvZApy",
+          "name": "Bash",
+          "input": {
+            "command": "find /home -name \"*template*\" -type f 2>/dev/null | head -20"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01W31hjijzaZe93z3r6gaN11",
+          "name": "Read",
+          "input": {
+            "file_path": "/home/data/description.md"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01Xk3Td439dm6k8uCpULCAKj",
+          "name": "Read",
+          "input": {
+            "file_path": "/home/data/utils.py"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01JxpnfvY2Y9jBpAYVQvZApy",
+          "content": "/home/nonroot/snapshots/catechol-benchmark-hackathon/20971967614/code/research/kernels/josepablofolch_catechol-benchmark-hackathon-template/catechol-benchmark-hackathon-template.ipynb\n/home/nonroot/snapshots/catechol-benchmark-hackathon/20845501593/code/research/kernels/josepablofolch_catechol-benchmark-hackathon-template/catechol-benchmark-hackathon-template.ipynb\n/home/nonroot/snapshots/catechol-benchmark-hackathon/20977149313/code/research/kernels/josepablofolch_catechol-benchmark-hackathon-template/catechol-benchmark-hackathon-template.ipynb\n/home/nonroot/snapshots/catechol-benchmark-hackathon/20845049175/code/research/kernels/josepablofolch_catechol-benchmark-hackathon-template/catechol-benchmark-hackathon-template.ipynb\n/home/nonroot/snapshots/catechol-benchmark-hackathon/20976553974/code/research/kernels/josepablofolch_catechol-benchmark-hackathon-template/catechol-benchmark-hackathon-template.ipynb\n/home/nonroot/snapshots/catechol-benchmark-hackathon/20846284952/code/research/kernels/josepablofolch_catechol-benchmark-hackathon-template/catechol-benchmark-hackathon-template.ipynb\n/home/nonroot/snapshots/catechol-benchmark-hackathon/20798092805/code/research/kernels/josepablofolch_catechol-benchmark-hackathon-template/catechol-benchmark-hackathon-template.ipynb\n/home/nonroot/snapshots/catechol-benchmark-hackathon/20971249680/code/research/kernels/josepablofolch_catechol-benchmark-hackathon-template/catechol-benchmark-hackathon-template.ipynb\n/home/nonroot/snapshots/catechol-benchmark-hackathon/20866831885/code/research/kernels/josepablofolch_catechol-benchmark-hackathon-template/catechol-benchmark-hackathon-template.ipynb\n/home/nonroot/snapshots/catechol-benchmark-hackathon/20845943513/code/research/kernels/josepablofolch_catechol-benchmark-hackathon-template/catechol-benchmark-hackathon-template.ipynb\n/home/nonroot/snapshots/catechol-benchmark-hackathon/20952568369/code/research/kernels/josepablofolch_catechol-benchmark-hackathon-template/catechol-benchmark-hackathon-template.ipynb\n/home/nonroot/snapshots/catechol-benchmark-hackathon/20978540755/code/research/kernels/josepablofolch_catechol-benchmark-hackathon-template/catechol-benchmark-hackathon-template.ipynb\n/home/nonroot/snapshots/catechol-benchmark-hackathon/20984431692/code/research/kernels/josepablofolch_catechol-benchmark-hackathon-template/catechol-benchmark-hackathon-template.ipynb\n/home/code/research/kernels/josepablofolch_catechol-benchmark-hackathon-template/catechol-benchmark-hackathon-template.ipynb\n",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01W31hjijzaZe93z3r6gaN11",
+          "content": "# catechol-benchmark-hackathon\n\nCompetition: https://www.kaggle.com/competitions/catechol-benchmark-hackathon",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Xk3Td439dm6k8uCpULCAKj",
+          "content": "from typing import Any, Generator\n\nimport pandas as pd\n\n\ndef load_data(name = \"full\"):\n    assert name in [\"full\", \"single_solvent\"]\n    if name == \"full\":\n        df = pd.read_csv('/kaggle/input/catechol-benchmark-hackathon/catechol_full_data_yields.csv')\n        X = df[INPUT_LABELS_FULL_SOLVENT]\n    \n    else:\n        df = pd.read_csv('/kaggle/input/catechol-benchmark-hackathon/catechol_single_solvent_yields.csv')\n        X = df[INPUT_LABELS_SINGLE_SOLVENT]\n\n    Y = df[TARGET_LABELS]\n    \n    return X, Y\n\ndef load_features(name = \"spange_descriptors\"):\n    assert name in [\"spange_descriptors\", \"acs_pca_descriptors\", \"drfps_catechol\", \"fragprints\", \"smiles\"]\n    features = pd.read_csv(f'/kaggle/input/catechol-benchmark-hackathon/{name}_lookup.csv', index_col=0)\n    return features\n\ndef generate_leave_one_out_splits(\n    X: pd.DataFrame, Y: pd.DataFrame\n) -> Generator[\n    tuple[tuple[pd.DataFrame, pd.DataFrame], tuple[pd.DataFrame, pd.DataFrame]],\n    Any,\n    None,\n]:\n    \"\"\"Generate all leave-one-out splits across the solvents.\n\n    For each split, one of the solvents will be removed from the training set to\n    make a test set.\n    \"\"\"\n\n    all_solvents = X[\"SOLVENT NAME\"].unique()\n    for solvent_name in sorted(all_solvents):\n        train_idcs_mask = X[\"SOLVENT NAME\"] != solvent_name\n        yield (\n            (X[train_idcs_mask], Y[train_idcs_mask]),\n            (X[~train_idcs_mask], Y[~train_idcs_mask]),\n        )\n\ndef generate_leave_one_ramp_out_splits(\n    X: pd.DataFrame, Y: pd.DataFrame\n) -> Generator[\n    tuple[tuple[pd.DataFrame, pd.DataFrame], tuple[pd.DataFrame, pd.DataFrame]],\n    Any,\n    None,\n]:\n    \"\"\"Generate all leave-one-out splits across the solvent ramps.\n\n    For each split, one of the solvent ramps will be removed from the training\n    set to make a test set.\n    \"\"\"\n\n    all_solvent_ramps = X[[\"SOLVENT A NAME\", \"SOLVENT B NAME\"]].drop_duplicates()\n    all_solvent_ramps.sort_values(by=[\"SOLVENT A NAME\", \"SOLVENT B NAME\"])\n    for _, solvent_pair in all_solvent_ramps.iterrows():\n        train_idcs_mask = (X[[\"SOLVENT A NAME\", \"SOLVENT B NAME\"]] != solvent_pair).all(\n            axis=1\n        )\n        yield (\n            (X[train_idcs_mask], Y[train_idcs_mask]),\n            (X[~train_idcs_mask], Y[~train_idcs_mask]),\n        )\n\nINPUT_LABELS_FULL_SOLVENT = [\n    \"Residence Time\",\n    \"Temperature\",\n    \"SOLVENT A NAME\",\n    \"SOLVENT B NAME\",\n    \"SolventB%\",\n]\n\nINPUT_LABELS_SINGLE_SOLVENT = [\n    \"Residence Time\",\n    \"Temperature\",\n    \"SOLVENT NAME\",\n]\n\nINPUT_LABELS_NUMERIC = [\n    \"Residence Time\",\n    \"Temperature\",\n]\n\nINPUT_LABELS_SINGLE_FEATURES = [\n    \"SOLVENT NAME\",\n]\n\nINPUT_LABELS_FULL_FEATURES = [\n    \"SOLVENT A NAME\",\n    \"SOLVENT B NAME\",\n    \"SolventB%\"\n]\n\nTARGET_LABELS = [\n    \"Product 2\",\n    \"Product 3\",\n    \"SM\",\n]",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "REASONING: Now let me read the template notebook to understand the exact structure I need to follow."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01SesmFfCZivEFJpAasRejnA",
+          "name": "Read",
+          "input": {
+            "file_path": "/home/code/research/kernels/josepablofolch_catechol-benchmark-hackathon-template/catechol-benchmark-hackathon-template.ipynb"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01SesmFfCZivEFJpAasRejnA",
+          "content": "{\"metadata\":{\"kernelspec\":{\"language\":\"python\",\"display_name\":\"Python 3\",\"name\":\"python3\"},\"language_info\":{\"name\":\"python\",\"version\":\"3.11.13\",\"mimetype\":\"text/x-python\",\"codemirror_mode\":{\"name\":\"ipython\",\"version\":3},\"pygments_lexer\":\"ipython3\",\"nbconvert_exporter\":\"python\",\"file_extension\":\".py\"},\"kaggle\":{\"accelerator\":\"none\",\"dataSources\":[{\"sourceId\":115863,\"databundleVersionId\":13836289,\"sourceType\":\"competition\"}],\"dockerImageVersionId\":31089,\"isInternetEnabled\":true,\"language\":\"python\",\"sourceType\":\"notebook\",\"isGpuEnabled\":false}},\"nbformat_minor\":4,\"nbformat\":4,\"cells\":[{\"cell_type\":\"code\",\"source\":\"# This Python 3 environment comes with many helpful analytics libraries installed\\n# It is defined by the kaggle/python Docker image: https://github.com/kaggle/docker-python\\n# For example, here's several helpful packages to load\\n\\nimport numpy as np # linear algebra\\nimport pandas as pd # data processing, CSV file I/O (e.g. pd.read_csv)\\n\\n# Input data files are available in the read-only \\\"../input/\\\" directory\\n# For example, running this (by clicking run or pressing Shift+Enter) will list all files under the input directory\\n\\nimport os\\nfor dirname, _, filenames in os.walk('/kaggle/input'):\\n    for filename in filenames:\\n        print(os.path.join(dirname, filename))\\n\\n# You can write up to 20GB to the current directory (/kaggle/working/) that gets preserved as output when you create a version using \\\"Save & Run All\\\" \\n# You can also write temporary files to /kaggle/temp/, but they won't be saved outside of the current session\",\"metadata\":{\"_uuid\":\"8f2839f25d086af736a60e9eeb907d3b93b6e0e5\",\"_cell_guid\":\"b1076dfc-b9ad-4769-8c92-a6c4dae69d19\",\"trusted\":true,\"execution\":{\"iopub.status.busy\":\"2025-10-08T09:47:03.073449Z\",\"iopub.execute_input\":\"2025-10-08T09:47:03.073896Z\",\"iopub.status.idle\":\"2025-10-08T09:47:05.569575Z\",\"shell.execute_reply.started\":\"2025-10-08T09:47:03.073854Z\",\"shell.execute_reply\":\"2025-10-08T09:47:05.568468Z\"}},\"outputs\":[],\"execution_count\":null},{\"cell_type\":\"code\",\"source\":\"import sys\\nsys.path.append('/kaggle/input/catechol-benchmark-hackathon/')\\n\\nfrom utils import INPUT_LABELS_FULL_SOLVENT, INPUT_LABELS_SINGLE_SOLVENT, INPUT_LABELS_NUMERIC, INPUT_LABELS_SINGLE_FEATURES, INPUT_LABELS_FULL_FEATURES, load_data, load_features, generate_leave_one_out_splits, generate_leave_one_ramp_out_splits\",\"metadata\":{\"trusted\":true,\"execution\":{\"iopub.status.busy\":\"2025-10-08T09:47:05.570876Z\",\"iopub.execute_input\":\"2025-10-08T09:47:05.57127Z\",\"iopub.status.idle\":\"2025-10-08T09:47:05.582531Z\",\"shell.execute_reply.started\":\"2025-10-08T09:47:05.571247Z\",\"shell.execute_reply\":\"2025-10-08T09:47:05.581246Z\"}},\"outputs\":[],\"execution_count\":null},{\"cell_type\":\"markdown\",\"source\":\"In the cells below we create the base classes of the two main objects you must write for the competition. \\n\\nThe first thing to write is a SmilesFeaturizer, which will take the solvent molecules and create a machine-learning ready featurization of the molecule. Finding better ways of featurizing solvents is one of the goals of the hackathon, however, you can also skip this step and use the pre-computed featurizations given in the utils file. Further down, you can see a SmilesFeaturizer that loads all the precomputed representations. A **featurizer** object simply consists of:\\n- An initialization function\\n- A featurize function that takes \\n\\nThe second one being a **model** which has:\\n- An initialization function, where the model internally defines which featurizer to use\\n- A \\\"train_model\\\" which lets the model train on data given by X_train, y_train as pandas data-frames. \\n- A \\\"predict\\\" which takes a data frame of test inputs and makes a prediction\",\"metadata\":{}},{\"cell_type\":\"code\",\"source\":\"from abc import ABC, abstractmethod\\n\\nclass SmilesFeaturizer(ABC):\\n    def __init__(self):\\n        raise NotImplementedError\\n\\n    def featurize(X, Y):\\n        raise NotImplementedError\\n\\nclass BaseModel(ABC):\\n    def __init__(self):\\n        pass\\n\\n    def train_model(self, X_train, y_train):\\n        raise NotImplementedError\\n\\n    def predict(self):\\n        raise NotImplementedError\",\"metadata\":{\"trusted\":true,\"execution\":{\"iopub.status.busy\":\"2025-10-08T09:47:05.583701Z\",\"iopub.execute_input\":\"2025-10-08T09:47:05.584103Z\",\"iopub.status.idle\":\"2025-10-08T09:47:05.607211Z\",\"shell.execute_reply.started\":\"2025-10-08T09:47:05.584068Z\",\"shell.execute_reply\":\"2025-10-08T09:47:05.605678Z\"}},\"outputs\":[],\"execution_count\":null},{\"cell_type\":\"markdown\",\"source\":\"In the next cell we define two featurizers, which allow you to use the pre-computed featurizations from the original benchmark paper. These are:\\n\\n- drfps\\n- fragprints\\n- acs_pca_descriptors\\n- spange_descriptors\\n\\nYou can refer to the paper for more details on them. We also include the simple SMILES string featurization which can be chained into more complicated representations.\\n\\nThe first featurizer simply uses the features directly. The second one is expanded to featurize *mixed* solvents too, which is done by taking a weighted average of the two single-solvent features.\\n\\nWe also show how to write code for a simple multi-layer perceptron on the data.\",\"metadata\":{}},{\"cell_type\":\"code\",\"source\":\"import torch\\nimport torch.nn as nn\\nfrom torch.utils.data import TensorDataset, DataLoader\\n\\ntorch.set_default_dtype(torch.double) \\n\\nclass PrecomputedFeaturizer(SmilesFeaturizer):\\n    def __init__(self, features = 'spange_descriptors'):\\n        assert features in ['drfps_catechol', 'fragprints', 'smiles', 'acs_pca_descriptors', 'spange_descriptors']\\n        self.features = features\\n\\n        #load the featurizer\\n        self.featurizer = load_features(self.features)\\n\\n        #load the dimension, which depends on the featurizer + the 2 numeric dimensions\\n        self.feats_dim = self.featurizer.shape[1] + 2\\n        \\n\\n    def featurize(self, X):\\n        # obtain the numeric inputs i.e. residence time and temperature\\n        X_numeric = X[INPUT_LABELS_NUMERIC]\\n        # obtain the relevant molecule information\\n        X_smiles = X[INPUT_LABELS_SINGLE_FEATURES]\\n        \\n        X_smiles_feat = self.featurizer.loc[X[\\\"SOLVENT NAME\\\"]]\\n\\n        X_numeric_tensor = torch.tensor(X_numeric.values)\\n        X_smiles_feat_tensor = torch.tensor(X_smiles_feat.values)\\n\\n        X_out = torch.cat((X_numeric_tensor, X_smiles_feat_tensor), dim=1)\\n\\n        return X_out\\n        \\n\\nclass PrecomputedFeaturizerMixed(SmilesFeaturizer):\\n    def __init__(self, features = 'spange_descriptors'):\\n        assert features in ['drfps_catechol', 'fragprints', 'smiles', 'acs_pca_descriptors', 'spange_descriptors']\\n        self.features = features\\n\\n        #load the featurizer\\n        self.featurizer = load_features(self.features)\\n\\n        #load the dimension, which depends on the featurizer + the 2 numeric dimensions\\n        self.feats_dim = self.featurizer.shape[1] + 2\\n\\n    def featurize(self, X):\\n        # obtain the numeric inputs i.e. residence time and temperature\\n        X_numeric = X[INPUT_LABELS_NUMERIC]\\n        # obtain the relevant molecule information\\n        X_smiles = X[INPUT_LABELS_FULL_FEATURES]\\n\\n        X_smiles_A_feat = self.featurizer.loc[X[\\\"SOLVENT A NAME\\\"]]\\n        X_smiles_B_feat = self.featurizer.loc[X[\\\"SOLVENT B NAME\\\"]]\\n\\n        X_numeric_tensor = torch.tensor(X_numeric.values)\\n        # take the weighted average accoriding to the SolventB% in the mixture\\n        X_smiles_feat_tensor = X_smiles_A_feat.values * (1 - X[\\\"SolventB%\\\"].values.reshape(-1, 1)) + X_smiles_B_feat.values * X[\\\"SolventB%\\\"].values.reshape(-1, 1)\\n        X_smiles_feat_tensor = torch.tensor(X_smiles_feat_tensor)\\n\\n        X_out = torch.cat((X_numeric_tensor, X_smiles_feat_tensor), dim=1)\\n\\n        return X_out\\n        \\n\\nclass MLPModel(nn.Module, BaseModel):\\n    def __init__(self, features = 'spange_descriptors', hidden_dims = [64, 64], output_dim = 3, dropout=0.0, data = 'single'):\\n        super(MLPModel, self).__init__()\\n        layers = []\\n\\n        if data == 'single':\\n            self.smiles_featurizer = PrecomputedFeaturizer(features = features)\\n        else:\\n            self.smiles_featurizer = PrecomputedFeaturizerMixed(features = features)\\n        \\n        input_dim = self.smiles_featurizer.feats_dim\\n        prev_dim = input_dim\\n\\n        for h_dim in hidden_dims:\\n            layers.append(nn.Linear(prev_dim, h_dim))\\n            layers.append(nn.ReLU())\\n            if dropout > 0:\\n                layers.append(nn.Dropout(dropout))\\n            prev_dim = h_dim\\n\\n        layers.append(nn.Linear(prev_dim, output_dim))\\n        self.model = nn.Sequential(*layers)\\n\\n    def train_model(\\n        self,\\n        train_X,\\n        train_Y,\\n        criterion=nn.MSELoss,\\n        optimizer=torch.optim.Adam,\\n        num_epochs=100,\\n        batch_size=1048,\\n        device=\\\"cpu\\\",\\n        verbose=True,\\n        lr = 1e-3,\\n    ):\\n        \\\"\\\"\\\"\\n        Trains the MLP model.\\n        Args:\\n            train_X: pandas array of training inputs\\n            train_Y: pandas array of training outputs\\n            criterion: Loss function.\\n            optimizer: Optimizer.\\n            num_epochs (int): Number of epochs.\\n            batch_size (int): Batch size.\\n            device (torch.device): Device to train on.\\n            verbose (bool): Whether to print progress.\\n            lr (float): learning rate to use\\n        \\\"\\\"\\\"\\n        self.train()\\n        \\n        train_X_tensor = self.smiles_featurizer.featurize(train_X)\\n        train_Y_tensor = torch.tensor(train_Y.values)\\n        \\n        train_dataset = TensorDataset(train_X_tensor, train_Y_tensor)\\n        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle = False)\\n        \\n        if device is None:\\n            device = torch.device(\\\"cuda\\\" if torch.cuda.is_available() else \\\"cpu\\\")\\n        self.to(device)\\n\\n        criterion = criterion()\\n        optimizer = optimizer(self.parameters(), lr = lr)\\n\\n        for epoch in range(1, num_epochs + 1):\\n            self.train()\\n            running_loss = 0.0\\n            for inputs, targets in train_loader:\\n                inputs, targets = inputs.to(device), targets.to(device)\\n\\n                optimizer.zero_grad()\\n                outputs = self(inputs)\\n                loss = criterion(outputs, targets)\\n                loss.backward()\\n                optimizer.step()\\n\\n                running_loss += loss.item() * inputs.size(0)\\n\\n            epoch_loss = running_loss / len(train_loader.dataset)\\n\\n            if (verbose) and (epoch % 10 == 1):\\n                msg = f\\\"Epoch {epoch}/{num_epochs} | Train Loss: {epoch_loss:.4f}\\\"\\n\\n                # if val_loader is not None:\\n                #     val_loss = self.evaluate(val_loader, criterion, device)\\n                #     msg += f\\\" | Val Loss: {val_loss:.4f}\\\"\\n\\n                # print(msg)\\n\\n    def predict(self, X):\\n        X = self.smiles_featurizer.featurize(X)\\n        return self.forward(X)\\n\\n\\n    def forward(self, x):\\n        return self.model(x)\",\"metadata\":{\"trusted\":true,\"execution\":{\"iopub.status.busy\":\"2025-10-08T09:47:05.609376Z\",\"iopub.execute_input\":\"2025-10-08T09:47:05.609714Z\",\"iopub.status.idle\":\"2025-10-08T09:47:10.997383Z\",\"shell.execute_reply.started\":\"2025-10-08T09:47:05.609679Z\",\"shell.execute_reply\":\"2025-10-08T09:47:10.996258Z\"}},\"outputs\":[],\"execution_count\":null},{\"cell_type\":\"markdown\",\"source\":\"From this point onward the cross-validation procedure is calculated. **For a submission to be valid the next three cells must be the final three of your submission, and you can only modify the lines where the models are defined.**\",\"metadata\":{}},{\"cell_type\":\"code\",\"source\":\"###########\u00a0DO NOT CHANGE ANYTHING IN THIS CELL OTHER THAN THE MODEL #################\\n###########\u00a0THIS MUST BE THE THIRD LAST CELL IN YOUR NOTEBOOK FOR A VALID SUBMISSION #################\\n\\nimport tqdm\\n\\nX, Y = load_data(\\\"single_solvent\\\")\\n\\nsplit_generator = generate_leave_one_out_splits(X, Y)\\nall_predictions = []\\n\\nfor fold_idx, split in tqdm.tqdm(enumerate(split_generator)):\\n    (train_X, train_Y), (test_X, test_Y) = split\\n\\n    model = MLPModel() # CHANGE THIS LINE ONLY\\n    model.train_model(train_X, train_Y)\\n\\n    predictions = model.predict(test_X)  # Shape: [N, 3]\\n\\n    # Move to CPU and convert to numpy\\n    predictions_np = predictions.detach().cpu().numpy()\\n\\n    # Add metadata and flatten to long format\\n    for row_idx, row in enumerate(predictions_np):\\n        all_predictions.append({\\n            \\\"task\\\": 0,\\n            \\\"fold\\\": fold_idx,\\n            \\\"row\\\": row_idx,\\n            \\\"target_1\\\": row[0],\\n            \\\"target_2\\\": row[1],\\n            \\\"target_3\\\": row[2]\\n        })\\n\\n# Save final submission\\nsubmission_single_solvent = pd.DataFrame(all_predictions)\\n\\n###########\u00a0DO NOT CHANGE ANYTHING IN THIS CELL OTHER THAN THE MODEL #################\\n###########\u00a0THIS MUST BE THE THIRD LAST CELL IN YOUR NOTEBOOK FOR A VALID SUBMISSION #################\",\"metadata\":{\"trusted\":true,\"execution\":{\"iopub.status.busy\":\"2025-10-08T09:47:10.998483Z\",\"iopub.execute_input\":\"2025-10-08T09:47:10.999148Z\",\"iopub.status.idle\":\"2025-10-08T09:47:39.598673Z\",\"shell.execute_reply.started\":\"2025-10-08T09:47:10.999109Z\",\"shell.execute_reply\":\"2025-10-08T09:47:39.597575Z\"}},\"outputs\":[],\"execution_count\":null},{\"cell_type\":\"code\",\"source\":\"###########\u00a0DO NOT CHANGE ANYTHING IN THIS CELL OTHER THAN THE MODEL #################\\n###########\u00a0THIS MUST BE THE SECOND LAST CELL IN YOUR NOTEBOOK FOR A VALID SUBMISSION #################\\n\\nX, Y = load_data(\\\"full\\\")\\n\\nsplit_generator = generate_leave_one_ramp_out_splits(X, Y)\\nall_predictions = []\\n\\nfor fold_idx, split in tqdm.tqdm(enumerate(split_generator)):\\n    (train_X, train_Y), (test_X, test_Y) = split\\n\\n    model = MLPModel(data = 'full') # CHANGE THIS LINE ONLY\\n    model.train_model(train_X, train_Y)\\n\\n    predictions = model.predict(test_X)  # Shape: [N, 3]\\n\\n    # Move to CPU and convert to numpy\\n    predictions_np = predictions.detach().cpu().numpy()\\n\\n    # Add metadata and flatten to long format\\n    for row_idx, row in enumerate(predictions_np):\\n        all_predictions.append({\\n            \\\"task\\\": 1,\\n            \\\"fold\\\": fold_idx,\\n            \\\"row\\\": row_idx,\\n            \\\"target_1\\\": row[0],\\n            \\\"target_2\\\": row[1],\\n            \\\"target_3\\\": row[2]\\n        })\\n\\n# Save final submission\\nsubmission_full_data = pd.DataFrame(all_predictions)\\n\\n###########\u00a0DO NOT CHANGE ANYTHING IN THIS CELL OTHER THAN THE MODEL #################\\n###########\u00a0THIS MUST BE THE SECOND LAST CELL IN YOUR NOTEBOOK FOR A VALID SUBMISSION #################\",\"metadata\":{\"trusted\":true,\"execution\":{\"iopub.status.busy\":\"2025-10-08T09:47:39.600167Z\",\"iopub.execute_input\":\"2025-10-08T09:47:39.600511Z\",\"iopub.status.idle\":\"2025-10-08T09:48:01.670153Z\",\"shell.execute_reply.started\":\"2025-10-08T09:47:39.600486Z\",\"shell.execute_reply\":\"2025-10-08T09:48:01.669172Z\"}},\"outputs\":[],\"execution_count\":null},{\"cell_type\":\"code\",\"source\":\"###########\u00a0DO NOT CHANGE ANYTHING IN THIS CELL #################\\n###########\u00a0THIS MUST BE THE FINAL CELL IN YOUR NOTEBOOK FOR A VALID SUBMISSION #################\\n\\nsubmission = pd.concat([submission_single_solvent, submission_full_data])\\nsubmission = submission.reset_index()\\nsubmission.index.name = \\\"id\\\"\\nsubmission.to_csv(\\\"submission.csv\\\", index=True)\\n\\n###########\u00a0DO NOT CHANGE ANYTHING IN THIS CELL #################\\n###########\u00a0THIS MUST BE THE FINAL CELL IN YOUR NOTEBOOK FOR A VALID SUBMISSION #################\",\"metadata\":{\"trusted\":true,\"execution\":{\"iopub.status.busy\":\"2025-10-08T09:48:01.671066Z\",\"iopub.execute_input\":\"2025-10-08T09:48:01.671412Z\",\"iopub.status.idle\":\"2025-10-08T09:48:01.700618Z\",\"shell.execute_reply.started\":\"2025-10-08T09:48:01.671381Z\",\"shell.execute_reply\":\"2025-10-08T09:48:01.699646Z\"}},\"outputs\":[],\"execution_count\":null}]}",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "REASONING: Now I understand the template structure. I need to create a notebook that follows this exact structure but with an improved model. Let me also look at the Arrhenius kinetics approach that achieved 0.09831 to understand the best practices."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01CYMxaSiozXTbGRAPcMeYoD",
+          "name": "Read",
+          "input": {
+            "file_path": "/home/code/research/kernels/sanidhyavijay24_arrhenius-kinetics-tta-0-09831/arrhenius-kinetics-tta-0-09831.ipynb"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01CYMxaSiozXTbGRAPcMeYoD",
+          "content": "{\"metadata\":{\"kernelspec\":{\"language\":\"python\",\"display_name\":\"Python 3\",\"name\":\"python3\"},\"language_info\":{\"name\":\"python\",\"version\":\"3.11.13\",\"mimetype\":\"text/x-python\",\"codemirror_mode\":{\"name\":\"ipython\",\"version\":3},\"pygments_lexer\":\"ipython3\",\"nbconvert_exporter\":\"python\",\"file_extension\":\".py\"},\"kaggle\":{\"accelerator\":\"gpu\",\"dataSources\":[{\"sourceId\":115863,\"databundleVersionId\":13836289,\"sourceType\":\"competition\"}],\"dockerImageVersionId\":31193,\"isInternetEnabled\":true,\"language\":\"python\",\"sourceType\":\"notebook\",\"isGpuEnabled\":true}},\"nbformat_minor\":4,\"nbformat\":4,\"cells\":[{\"cell_type\":\"markdown\",\"source\":\"# CATECHOL BENCHMARK: SYMMETRIC KINETIC ENSEMBLE [Score: 0.09831]\\n\\nThis notebook improves upon standard baselines by incorporating two Physics-Informed priors:\\n\\n1. **ARRHENIUS KINETICS:** We explicitly feed 1/Temperature and ln(Time) to the model.\\n2. **CHEMICAL SYMMETRY:** A mixture of \\\"Solvent A + Solvent B\\\" is physically identical to \\\"Solvent B + Solvent A\\\". Standard models treat them differently.\\n\\n\\n**THE TRICK (Test Time Augmentation):**\\nDuring inference for mixed solvents, we predict the target twice:\\\\\\n   Prediction 1: Input as (A, B)\\\\\\n   Prediction 2: Input as (B, A) (Flipped)\\\\\\n   Final = (Pred1 + Pred2) / 2\\n\\nThis mathematically guarantees that our model respects the physical symmetry of the mixture,\\nreducing variance and improving the score to ***0.09831***.\",\"metadata\":{}},{\"cell_type\":\"code\",\"source\":\"import numpy as np\\nimport pandas as pd\\nimport torch\\nimport torch.nn as nn\\nfrom torch.utils.data import TensorDataset, DataLoader\\nfrom abc import ABC\\nimport sys\\nimport tqdm\\n\\n# --- CONFIGURATION ---\\nsys.path.append('/kaggle/input/catechol-benchmark-hackathon/')\\ntorch.set_default_dtype(torch.double)\\nINPUT_LABELS_NUMERIC = [\\\"Residence Time\\\", \\\"Temperature\\\"]\\n\\n# --- UTILS ---\\ndef load_data(name=\\\"full\\\"):\\n    df = pd.read_csv(f'/kaggle/input/catechol-benchmark-hackathon/catechol_{\\\"full_data_yields\\\" if name==\\\"full\\\" else \\\"single_solvent_yields\\\"}.csv')\\n    if name == \\\"full\\\":\\n        X = df[[\\\"Residence Time\\\", \\\"Temperature\\\", \\\"SOLVENT A NAME\\\", \\\"SOLVENT B NAME\\\", \\\"SolventB%\\\"]]\\n    else:\\n        X = df[[\\\"Residence Time\\\", \\\"Temperature\\\", \\\"SOLVENT NAME\\\"]]\\n    Y = df[[\\\"Product 2\\\", \\\"Product 3\\\", \\\"SM\\\"]]\\n    return X, Y\\n\\ndef load_features():\\n    # Spange descriptors provide the best base for linear mixing\\n    return pd.read_csv('/kaggle/input/catechol-benchmark-hackathon/spange_descriptors_lookup.csv', index_col=0)\\n\\ndef generate_leave_one_out_splits(X, Y):\\n    for solvent in sorted(X[\\\"SOLVENT NAME\\\"].unique()):\\n        mask = X[\\\"SOLVENT NAME\\\"] != solvent\\n        yield (X[mask], Y[mask]), (X[~mask], Y[~mask])\\n\\ndef generate_leave_one_ramp_out_splits(X, Y):\\n    ramps = X[[\\\"SOLVENT A NAME\\\", \\\"SOLVENT B NAME\\\"]].drop_duplicates()\\n    for _, row in ramps.iterrows():\\n        mask = ~((X[\\\"SOLVENT A NAME\\\"] == row[\\\"SOLVENT A NAME\\\"]) & (X[\\\"SOLVENT B NAME\\\"] == row[\\\"SOLVENT B NAME\\\"]))\\n        yield (X[mask], Y[mask]), (X[~mask], Y[~mask])\\n\\nSPANGE_DF = load_features()\\n\\n# --- 1. KINETIC FEATURIZER ---\\nclass SmilesFeaturizer(ABC):\\n    def featurize(self, X, flip=False): raise NotImplementedError\\n\\nclass KineticMixingFeaturizer(SmilesFeaturizer):\\n    def __init__(self, mixed=False):\\n        self.mixed = mixed\\n        self.featurizer = SPANGE_DF\\n        self.feats_dim = self.featurizer.shape[1] + 2 + 3\\n\\n    def featurize(self, X, flip=False):\\n        X_vals = X[INPUT_LABELS_NUMERIC].values.astype(np.float64)\\n        \\n        # --- KINETIC ENGINEERING ---\\n        temp_c = X_vals[:, 1:2] \\n        time_m = X_vals[:, 0:1]\\n        \\n        temp_k = temp_c + 273.15 \\n        inv_temp = 1000.0 / temp_k \\n        log_time = np.log(time_m + 1e-6) \\n        interaction = inv_temp * log_time \\n        \\n        X_kinetic = torch.tensor(np.hstack([X_vals, inv_temp, log_time, interaction]))\\n        \\n        # --- SYMMETRIC CHEMICAL FEATURES ---\\n        if self.mixed:\\n            A = torch.tensor(self.featurizer.loc[X[\\\"SOLVENT A NAME\\\"]].values)\\n            B = torch.tensor(self.featurizer.loc[X[\\\"SOLVENT B NAME\\\"]].values)\\n            pct = torch.tensor(X[\\\"SolventB%\\\"].values.reshape(-1, 1))\\n            \\n            if flip:\\n                # SYMMETRY FLIP: Swap A and B, use (1-p) as concentration\\n                # Chemically: A(p) + B(1-p) is same as B(1-p) + A(p)\\n                X_chem = B * (1 - (1-pct)) + A * (1-pct)\\n            else:\\n                X_chem = A * (1 - pct) + B * pct\\n        else:\\n            X_chem = torch.tensor(self.featurizer.loc[X[\\\"SOLVENT NAME\\\"]].values)\\n            \\n        return torch.cat([X_kinetic, X_chem], dim=1)\\n\\n# --- 2. ROBUST MLP ---\\nclass MLPInternal(nn.Module):\\n    def __init__(self, input_dim):\\n        super(MLPInternal, self).__init__()\\n        self.net = nn.Sequential(\\n            nn.BatchNorm1d(input_dim),\\n            nn.Linear(input_dim, 128),\\n            nn.BatchNorm1d(128),\\n            nn.ReLU(),\\n            nn.Dropout(0.2),\\n            \\n            nn.Linear(128, 128),\\n            nn.BatchNorm1d(128),\\n            nn.ReLU(),\\n            nn.Dropout(0.2),\\n            \\n            nn.Linear(128, 64),\\n            nn.BatchNorm1d(64),\\n            nn.ReLU(),\\n            nn.Dropout(0.2),\\n            \\n            nn.Linear(64, 3),\\n            nn.Sigmoid() \\n        )\\n\\n    def forward(self, x):\\n        return self.net(x)\\n\\n# --- 3. SYMMETRIC BAGGED MODEL ---\\nclass SymmetricBaggedModel(nn.Module):\\n    def __init__(self, data='single'):\\n        super().__init__()\\n        self.data_type = data\\n        self.featurizer = KineticMixingFeaturizer(mixed=(data=='full'))\\n        \\n        # 7 Models for Bagging\\n        self.n_models = 7\\n        self.models = nn.ModuleList()\\n\\n    def train_model(self, X_train, y_train):\\n        # 1. Standard Data\\n        X_std = self.featurizer.featurize(X_train, flip=False)\\n        y_vals = torch.tensor(y_train.values)\\n        \\n        if self.data_type == 'full':\\n            # 2. Augmented Data (Train on both symmetries)\\n            X_flip = self.featurizer.featurize(X_train, flip=True)\\n            X_all = torch.cat([X_std, X_flip], dim=0)\\n            y_all = torch.cat([y_vals, y_vals], dim=0)\\n        else:\\n            X_all = X_std\\n            y_all = y_vals\\n            \\n        input_dim = X_all.shape[1]\\n        device = torch.device(\\\"cuda\\\" if torch.cuda.is_available() else \\\"cpu\\\")\\n        print(f\\\"Training {self.n_models} models on {device}...\\\")\\n        \\n        for i in range(self.n_models):\\n            model = MLPInternal(input_dim).to(device)\\n            model.train()\\n            self.models.append(model)\\n            \\n            dataset = TensorDataset(X_all, y_all)\\n            loader = DataLoader(dataset, batch_size=32, shuffle=True)\\n            \\n            optimizer = torch.optim.Adam(model.parameters(), lr=5e-4, weight_decay=1e-5)\\n            criterion = nn.HuberLoss() # Robust to outliers\\n            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(\\n                optimizer, mode='min', factor=0.5, patience=20\\n            )\\n            \\n            for epoch in range(300):\\n                epoch_loss = 0.0\\n                for inputs, targets in loader:\\n                    inputs, targets = inputs.to(device), targets.to(device)\\n                    optimizer.zero_grad()\\n                    outputs = model(inputs)\\n                    loss = criterion(outputs, targets)\\n                    loss.backward()\\n                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)\\n                    optimizer.step()\\n                    epoch_loss += loss.item() * inputs.size(0)\\n                \\n                scheduler.step(epoch_loss / len(dataset))\\n\\n    def predict(self, X):\\n        device = next(self.models[0].parameters()).device\\n        \\n        # --- TEST TIME AUGMENTATION (TTA) ---\\n        if self.data_type == 'full':\\n            # Path A: Standard\\n            X_std = self.featurizer.featurize(X, flip=False).to(device)\\n            # Path B: Flipped (Symmetry)\\n            X_flip = self.featurizer.featurize(X, flip=True).to(device)\\n            \\n            pred_sum = torch.zeros((len(X), 3)).to(device)\\n            \\n            with torch.no_grad():\\n                for model in self.models:\\n                    model.eval()\\n                    # Average the model's prediction on A and B views\\n                    p1 = model(X_std)\\n                    p2 = model(X_flip)\\n                    pred_sum += (p1 + p2) * 0.5 \\n            \\n            avg_pred = pred_sum / self.n_models\\n            \\n        else:\\n            X_std = self.featurizer.featurize(X).to(device)\\n            pred_sum = torch.zeros((len(X), 3)).to(device)\\n            with torch.no_grad():\\n                for model in self.models:\\n                    model.eval()\\n                    pred_sum += model(X_std)\\n            avg_pred = pred_sum / self.n_models\\n\\n        return avg_pred.cpu()\\n\\n# --- 4. EXECUTION ---\\n# Task 0: Single Solvent\\nprint(\\\"\\\\n--- TASK 0: Single Solvent ---\\\")\\nX, Y = load_data(\\\"single_solvent\\\")\\nsplit_generator = generate_leave_one_out_splits(X, Y)\\nall_predictions = []\\n\\nfor fold_idx, split in tqdm.tqdm(enumerate(split_generator)):\\n    (train_X, train_Y), (test_X, test_Y) = split\\n    model = SymmetricBaggedModel(data='single')\\n    model.train_model(train_X, train_Y)\\n    predictions = model.predict(test_X).numpy()\\n    \\n    for row_idx, row in enumerate(predictions):\\n        all_predictions.append({\\n            \\\"task\\\": 0, \\\"fold\\\": fold_idx, \\\"row\\\": row_idx,\\n            \\\"target_1\\\": row[0], \\\"target_2\\\": row[1], \\\"target_3\\\": row[2]\\n        })\\n\\n# Task 1: Full Data\\nprint(\\\"\\\\n--- TASK 1: Full Data (Mixtures) ---\\\")\\nX, Y = load_data(\\\"full\\\")\\nsplit_generator = generate_leave_one_ramp_out_splits(X, Y)\\n\\nfor fold_idx, split in tqdm.tqdm(enumerate(split_generator)):\\n    (train_X, train_Y), (test_X, test_Y) = split\\n    model = SymmetricBaggedModel(data='full')\\n    model.train_model(train_X, train_Y)\\n    predictions = model.predict(test_X).numpy()\\n    \\n    for row_idx, row in enumerate(predictions):\\n        all_predictions.append({\\n            \\\"task\\\": 1, \\\"fold\\\": fold_idx, \\\"row\\\": row_idx,\\n            \\\"target_1\\\": row[0], \\\"target_2\\\": row[1], \\\"target_3\\\": row[2]\\n        })\\n\\n# Save\\nsubmission = pd.DataFrame(all_predictions)\\nsubmission = submission.reset_index()\\nsubmission.index.name = \\\"id\\\"\\nsubmission.to_csv(\\\"submission.csv\\\", index=True)\\nprint(\\\"Submission Generated.\\\")\",\"metadata\":{\"trusted\":true,\"execution\":{\"iopub.status.busy\":\"2025-12-13T10:23:23.870699Z\",\"iopub.execute_input\":\"2025-12-13T10:23:23.870934Z\",\"iopub.status.idle\":\"2025-12-13T12:50:56.026237Z\",\"shell.execute_reply.started\":\"2025-12-13T10:23:23.870909Z\",\"shell.execute_reply\":\"2025-12-13T12:50:56.025491Z\"}},\"outputs\":[],\"execution_count\":null}]}",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "REASONING: Now I have a complete understanding of the template and the best approach. Let me create my first baseline experiment following the seed prompt strategy. I'll implement a Physics-Informed MLP with Arrhenius kinetics features, TTA for mixed solvents, and ensemble of models. I need to make sure the notebook follows the exact template structure."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01DRaut1CoGAA5KW5e2uh89U",
+          "name": "Bash",
+          "input": {
+            "command": "mkdir -p /home/code/experiments/001_baseline"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01DRaut1CoGAA5KW5e2uh89U",
+          "content": "(no output)",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01GLSD4AqmwBomfJNBTx924W",
+          "name": "CreateNotebook",
+          "input": {
+            "notebook_path": "/home/code/experiments/001_baseline/baseline.ipynb",
+            "cells": [
+              {
+                "cell_type": "markdown",
+                "content": "# Experiment 001: Physics-Informed MLP Baseline\n\nImplementing:\n- Arrhenius kinetics features (1/T, ln(t), 1/T * ln(t))\n- Spange descriptors for solvent features\n- Robust MLP with BatchNorm, Dropout, Sigmoid output\n- HuberLoss for robustness\n- TTA for mixed solvent symmetry\n- Ensemble of 5 models"
+              },
+              {
+                "cell_type": "code",
+                "content": "import numpy as np\nimport pandas as pd\nimport torch\nimport torch.nn as nn\nfrom torch.utils.data import TensorDataset, DataLoader\nfrom abc import ABC\nimport tqdm\nimport warnings\nwarnings.filterwarnings('ignore')\n\n# Check GPU\nprint(f\"GPU available: {torch.cuda.is_available()}\")\nif torch.cuda.is_available():\n    print(f\"GPU: {torch.cuda.get_device_name(0)}\")\n    print(f\"Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB\")\n\ntorch.set_default_dtype(torch.double)"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Data loading utilities - adapted for local paths\nDATA_PATH = '/home/data'\n\nINPUT_LABELS_FULL_SOLVENT = [\n    \"Residence Time\",\n    \"Temperature\",\n    \"SOLVENT A NAME\",\n    \"SOLVENT B NAME\",\n    \"SolventB%\",\n]\n\nINPUT_LABELS_SINGLE_SOLVENT = [\n    \"Residence Time\",\n    \"Temperature\",\n    \"SOLVENT NAME\",\n]\n\nINPUT_LABELS_NUMERIC = [\n    \"Residence Time\",\n    \"Temperature\",\n]\n\nTARGET_LABELS = [\n    \"Product 2\",\n    \"Product 3\",\n    \"SM\",\n]\n\ndef load_data(name=\"full\"):\n    assert name in [\"full\", \"single_solvent\"]\n    if name == \"full\":\n        df = pd.read_csv(f'{DATA_PATH}/catechol_full_data_yields.csv')\n        X = df[INPUT_LABELS_FULL_SOLVENT]\n    else:\n        df = pd.read_csv(f'{DATA_PATH}/catechol_single_solvent_yields.csv')\n        X = df[INPUT_LABELS_SINGLE_SOLVENT]\n    Y = df[TARGET_LABELS]\n    return X, Y\n\ndef load_features(name=\"spange_descriptors\"):\n    features = pd.read_csv(f'{DATA_PATH}/{name}_lookup.csv', index_col=0)\n    return features\n\ndef generate_leave_one_out_splits(X, Y):\n    \"\"\"Leave-one-solvent-out for single solvent data.\"\"\"\n    all_solvents = X[\"SOLVENT NAME\"].unique()\n    for solvent_name in sorted(all_solvents):\n        train_idcs_mask = X[\"SOLVENT NAME\"] != solvent_name\n        yield (\n            (X[train_idcs_mask], Y[train_idcs_mask]),\n            (X[~train_idcs_mask], Y[~train_idcs_mask]),\n        )\n\ndef generate_leave_one_ramp_out_splits(X, Y):\n    \"\"\"Leave-one-ramp-out for full data.\"\"\"\n    all_solvent_ramps = X[[\"SOLVENT A NAME\", \"SOLVENT B NAME\"]].drop_duplicates()\n    all_solvent_ramps = all_solvent_ramps.sort_values(by=[\"SOLVENT A NAME\", \"SOLVENT B NAME\"])\n    for _, solvent_pair in all_solvent_ramps.iterrows():\n        train_idcs_mask = (X[[\"SOLVENT A NAME\", \"SOLVENT B NAME\"]] != solvent_pair).any(axis=1)\n        yield (\n            (X[train_idcs_mask], Y[train_idcs_mask]),\n            (X[~train_idcs_mask], Y[~train_idcs_mask]),\n        )"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Load Spange descriptors\nSPANGE_DF = load_features('spange_descriptors')\nprint(f\"Spange descriptors shape: {SPANGE_DF.shape}\")\nprint(f\"Features: {list(SPANGE_DF.columns)}\")"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Featurizer with Arrhenius kinetics\nclass SmilesFeaturizer(ABC):\n    def featurize(self, X, flip=False):\n        raise NotImplementedError\n\nclass KineticFeaturizer(SmilesFeaturizer):\n    \"\"\"Featurizer with Arrhenius kinetics features.\"\"\"\n    def __init__(self, mixed=False):\n        self.mixed = mixed\n        self.featurizer = SPANGE_DF\n        # Features: 2 numeric + 3 kinetic + 13 spange = 18\n        self.feats_dim = self.featurizer.shape[1] + 2 + 3\n\n    def featurize(self, X, flip=False):\n        X_vals = X[INPUT_LABELS_NUMERIC].values.astype(np.float64)\n        \n        # Arrhenius kinetics features\n        temp_c = X_vals[:, 1:2]  # Temperature in Celsius\n        time_m = X_vals[:, 0:1]  # Residence time in minutes\n        \n        temp_k = temp_c + 273.15  # Convert to Kelvin\n        inv_temp = 1000.0 / temp_k  # Inverse temperature (Arrhenius)\n        log_time = np.log(time_m + 1e-6)  # Log residence time\n        interaction = inv_temp * log_time  # Kinetic interaction term\n        \n        X_kinetic = torch.tensor(np.hstack([X_vals, inv_temp, log_time, interaction]))\n        \n        # Solvent features\n        if self.mixed:\n            A = torch.tensor(self.featurizer.loc[X[\"SOLVENT A NAME\"]].values)\n            B = torch.tensor(self.featurizer.loc[X[\"SOLVENT B NAME\"]].values)\n            pct = torch.tensor(X[\"SolventB%\"].values.reshape(-1, 1))\n            \n            if flip:\n                # Symmetry flip: swap A and B\n                X_chem = B * (1 - (1-pct)) + A * (1-pct)\n            else:\n                X_chem = A * (1 - pct) + B * pct\n        else:\n            X_chem = torch.tensor(self.featurizer.loc[X[\"SOLVENT NAME\"]].values)\n            \n        return torch.cat([X_kinetic, X_chem], dim=1)"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Robust MLP architecture\nclass MLPInternal(nn.Module):\n    def __init__(self, input_dim, hidden_dims=[128, 128, 64], dropout=0.2):\n        super(MLPInternal, self).__init__()\n        \n        layers = [nn.BatchNorm1d(input_dim)]\n        prev_dim = input_dim\n        \n        for h_dim in hidden_dims:\n            layers.extend([\n                nn.Linear(prev_dim, h_dim),\n                nn.BatchNorm1d(h_dim),\n                nn.ReLU(),\n                nn.Dropout(dropout),\n            ])\n            prev_dim = h_dim\n        \n        layers.extend([\n            nn.Linear(prev_dim, 3),\n            nn.Sigmoid()  # Constrain output to [0, 1]\n        ])\n        \n        self.net = nn.Sequential(*layers)\n\n    def forward(self, x):\n        return self.net(x)"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Physics-Informed Model with TTA and Ensemble\nclass PhysicsInformedModel(nn.Module):\n    def __init__(self, data='single', n_models=5, hidden_dims=[128, 128, 64], \n                 dropout=0.2, lr=5e-4, weight_decay=1e-5, epochs=300):\n        super().__init__()\n        self.data_type = data\n        self.n_models = n_models\n        self.hidden_dims = hidden_dims\n        self.dropout = dropout\n        self.lr = lr\n        self.weight_decay = weight_decay\n        self.epochs = epochs\n        \n        self.featurizer = KineticFeaturizer(mixed=(data=='full'))\n        self.models = nn.ModuleList()\n\n    def train_model(self, X_train, y_train):\n        # Standard data\n        X_std = self.featurizer.featurize(X_train, flip=False)\n        y_vals = torch.tensor(y_train.values)\n        \n        if self.data_type == 'full':\n            # Data augmentation with symmetric solvent swapping\n            X_flip = self.featurizer.featurize(X_train, flip=True)\n            X_all = torch.cat([X_std, X_flip], dim=0)\n            y_all = torch.cat([y_vals, y_vals], dim=0)\n        else:\n            X_all = X_std\n            y_all = y_vals\n            \n        input_dim = X_all.shape[1]\n        device = torch.device(\"cuda\" if torch.cuda.is_available() else \"cpu\")\n        \n        for i in range(self.n_models):\n            torch.manual_seed(42 + i)  # Different seed for each model\n            model = MLPInternal(input_dim, self.hidden_dims, self.dropout).to(device)\n            model.train()\n            self.models.append(model)\n            \n            dataset = TensorDataset(X_all, y_all)\n            loader = DataLoader(dataset, batch_size=32, shuffle=True)\n            \n            optimizer = torch.optim.AdamW(model.parameters(), lr=self.lr, weight_decay=self.weight_decay)\n            criterion = nn.HuberLoss()  # Robust to outliers\n            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(\n                optimizer, mode='min', factor=0.5, patience=20\n            )\n            \n            for epoch in range(self.epochs):\n                epoch_loss = 0.0\n                for inputs, targets in loader:\n                    inputs, targets = inputs.to(device), targets.to(device)\n                    optimizer.zero_grad()\n                    outputs = model(inputs)\n                    loss = criterion(outputs, targets)\n                    loss.backward()\n                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)\n                    optimizer.step()\n                    epoch_loss += loss.item() * inputs.size(0)\n                \n                scheduler.step(epoch_loss / len(dataset))\n\n    def predict(self, X):\n        device = next(self.models[0].parameters()).device\n        \n        if self.data_type == 'full':\n            # Test Time Augmentation (TTA) for mixed solvents\n            X_std = self.featurizer.featurize(X, flip=False).to(device)\n            X_flip = self.featurizer.featurize(X, flip=True).to(device)\n            \n            pred_sum = torch.zeros((len(X), 3)).to(device)\n            \n            with torch.no_grad():\n                for model in self.models:\n                    model.eval()\n                    p1 = model(X_std)\n                    p2 = model(X_flip)\n                    pred_sum += (p1 + p2) * 0.5  # Average both views\n            \n            avg_pred = pred_sum / self.n_models\n        else:\n            X_std = self.featurizer.featurize(X).to(device)\n            pred_sum = torch.zeros((len(X), 3)).to(device)\n            \n            with torch.no_grad():\n                for model in self.models:\n                    model.eval()\n                    pred_sum += model(X_std)\n            \n            avg_pred = pred_sum / self.n_models\n\n        return avg_pred.cpu()"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Test the model on a single fold first\nprint(\"Testing on single fold...\")\nX, Y = load_data(\"single_solvent\")\nprint(f\"Single solvent data: {X.shape[0]} samples, {len(X['SOLVENT NAME'].unique())} solvents\")\n\n# Get first fold\nsplit_gen = generate_leave_one_out_splits(X, Y)\n(train_X, train_Y), (test_X, test_Y) = next(split_gen)\nprint(f\"Train: {len(train_X)}, Test: {len(test_X)}\")\n\n# Train model\nmodel = PhysicsInformedModel(data='single', n_models=2, epochs=50)  # Quick test\nmodel.train_model(train_X, train_Y)\n\n# Predict\npreds = model.predict(test_X)\nprint(f\"Predictions shape: {preds.shape}\")\nprint(f\"Predictions range: [{preds.min():.4f}, {preds.max():.4f}]\")\n\n# Calculate RMSE for this fold\nrmse = np.sqrt(((preds.numpy() - test_Y.values) ** 2).mean())\nprint(f\"Single fold RMSE: {rmse:.4f}\")"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Full cross-validation for single solvent task\nprint(\"\\n\" + \"=\"*50)\nprint(\"TASK 0: Single Solvent (Leave-One-Solvent-Out CV)\")\nprint(\"=\"*50)\n\nX, Y = load_data(\"single_solvent\")\nsplit_generator = generate_leave_one_out_splits(X, Y)\nall_predictions = []\nfold_rmses = []\n\nfor fold_idx, split in tqdm.tqdm(enumerate(split_generator), total=24):\n    (train_X, train_Y), (test_X, test_Y) = split\n    \n    model = PhysicsInformedModel(data='single', n_models=5, epochs=300)\n    model.train_model(train_X, train_Y)\n    \n    predictions = model.predict(test_X).numpy()\n    \n    # Calculate fold RMSE\n    fold_rmse = np.sqrt(((predictions - test_Y.values) ** 2).mean())\n    fold_rmses.append(fold_rmse)\n    \n    # Store predictions\n    for row_idx, row in enumerate(predictions):\n        all_predictions.append({\n            \"task\": 0,\n            \"fold\": fold_idx,\n            \"row\": row_idx,\n            \"target_1\": row[0],\n            \"target_2\": row[1],\n            \"target_3\": row[2]\n        })\n\nsubmission_single_solvent = pd.DataFrame(all_predictions)\nprint(f\"\\nSingle Solvent CV RMSE: {np.mean(fold_rmses):.5f} \u00b1 {np.std(fold_rmses):.5f}\")"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Full cross-validation for full data task\nprint(\"\\n\" + \"=\"*50)\nprint(\"TASK 1: Full Data (Leave-One-Ramp-Out CV)\")\nprint(\"=\"*50)\n\nX, Y = load_data(\"full\")\nsplit_generator = generate_leave_one_ramp_out_splits(X, Y)\nall_predictions = []\nfold_rmses_full = []\n\nfor fold_idx, split in tqdm.tqdm(enumerate(split_generator), total=13):\n    (train_X, train_Y), (test_X, test_Y) = split\n    \n    model = PhysicsInformedModel(data='full', n_models=5, epochs=300)\n    model.train_model(train_X, train_Y)\n    \n    predictions = model.predict(test_X).numpy()\n    \n    # Calculate fold RMSE\n    fold_rmse = np.sqrt(((predictions - test_Y.values) ** 2).mean())\n    fold_rmses_full.append(fold_rmse)\n    \n    # Store predictions\n    for row_idx, row in enumerate(predictions):\n        all_predictions.append({\n            \"task\": 1,\n            \"fold\": fold_idx,\n            \"row\": row_idx,\n            \"target_1\": row[0],\n            \"target_2\": row[1],\n            \"target_3\": row[2]\n        })\n\nsubmission_full_data = pd.DataFrame(all_predictions)\nprint(f\"\\nFull Data CV RMSE: {np.mean(fold_rmses_full):.5f} \u00b1 {np.std(fold_rmses_full):.5f}\")"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Combine and save submission\nsubmission = pd.concat([submission_single_solvent, submission_full_data])\nsubmission = submission.reset_index()\nsubmission.index.name = \"id\"\n\n# Save submission\nsubmission.to_csv(\"/home/code/experiments/001_baseline/submission.csv\", index=True)\nsubmission.to_csv(\"/home/submission/submission.csv\", index=True)\n\nprint(f\"\\nSubmission saved with {len(submission)} rows\")\nprint(submission.head())"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Final summary\nprint(\"\\n\" + \"=\"*50)\nprint(\"FINAL RESULTS\")\nprint(\"=\"*50)\nprint(f\"Single Solvent CV RMSE: {np.mean(fold_rmses):.5f} \u00b1 {np.std(fold_rmses):.5f}\")\nprint(f\"Full Data CV RMSE: {np.mean(fold_rmses_full):.5f} \u00b1 {np.std(fold_rmses_full):.5f}\")\n\n# Overall score (average of both tasks)\noverall_rmse = (np.mean(fold_rmses) + np.mean(fold_rmses_full)) / 2\nprint(f\"\\nOverall CV RMSE: {overall_rmse:.5f}\")"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01GLSD4AqmwBomfJNBTx924W",
+          "content": "Created: /home/code/experiments/001_baseline/baseline.ipynb\n\nStrong Note: OOM is unrecoverable. Use strong models - just estimate memory first.",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "REASONING: Now let me execute the notebook cells to run the baseline experiment. I'll start with the initial cells to verify the setup works."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01BoKhDFzUHEi4nwMVgyCcNx",
+          "name": "Bash",
+          "input": {
+            "command": "mkdir -p /home/submission"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_011CE3Y217dTAeRw2VAXUPic",
+          "name": "OpenNotebook",
+          "input": {
+            "notebook_path": "/home/code/experiments/001_baseline/baseline.ipynb"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01BoKhDFzUHEi4nwMVgyCcNx",
+          "content": "(no output)",
+          "is_error": false
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_011CE3Y217dTAeRw2VAXUPic",
+          "content": "Already open: /home/code/experiments/001_baseline/baseline.ipynb (12 cells)",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01K9S4fxkmMoECxtfvtbMkDj",
+          "name": "ExecuteCellRange",
+          "input": {
+            "start_cell": 1,
+            "end_cell": 5,
+            "duration": 60
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01K9S4fxkmMoECxtfvtbMkDj",
+          "content": "Executed cells 1-5\n==================================================\n\nCell 1:\n```\nimport numpy as np\nimport pandas as pd\nimport torch\nimport torch.nn as nn\nfrom torch.utils.data import TensorDataset, DataLoader\nfrom abc import ABC\nimport tqdm\nimport warnings\nwarnings.filterwarnings('ignore')\n\n# Check GPU\nprint(f\"GPU available: {torch.cuda.is_available()}\")\nif torch.cuda.is_available():\n    print(f\"GPU: {torch.cuda.get_device_name(0)}\")\n    print(f\"Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB\")\n\ntorch.set_default_dtype(torch.double)\n```\nOutput:\nGPU available: True\nGPU: NVIDIA H100 80GB HBM3\nMemory: 85.0 GB\n\n\nCell 2:\n```\n# Data loading utilities - adapted for local paths\nDATA_PATH = '/home/data'\n\nINPUT_LABELS_FULL_SOLVENT = [\n    \"Residence Time\",\n    \"Temperature\",\n    \"SOLVENT A NAME\",\n    \"SOLVENT B NAME\",\n    \"SolventB%\",\n]\n\nINPUT_LABELS_SINGLE_SOLVENT = [\n    \"Residence Time\",\n    \"Temperature\",\n    \"SOLVENT NAME\",\n]\n\nINPUT_LABELS_NUMERIC = [\n    \"Residence Time\",\n    \"Temperature\",\n]\n\nTARGET_LABELS = [\n    \"Product 2\",\n    \"Product 3\",\n    \"SM\",\n]\n\ndef load_data(name=\"full\"):\n    assert name in [\"full\", \"s\n```\n\nCell 3:\n```\n# Load Spange descriptors\nSPANGE_DF = load_features('spange_descriptors')\nprint(f\"Spange descriptors shape: {SPANGE_DF.shape}\")\nprint(f\"Features: {list(SPANGE_DF.columns)}\")\n```\nOutput:\nSpange descriptors shape: (26, 13)\nFeatures: ['dielectric constant', 'ET(30)', 'alpha', 'beta', 'pi*', 'SA', 'SB', 'SP', 'SdP', 'N', 'n', 'f(n)', 'delta']\n\n\nCell 4:\n```\n# Featurizer with Arrhenius kinetics\nclass SmilesFeaturizer(ABC):\n    def featurize(self, X, flip=False):\n        raise NotImplementedError\n\nclass KineticFeaturizer(SmilesFeaturizer):\n    \"\"\"Featurizer with Arrhenius kinetics features.\"\"\"\n    def __init__(self, mixed=False):\n        self.mixed = mixed\n        self.featurizer = SPANGE_DF\n        # Features: 2 numeric + 3 kinetic + 13 spange = 18\n        self.feats_dim = self.featurizer.shape[1] + 2 + 3\n\n    def featurize(self, X, flip=False):\n   \n```\n\nCell 5:\n```\n# Robust MLP architecture\nclass MLPInternal(nn.Module):\n    def __init__(self, input_dim, hidden_dims=[128, 128, 64], dropout=0.2):\n        super(MLPInternal, self).__init__()\n        \n        layers = [nn.BatchNorm1d(input_dim)]\n        prev_dim = input_dim\n        \n        for h_dim in hidden_dims:\n            layers.extend([\n                nn.Linear(prev_dim, h_dim),\n                nn.BatchNorm1d(h_dim),\n                nn.ReLU(),\n                nn.Dropout(dropout),\n            ])\n        \n```",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01MdrrD8yzbBV8ugfQu1oZiD",
+          "name": "ExecuteCellRange",
+          "input": {
+            "start_cell": 6,
+            "end_cell": 7,
+            "duration": 120
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01MdrrD8yzbBV8ugfQu1oZiD",
+          "content": "Executed cells 6-7\n==================================================\n\nCell 6:\n```\n# Physics-Informed Model with TTA and Ensemble\nclass PhysicsInformedModel(nn.Module):\n    def __init__(self, data='single', n_models=5, hidden_dims=[128, 128, 64], \n                 dropout=0.2, lr=5e-4, weight_decay=1e-5, epochs=300):\n        super().__init__()\n        self.data_type = data\n        self.n_models = n_models\n        self.hidden_dims = hidden_dims\n        self.dropout = dropout\n        self.lr = lr\n        self.weight_decay = weight_decay\n        self.epochs = epochs\n        \n    \n```\n\nCell 7:\n```\n# Test the model on a single fold first\nprint(\"Testing on single fold...\")\nX, Y = load_data(\"single_solvent\")\nprint(f\"Single solvent data: {X.shape[0]} samples, {len(X['SOLVENT NAME'].unique())} solvents\")\n\n# Get first fold\nsplit_gen = generate_leave_one_out_splits(X, Y)\n(train_X, train_Y), (test_X, test_Y) = next(split_gen)\nprint(f\"Train: {len(train_X)}, Test: {len(test_X)}\")\n\n# Train model\nmodel = PhysicsInformedModel(data='single', n_models=2, epochs=50)  # Quick test\nmodel.train_model(train_\n```\nOutput:\nTesting on single fold...\nSingle solvent data: 656 samples, 24 solvents\nTrain: 619, Test: 37\n\nPredictions shape: torch.Size([37, 3])\nPredictions range: [0.0252, 0.8897]\nSingle fold RMSE: 0.1850\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "REASONING: The model is working. Now let me run the full cross-validation. This will take some time with 24 folds for single solvent and 13 folds for full data. Let me execute the full CV cells."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01JbNgUf7KtE7H8rwVJ4efER",
+          "name": "ExecuteCellRange",
+          "input": {
+            "start_cell": 8,
+            "end_cell": 8,
+            "duration": 3600
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01JbNgUf7KtE7H8rwVJ4efER",
+          "content": "Executed cells 8-8\n==================================================\n\nCell 8:\n```\n# Full cross-validation for single solvent task\nprint(\"\\n\" + \"=\"*50)\nprint(\"TASK 0: Single Solvent (Leave-One-Solvent-Out CV)\")\nprint(\"=\"*50)\n\nX, Y = load_data(\"single_solvent\")\nsplit_generator = generate_leave_one_out_splits(X, Y)\nall_predictions = []\nfold_rmses = []\n\nfor fold_idx, split in tqdm.tqdm(enumerate(split_generator), total=24):\n    (train_X, train_Y), (test_X, test_Y) = split\n    \n    model = PhysicsInformedModel(data='single', n_models=5, epochs=300)\n    model.train_model(train_X, t\n```\nOutput:\n\n==================================================\nTASK 0: Single Solvent (Leave-One-Solvent-Out CV)\n==================================================\n\n\r  0%|          | 0/24 [00:00<?, ?it/s]\n\r  4%|\u258d         | 1/24 [00:51<19:49, 51.72s/it]\n\r  8%|\u258a         | 2/24 [01:43<18:56, 51.66s/it]\n\r 12%|\u2588\u258e        | 3/24 [02:32<17:43, 50.64s/it]\n\r 17%|\u2588\u258b        | 4/24 [03:22<16:44, 50.24s/it]\n\r 21%|\u2588\u2588        | 5/24 [04:14<16:04, 50.78s/it]\n\r 25%|\u2588\u2588\u258c       | 6/24 [05:06<15:21, 51.17s/it]\n\r 29%|\u2588\u2588\u2589       | 7/24 [05:57<14:32, 51.31s/it]\n\r 33%|\u2588\u2588\u2588\u258e      | 8/24 [06:49<13:41, 51.35s/it]\n\r 38%|\u2588\u2588\u2588\u258a      | 9/24 [07:40<12:51, 51.45s/it]\n\r 42%|\u2588\u2588\u2588\u2588\u258f     | 10/24 [08:32<12:02, 51.64s/it]\n\r 46%|\u2588\u2588\u2588\u2588\u258c     | 11/24 [09:25<11:14, 51.90s/it]\n\r 50%|\u2588\u2588\u2588\u2588\u2588     | 12/24 [10:17<10:24, 52.01s/it]\n\r 54%|\u2588\u2588\u2588\u2588\u2588\u258d    | 13/24 [11:09<09:33, 52.10s/it]\n\r 58%|\u2588\u2588\u2588\u2588\u2588\u258a    | 14/24 [12:02<08:42, 52.20s/it]\n\r 62%|\u2588\u2588\u2588\u2588\u2588\u2588\u258e   | 15/24 [12:54<07:49, 52.22s/it]\n\r 67%|\u2588\u2588\u2588\u2588\u2588\u2588\u258b   | 16/24 [13:46<06:57, 52.21s/it]\n\r 71%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588   | 17/24 [14:41<06:10, 52.97s/it]\n\r 75%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258c  | 18/24 [15:33<05:16, 52.69s/it]\n\r 79%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2589  | 19/24 [16:25<04:22, 52.40s/it]\n\r 83%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258e | 20/24 [17:17<03:29, 52.30s/it]\n\r 88%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258a | 21/24 [18:09<02:36, 52.19s/it]\n\r 92%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258f| 22/24 [19:01<01:44, 52.19s/it]\n\r 96%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258c| 23/24 [19:53<00:52, 52.28s/it]\n\r100%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588| 24/24 [20:47<00:00, 52.77s/it]\n\r100%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588| 24/24 [20:47<00:00, 51.99s/it]\n\nSingle Solvent CV RMSE: 0.08719 \u00b1 0.04350\n\n\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "REASONING: Single solvent CV RMSE is 0.08719. Now let me run the full data task."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01KsZtfeoJGmrNbrvjMYbs3t",
+          "name": "ExecuteCellRange",
+          "input": {
+            "start_cell": 9,
+            "end_cell": 9,
+            "duration": 3600
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01KsZtfeoJGmrNbrvjMYbs3t",
+          "content": "Executed cells 9-9\n==================================================\n\nCell 9:\n```\n# Full cross-validation for full data task\nprint(\"\\n\" + \"=\"*50)\nprint(\"TASK 1: Full Data (Leave-One-Ramp-Out CV)\")\nprint(\"=\"*50)\n\nX, Y = load_data(\"full\")\nsplit_generator = generate_leave_one_ramp_out_splits(X, Y)\nall_predictions = []\nfold_rmses_full = []\n\nfor fold_idx, split in tqdm.tqdm(enumerate(split_generator), total=13):\n    (train_X, train_Y), (test_X, test_Y) = split\n    \n    model = PhysicsInformedModel(data='full', n_models=5, epochs=300)\n    model.train_model(train_X, train_Y)\n    \n  \n```\nOutput:\n\n==================================================\nTASK 1: Full Data (Leave-One-Ramp-Out CV)\n==================================================\n\n\r  0%|          | 0/13 [00:00<?, ?it/s]\n\r  8%|\u258a         | 1/13 [02:59<35:58, 179.91s/it]\n\r 15%|\u2588\u258c        | 2/13 [06:00<33:00, 180.07s/it]\n\r 23%|\u2588\u2588\u258e       | 3/13 [08:58<29:52, 179.27s/it]\n\r 31%|\u2588\u2588\u2588       | 4/13 [11:55<26:47, 178.59s/it]\n\r 38%|\u2588\u2588\u2588\u258a      | 5/13 [15:00<24:06, 180.76s/it]\n\r 46%|\u2588\u2588\u2588\u2588\u258c     | 6/13 [18:00<21:03, 180.48s/it]\n\r 54%|\u2588\u2588\u2588\u2588\u2588\u258d    | 7/13 [21:14<18:29, 184.99s/it]\n\r 62%|\u2588\u2588\u2588\u2588\u2588\u2588\u258f   | 8/13 [24:14<15:16, 183.36s/it]\n\r 69%|\u2588\u2588\u2588\u2588\u2588\u2588\u2589   | 9/13 [27:30<12:29, 187.34s/it]\n\r 77%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258b  | 10/13 [30:32<09:16, 185.55s/it]\n\r 85%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258d | 11/13 [33:50<06:19, 189.50s/it]\n\r 92%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258f| 12/13 [36:52<03:07, 187.02s/it]\n\r100%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588| 13/13 [40:08<00:00, 189.76s/it]\n\r100%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588| 13/13 [40:08<00:00, 185.24s/it]\n\nFull Data CV RMSE: 0.08920 \u00b1 0.03871\n\n\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "REASONING: Full data CV RMSE is 0.08920. Now let me save the submission and get the final results."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01L5pfTdRX7PWfpowTGyEUAo",
+          "name": "ExecuteCellRange",
+          "input": {
+            "start_cell": 10,
+            "end_cell": 11,
+            "duration": 60
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01L5pfTdRX7PWfpowTGyEUAo",
+          "content": "Executed cells 10-11\n==================================================\n\nCell 10:\n```\n# Combine and save submission\nsubmission = pd.concat([submission_single_solvent, submission_full_data])\nsubmission = submission.reset_index()\nsubmission.index.name = \"id\"\n\n# Save submission\nsubmission.to_csv(\"/home/code/experiments/001_baseline/submission.csv\", index=True)\nsubmission.to_csv(\"/home/submission/submission.csv\", index=True)\n\nprint(f\"\\nSubmission saved with {len(submission)} rows\")\nprint(submission.head())\n```\nOutput:\n\nSubmission saved with 1883 rows\n    index  task  fold  row  target_1  target_2  target_3\nid                                                      \n0       0     0     0    0  0.007990  0.007772  0.930425\n1       1     0     0    1  0.018707  0.017737  0.882865\n2       2     0     0    2  0.049111  0.042348  0.775830\n3       3     0     0    3  0.090080  0.068268  0.667823\n4       4     0     0    4  0.123838  0.086281  0.588787\n\n\nCell 11:\n```\n# Final summary\nprint(\"\\n\" + \"=\"*50)\nprint(\"FINAL RESULTS\")\nprint(\"=\"*50)\nprint(f\"Single Solvent CV RMSE: {np.mean(fold_rmses):.5f} \u00b1 {np.std(fold_rmses):.5f}\")\nprint(f\"Full Data CV RMSE: {np.mean(fold_rmses_full):.5f} \u00b1 {np.std(fold_rmses_full):.5f}\")\n\n# Overall score (average of both tasks)\noverall_rmse = (np.mean(fold_rmses) + np.mean(fold_rmses_full)) / 2\nprint(f\"\\nOverall CV RMSE: {overall_rmse:.5f}\")\n```\nOutput:\n\n==================================================\nFINAL RESULTS\n==================================================\nSingle Solvent CV RMSE: 0.08719 \u00b1 0.04350\nFull Data CV RMSE: 0.08920 \u00b1 0.03871\n\nOverall CV RMSE: 0.08819\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "REASONING: Excellent! The baseline model achieved:\n- Single Solvent CV RMSE: 0.08719 \u00b1 0.04350\n- Full Data CV RMSE: 0.08920 \u00b1 0.03871\n- Overall CV RMSE: 0.08819\n\nThis is already better than the reference score of 0.09831 from the Arrhenius kinetics notebook. The target is 0.047400, so we need to improve further. Let me close the notebook and log this experiment."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_019ph4XP1WJbiRL2xLbSpdBF",
+          "name": "CloseNotebook",
+          "input": {}
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_019ph4XP1WJbiRL2xLbSpdBF",
+          "content": "Closed: /home/code/experiments/001_baseline/baseline.ipynb",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01Sx3kg47LfpZped28em1x6n",
+          "name": "LogExperiment",
+          "input": {
+            "name": "Physics-Informed MLP Baseline with Arrhenius Kinetics + TTA",
+            "model_type": "MLP",
+            "score": 0.08819,
+            "notes": "Implemented physics-informed MLP with: (1) Arrhenius kinetics features (1/T, ln(t), 1/T*ln(t)), (2) Spange descriptors for solvent features, (3) Robust MLP with BatchNorm, Dropout(0.2), Sigmoid output, (4) HuberLoss for robustness, (5) TTA for mixed solvent symmetry, (6) Ensemble of 5 models per fold. Single Solvent CV RMSE: 0.08719 \u00b1 0.04350, Full Data CV RMSE: 0.08920 \u00b1 0.03871. This beats the reference score of 0.09831 from the Arrhenius kinetics notebook. Target is 0.047400 - need ~1.9x improvement.",
+            "experiment_folder": "/home/code/experiments/001_baseline",
+            "submission_path": "/home/submission/submission.csv"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Sx3kg47LfpZped28em1x6n",
+          "content": "Transitioning to next phase",
+          "is_error": false
+        }
+      ]
+    }
+  ],
+  "experiments": [
+    {
+      "id": "exp_000",
+      "name": "Physics-Informed MLP Baseline with Arrhenius Kinetics + TTA",
+      "model_type": "MLP",
+      "score": 0.08819,
+      "notes": "Implemented physics-informed MLP with: (1) Arrhenius kinetics features (1/T, ln(t), 1/T*ln(t)), (2) Spange descriptors for solvent features, (3) Robust MLP with BatchNorm, Dropout(0.2), Sigmoid output, (4) HuberLoss for robustness, (5) TTA for mixed solvent symmetry, (6) Ensemble of 5 models per fold. Single Solvent CV RMSE: 0.08719 \u00b1 0.04350, Full Data CV RMSE: 0.08920 \u00b1 0.03871. This beats the reference score of 0.09831 from the Arrhenius kinetics notebook. Target is 0.047400 - need ~1.9x improvement.",
+      "experiment_folder": "/home/code/experiments/001_baseline",
+      "timestamp": "2026-01-14T07:57:26.226994"
+    }
+  ],
   "submissions": [],
-  "candidates": [],
+  "candidates": [
+    {
+      "file_path": "/home/code/submission_candidates/candidate_000.csv",
+      "score": 0.08819,
+      "model_name": "Physics-Informed MLP Baseline with Arrhenius Kinetics + TTA",
+      "experiment_id": "exp_000",
+      "timestamp": "2026-01-14T07:57:26.227927"
+    }
+  ],
   "findings": [],
   "metric_lower_is_better": true,
   "strategy_history": [
@@ -87,5 +654,5 @@
   "last_submitted_experiment_idx": 0,
   "start_time": "2026-01-14T06:47:06.574262",
   "time_limit_minutes": 2100,
-  "_saved_at": "2026-01-14T06:51:41.052960"
+  "_saved_at": "2026-01-14T07:57:26.232476"
 }
