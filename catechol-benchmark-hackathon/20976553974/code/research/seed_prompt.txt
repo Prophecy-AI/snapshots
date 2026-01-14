@@ -1,21 +1,23 @@
-# Catechol Reaction Yield Prediction - Evolved Seed Prompt (Loop 3)
+# Catechol Reaction Yield Prediction - Evolved Seed Prompt (Loop 4)
 
 ## Current Status
 - Best CV score: 0.08053 from exp_002 (003_simple_rf_regularized)
 - Best LB score: Not yet submitted (0/5 submissions used)
-- Target: 0.01727 (4.7x gap)
+- Target: 0.01727 (4.7x gap from current best)
+- **Expected next score: 0.0623** (22.7% improvement from analysis)
 
 ## Response to Evaluator
-- Technical verdict was TRUSTWORTHY. Template compliance is now correct.
-- Evaluator's top priority: Try per-target heterogeneous ensemble approach from dabansherwani kernel.
-- Key concerns raised: 
-  1. Stagnating performance (~0.080-0.081 across 3 experiments)
-  2. Single feature set limitation (only Spange used)
-  3. Same model for all targets
-- **My response**: AGREE with all concerns. My analysis in `exploration/evolver_loop3_analysis.ipynb` confirms:
-  - Per-target heterogeneous + combined features achieves **0.0662 MAE** on single solvent (vs 0.0748 current)
-  - This is a **12% improvement** - significant and worth implementing
-  - Best weight: 0.8 acs_pca + 0.2 spange
+- Technical verdict was CONCERNS due to score discrepancy (reported 0.0813 vs calculated 0.0855)
+- Evaluator's top priority: Investigate and fix mixed solvent performance degradation
+- Key concerns raised:
+  1. Full data performance degraded from 0.0836 to 0.0895 (13.7% worse)
+  2. TTA may be causing overfitting
+  3. Gap to target remains massive (4.6x)
+
+**My response**: AGREE with all concerns. My analysis in `exploration/evolver_loop4_analysis.ipynb` CONFIRMS:
+- **TTA IS THE PROBLEM!** RF with TTA: 0.0932 vs RF without TTA: 0.0716 (30% worse with TTA!)
+- Removing TTA and using per-target approach achieves **0.0603 MAE on full data** (33% improvement!)
+- Expected combined score: **0.0623** (22.7% better than current 0.0805)
 
 ## Data Understanding
 Reference notebooks:
@@ -23,70 +25,127 @@ Reference notebooks:
 - `exploration/evolver_loop1_analysis.ipynb` - Target correlations, solvent analysis
 - `exploration/evolver_loop2_analysis.ipynb` - Model comparison, feature analysis
 - `exploration/evolver_loop3_analysis.ipynb` - Per-target heterogeneous model testing
+- `exploration/evolver_loop4_analysis.ipynb` - **TTA analysis, hybrid approach validation**
 
 Key patterns to exploit:
-1. **Per-target model differentiation**: SM behaves differently from Products (negative correlation -0.89)
-   - SM → HistGradientBoostingRegressor (max_depth=7, max_iter=700, lr=0.04)
-   - Products → ExtraTreesRegressor (n_estimators=500, min_samples_leaf=2, max_depth=10)
+1. **TTA HURTS mixed solvent performance** - DO NOT use data augmentation or test-time averaging
+2. **Per-target models work well for BOTH tasks** when TTA is removed
+3. **Combined features (0.8 acs_pca + 0.2 spange)** improve performance on both tasks
 
-2. **Feature combination**: Combining acs_pca + spange with weighted averaging improves performance
-   - Best weight: 0.8 acs_pca + 0.2 spange
-   - This captures different aspects of solvent chemistry
+## Recommended Approach (HIGH PRIORITY - IMPLEMENT THIS)
 
-3. **TTA for mixed solvents**: Chemical symmetry (A+B = B+A) should be exploited
+### Hybrid Per-Target Model WITHOUT TTA
 
-## Recommended Approaches (Priority Order)
+**Expected improvement: 0.0805 → 0.0623 (22.7% improvement)**
 
-### 1. Per-Target Heterogeneous Model with Combined Features (HIGH PRIORITY - IMPLEMENT THIS)
-**Expected improvement: 0.0805 → ~0.075 (7% improvement)**
+This approach was validated in `exploration/evolver_loop4_analysis.ipynb`:
+- Single solvent MAE: 0.0659 (same as exp_004)
+- Full data MAE: 0.0603 (vs 0.0895 in exp_004 - 33% improvement!)
+- Combined: 0.0623
 
-This approach was validated in `exploration/evolver_loop3_analysis.ipynb`:
-- Single solvent MAE: 0.0662 (vs current 0.0748)
-- Uses different models for different targets
-- Combines acs_pca + spange features with 0.8/0.2 weighting
+**CRITICAL CHANGES from exp_004:**
+1. **REMOVE TTA completely** - no data augmentation, no test-time averaging
+2. Use same per-target approach for BOTH single and mixed solvents
+3. Keep combined features (0.8 acs_pca + 0.2 spange)
 
-Key implementation details:
+**Implementation:**
 ```python
-class PerTargetHeterogeneousModel(BaseModel):
+class HybridPerTargetModel(BaseModel):
     def __init__(self, data='single'):
         self.data_type = data
+        self.mixed = (data == 'full')
         self.targets = ['Product 2', 'Product 3', 'SM']
-        self.models = {}
-        self.scalers = {}
         
         # Load both feature sets
         self.spange = pd.read_csv(f'{DATA_PATH}/spange_descriptors_lookup.csv', index_col=0)
         self.acs_pca = pd.read_csv(f'{DATA_PATH}/acs_pca_descriptors_lookup.csv', index_col=0)
         
-        # Different models for different targets
-        for t in self.targets:
-            if t == 'SM':
-                self.models[t] = {
-                    'spange': HistGradientBoostingRegressor(max_depth=7, max_iter=700, learning_rate=0.04),
-                    'acs': HistGradientBoostingRegressor(max_depth=7, max_iter=700, learning_rate=0.04)
-                }
+        # Scalers
+        self.scaler_spange = StandardScaler()
+        self.scaler_acs = StandardScaler()
+        
+        # Models for each target and feature set
+        self.models = {}
+    
+    def _build_features(self, X, feature_df):
+        rt = X['Residence Time'].values.reshape(-1, 1)
+        temp = X['Temperature'].values.reshape(-1, 1)
+        
+        # Arrhenius features
+        temp_k = temp + 273.15
+        inv_temp = 1000.0 / temp_k
+        log_time = np.log(rt + 1e-6)
+        interaction = inv_temp * log_time
+        
+        if self.mixed:
+            pct = X['SolventB%'].values.reshape(-1, 1)
+            A = feature_df.loc[X['SOLVENT A NAME']].values
+            B = feature_df.loc[X['SOLVENT B NAME']].values
+            solvent_feats = A * (1 - pct) + B * pct
+            return np.hstack([rt, temp, inv_temp, log_time, interaction, pct, solvent_feats])
+        else:
+            solvent_feats = feature_df.loc[X['SOLVENT NAME']].values
+            return np.hstack([rt, temp, inv_temp, log_time, interaction, solvent_feats])
+    
+    def train_model(self, X_train, y_train):
+        # Build features - NO AUGMENTATION!
+        X_spange = self._build_features(X_train, self.spange)
+        X_acs = self._build_features(X_train, self.acs_pca)
+        
+        # Scale
+        X_spange_sc = self.scaler_spange.fit_transform(X_spange)
+        X_acs_sc = self.scaler_acs.fit_transform(X_acs)
+        
+        y = y_train.values
+        
+        # Train per-target models
+        for i, target in enumerate(self.targets):
+            if target == 'SM':
+                model_spange = HistGradientBoostingRegressor(
+                    max_depth=7, max_iter=700, learning_rate=0.04, random_state=42
+                )
+                model_acs = HistGradientBoostingRegressor(
+                    max_depth=7, max_iter=700, learning_rate=0.04, random_state=42
+                )
             else:
-                self.models[t] = {
-                    'spange': ExtraTreesRegressor(n_estimators=500, min_samples_leaf=2, max_depth=10, n_jobs=-1, random_state=42),
-                    'acs': ExtraTreesRegressor(n_estimators=500, min_samples_leaf=2, max_depth=10, n_jobs=-1, random_state=42)
-                }
+                model_spange = ExtraTreesRegressor(
+                    n_estimators=500, max_depth=10, min_samples_leaf=2, 
+                    random_state=42, n_jobs=-1
+                )
+                model_acs = ExtraTreesRegressor(
+                    n_estimators=500, max_depth=10, min_samples_leaf=2,
+                    random_state=42, n_jobs=-1
+                )
+            
+            model_spange.fit(X_spange_sc, y[:, i])
+            model_acs.fit(X_acs_sc, y[:, i])
+            
+            self.models[target] = {'spange': model_spange, 'acs': model_acs}
+    
+    def predict(self, X):
+        # Build features - NO TTA!
+        X_spange = self._build_features(X, self.spange)
+        X_acs = self._build_features(X, self.acs_pca)
+        
+        X_spange_sc = self.scaler_spange.transform(X_spange)
+        X_acs_sc = self.scaler_acs.transform(X_acs)
+        
+        preds_all = []
+        for target in self.targets:
+            p_spange = self.models[target]['spange'].predict(X_spange_sc)
+            p_acs = self.models[target]['acs'].predict(X_acs_sc)
+            # Weighted combination: 0.8 acs + 0.2 spange
+            p_combined = 0.8 * p_acs + 0.2 * p_spange
+            preds_all.append(p_combined.reshape(-1, 1))
+        
+        preds = np.hstack(preds_all)
+        preds = np.clip(preds, 0, 1)
+        return torch.tensor(preds, dtype=torch.double)
 ```
 
-Feature building:
-- Process features: Residence Time, Temperature, inv_temp (1000/T_K), log_time, interaction
-- Solvent features: Weighted mix for mixed solvents
-- TTA: Train on both orderings, predict with both and average
-
-Prediction weighting:
-- 0.8 * acs_pca predictions + 0.2 * spange predictions
-
-### 2. ExtraTrees with Optimal Regularization (BACKUP)
-If per-target approach doesn't work:
-- max_depth=10, min_samples_leaf=2, n_estimators=500
-- Achieved 0.0687 MAE in analysis
-
 ## What NOT to Try
-- Simple Random Forest with Spange only (already tried, 0.0748)
+- **TTA (Test-Time Augmentation)** - CONFIRMED to hurt performance by 30%!
+- Simple Random Forest with Spange only (already tried, 0.0748 single, 0.0836 full)
 - Complex MLP+GBDT ensemble (already tried, 0.081)
 - DRFP features with Ridge (0.097 MAE - worse than Spange)
 
@@ -97,9 +156,32 @@ If per-target approach doesn't work:
 
 ## Template Compliance Reminder
 - Last 3 cells must be EXACTLY as template
-- Only change: `model = PerTargetHeterogeneousModel(data='single')` and `model = PerTargetHeterogeneousModel(data='full')`
+- Only change: `model = HybridPerTargetModel(data='single')` and `model = HybridPerTargetModel(data='full')`
 - No cells after the final submission cell
 
 ## Target Score
-Beat **0.017270** (lower is better). Current gap is 4.7x.
-Expected improvement from per-target approach: 0.0805 → ~0.075 (7% improvement)
+Beat **0.017270** (lower is better). 
+- Current best: 0.0805 (4.7x gap)
+- Expected next: 0.0623 (3.6x gap)
+- Still need ~3.6x improvement to reach target
+
+## After This Experiment
+If 0.0623 is achieved, consider:
+1. **Submit to verify CV-LB correlation** - we have 5 submissions available
+2. Try Gaussian Process models for uncertainty quantification
+3. Explore higher-dimensional features (DRFP 2048-dim) with appropriate regularization
+4. Consider pre-trained molecular transformers if time permits
+
+## 🚨 COMPETITION-SPECIFIC RULES (MUST ENFORCE) 🚨
+
+**MANDATORY SUBMISSION STRUCTURE:**
+- The submission must have the same last three cells as in the notebook template
+- The ONLY allowed change is the line where the model is defined
+- The line `model = MLPModel()` can be replaced with a new model definition
+- Everything else in the last three cells MUST remain exactly the same
+
+**VALIDATION STRATEGY:**
+- The test set contains COMPLETELY NEW SOLVENTS that are NOT in training
+- Use leave-one-solvent-out (24 folds) for single solvent
+- Use leave-one-ramp-out (13 folds) for full data
+- This simulates the actual test scenario where we predict on unseen solvents
