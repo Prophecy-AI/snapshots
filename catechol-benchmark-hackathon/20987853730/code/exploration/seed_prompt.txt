@@ -1,0 +1,142 @@
+# Chemical Reaction Yield Prediction - Seed Prompt
+
+## Problem Overview
+This is a multi-output regression problem predicting 3 chemical reaction yields (SM, Product 2, Product 3) based on solvent conditions, temperature, and residence time. The challenge is to generalize to unseen solvents/solvent mixtures.
+
+**Target Score:** 0.017270 (lower is better - this is very aggressive, current best public ~0.098)
+
+## Data Understanding
+**Reference notebooks:** `exploration/eda.ipynb`
+
+Key characteristics:
+- Full data: 1227 samples with solvent mixtures (A + B at various percentages)
+- Single solvent data: 656 samples with 24 unique solvents
+- Targets: SM, Product 2, Product 3 (yields in 0-1 range, some exceed 1.0 due to measurement noise)
+- Features: Residence Time (2-15 min), Temperature (175-225°C), Solvent descriptors
+
+## Cross-Validation Strategy (CRITICAL)
+The competition uses a specific leave-one-out CV:
+- **Task 0 (Single Solvent):** Leave-one-solvent-out (24 folds) - must generalize to completely unseen solvents
+- **Task 1 (Full Data):** Leave-one-ramp-out - each ramp is a unique (SOLVENT A, SOLVENT B) pair
+
+This means the model must learn to generalize to NEW solvents it has never seen during training.
+
+## Solvent Featurization Options
+Available lookup tables (indexed by solvent name):
+1. **Spange descriptors** (13 features): dielectric constant, ET(30), alpha, beta, pi*, SA, SB, SP, SdP, N, n, f(n), delta - MOST COMMONLY USED
+2. **ACS PCA descriptors** (5 features): PCA of green chemistry properties
+3. **DRFP** (2048 features): Differential reaction fingerprints
+4. **Fragprints** (2133 features): Concatenation of fragments and fingerprints
+
+For mixed solvents: Use weighted average of features: `A * (1-pct) + B * pct` where pct is SolventB%
+
+## Physics-Informed Feature Engineering (KEY INSIGHT)
+
+### Arrhenius Kinetics Features
+Chemical reactions follow Arrhenius kinetics. Transform features accordingly:
+```
+temp_k = Temperature + 273.15  # Convert to Kelvin
+inv_temp = 1000.0 / temp_k     # Inverse temperature (Arrhenius)
+log_time = log(Residence Time) # Log of time
+interaction = inv_temp * log_time  # Interaction term
+```
+
+### Additional Numeric Features
+- rt^2, temp^2 (polynomial)
+- log1p(rt), log1p(temp)
+- rt * temp (interaction)
+- Reaction_Energy = Temperature * Residence Time
+- B_Conc_Temp = SolventB% * Temperature
+
+## Chemical Symmetry (TTA for Mixed Solvents)
+**Critical insight:** A mixture of "Solvent A + Solvent B" is physically identical to "Solvent B + Solvent A".
+
+**Test Time Augmentation (TTA):**
+1. Predict with input as (A, B, pct)
+2. Predict with input as (B, A, 1-pct) [flipped]
+3. Average the two predictions
+
+This can also be used during training as data augmentation.
+
+## Model Architectures
+
+### MLP (Primary Approach)
+Architecture that works well:
+- BatchNorm1d(input_dim)
+- Linear(input_dim, 128) → BatchNorm → ReLU → Dropout(0.2)
+- Linear(128, 128) → BatchNorm → ReLU → Dropout(0.2)
+- Linear(128, 64) → BatchNorm → ReLU → Dropout(0.2)
+- Linear(64, 3) → Sigmoid (or no activation with clipping)
+
+Training:
+- Loss: HuberLoss (robust to outliers) or SmoothL1Loss
+- Optimizer: Adam/AdamW with lr=5e-4, weight_decay=1e-5
+- Scheduler: ReduceLROnPlateau or CosineAnnealingLR
+- Epochs: 250-300
+- Batch size: 32
+- Gradient clipping: 1.0
+
+### XGBoost Alternative
+- MultiOutputRegressor with XGBRegressor
+- n_estimators=1500, learning_rate=0.015, max_depth=6
+- subsample=0.8, colsample_bytree=0.9
+
+## Ensembling Strategies
+
+### Bagging (Seed Ensemble)
+Train 5-7 models with different random seeds, average predictions.
+
+### Model Diversity
+Combine different approaches:
+- MLP with Spange descriptors
+- MLP with DRFP features
+- XGBoost with engineered features
+- Gaussian Process (if computationally feasible)
+
+## Post-Processing
+1. **Clip predictions** to [0, 1] range
+2. **Optional normalization:** Ensure SM + Product2 + Product3 ≈ 1 (chemical constraint)
+   - Divide each row by its sum
+
+## Strategies to Beat Target Score
+
+### 1. Better Solvent Representations
+- Combine multiple descriptor types (Spange + ACS + DRFP)
+- Learn solvent embeddings during training
+- Use molecular fingerprints directly from SMILES
+
+### 2. Advanced Architectures
+- Attention mechanisms for solvent features
+- Graph Neural Networks on molecular structures
+- Multi-task learning with shared representations
+
+### 3. Gaussian Processes
+- Can provide uncertainty estimates
+- Multi-task GP for correlated outputs
+- Good for small data with proper kernel design
+
+### 4. Meta-Learning
+- Since we need to generalize to unseen solvents, meta-learning approaches (MAML, Prototypical Networks) might help
+
+### 5. Domain Adaptation
+- Treat unseen solvents as domain shift problem
+- Use domain-invariant representations
+
+### 6. Physical Constraints
+- Enforce that yields sum to ~1
+- Use softmax output layer
+- Physics-informed neural networks
+
+## Implementation Notes
+
+### Required Submission Format
+The notebook must follow the template structure with specific last 3 cells unchanged (except model definition line).
+
+### Key Files
+- `/home/data/catechol_full_data_yields.csv` - Full data with mixtures
+- `/home/data/catechol_single_solvent_yields.csv` - Single solvent data
+- `/home/data/spange_descriptors_lookup.csv` - Spange features
+- `/home/data/utils.py` - CV split generators
+
+### Evaluation
+Custom metric (catechol_hackathon_metric) - likely MSE or MAE based on CV predictions.
