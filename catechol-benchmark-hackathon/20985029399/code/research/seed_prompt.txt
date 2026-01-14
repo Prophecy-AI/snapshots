@@ -1,41 +1,52 @@
-# Catechol Reaction Yield Prediction - Evolved Seed Prompt (Loop 2)
+# Catechol Reaction Yield Prediction - Evolved Seed Prompt (Loop 3)
 
 ## Current Status
 - Best CV score: **0.08819** from exp_000 (Physics-Informed MLP Baseline)
-- Best LB score: Not yet submitted
-- Target: **0.04740** (need ~46% RMSE reduction)
-- Submissions remaining: 5/5
+- Best LB score: Not yet submitted (0/5 submissions used)
+- Target: **0.04740** (need ~46% improvement)
+- CV-LB gap: Unknown - NEED TO SUBMIT to calibrate
 
 ## Response to Evaluator
 
-**Technical verdict**: TRUSTWORTHY - The evaluator confirmed sound validation methodology with no leakage.
+**Technical verdict was TRUSTWORTHY** - the evaluator confirmed that validation methodology is sound and scores are verified.
 
-**Evaluator's top priority**: Debug and fully test TabPFN. 
-- **My response**: TabPFN v6.3.0 requires HuggingFace authentication for gated model access. The older v0.1.10 only supports classification, not regression. This is a dead end without HF credentials. **Pivoting to feature expansion and architecture improvements instead.**
+**Evaluator's top priority: IMPLEMENT TabPFN**
+- I AGREE this was a good recommendation, but TabPFN requires HuggingFace authentication which failed in exp_001
+- The executor noted: "TabPFN was attempted but requires HuggingFace authentication for the gated model"
+- **Alternative approach needed**: Try Gaussian Process regression instead, which is also designed for small data
 
-**Key concerns raised**:
-1. **Ensemble with weak components** - Agreed. LightGBM (0.10019) dragged down the ensemble. Will not include weak models in future ensembles.
-2. **Feature space not explored** - Agreed. DRFP and fragprints are available but unused. Analysis shows they have only ~150 non-zero columns each, so PCA to 20-50 components is feasible.
-3. **Large gap to target** - Agreed. Need fundamentally different approaches, not incremental tweaks.
+**Key concerns raised by evaluator:**
+1. Feature expansion backfired (22% degradation) - ADDRESSED: Abandon fingerprint features
+2. Deeper network may have overfit - ADDRESSED: Return to simpler architecture
+3. Large gap to target remains - ADDRESSED: Need fundamentally different approaches
+
+**My synthesis:**
+The evaluator correctly identified that incremental MLP improvements won't close the 46% gap. However, since TabPFN has authentication issues, we need alternative approaches:
+1. **Gaussian Process Regression** - designed for small data, provides uncertainty
+2. **Non-linear solvent mixing** - current linear mixing may be limiting
+3. **Per-target optimization** - SM follows different kinetics than products
+4. **Stronger regularization** - prevent overfitting on small data
 
 ## Data Understanding
 
 **Reference notebooks:**
-- `exploration/eda.ipynb` - Full EDA with data shapes, distributions
-- `exploration/evolver_loop2_analysis.ipynb` - Gap analysis, feature exploration
+- `exploration/eda.ipynb` - Data structure, feature distributions
+- `exploration/evolver_loop3_analysis.ipynb` - Target correlations, solvent isolation analysis
 
 **Key patterns to exploit:**
+1. **Strong process-target correlations:**
+   - SM: -0.817 with Temperature, -0.275 with Residence Time
+   - Products: +0.723 (P2), +0.573 (P3) with Temperature
+   - This confirms Arrhenius kinetics features are valuable
 
-1. **Feature expansion opportunity**: DRFP (2048→165 non-zero) and fragprints (2133→144 non-zero) can be reduced to ~20-50 PCs capturing 100% variance. These may contain patterns Spange descriptors miss.
+2. **Isolated solvents are hardest to predict:**
+   - Cyclohexane (NN distance = 4.06) - very different from others
+   - Ethylene Glycol (3.32), Decanol (2.72), Water (2.61)
+   - These likely contribute most to CV error
 
-2. **Non-linear solvent mixing**: Current linear interpolation `A*(1-pct) + B*pct` may not capture real mixture effects. Try:
-   - Concatenate both solvent features + mixing ratio (don't interpolate)
-   - Add interaction terms between A and B features
-   - Add polynomial terms of mixing ratio
-
-3. **Per-solvent variance**: Some solvents (Acetonitrile.Acetic Acid, IPA, Decanol) have very high SM variance (>0.43). These are harder to predict and may need special handling.
-
-4. **Baseline gap**: Predicting mean gives RMSE=0.2353. Our best (0.08819) is 62.5% better. Target requires another 46% improvement - this is substantial.
+3. **Spange descriptors capture key solvent effects:**
+   - ET(30), SA, alpha have highest correlations with targets
+   - These are polarity/hydrogen-bonding parameters
 
 ## CRITICAL SUBMISSION CONSTRAINTS
 
@@ -44,143 +55,112 @@
 - Only the last 3 cells can be modified, and ONLY the `model = MLPModel()` line can be changed
 - Model must implement: `train_model(X_train, y_train)` and `predict(X_test)` methods
 - Two tasks: single_solvent (leave-one-solvent-out CV, 24 folds) and full (leave-one-ramp-out CV, 13 folds)
-- Target order in Y: ["Product 2", "Product 3", "SM"]
 
 ## Recommended Approaches (Priority Order)
 
-### Priority 1: Feature Expansion with DRFP/Fragprints + PCA
-**Why**: Spange descriptors (13 features) may not capture all relevant chemistry. DRFP captures reaction fingerprints, fragprints capture molecular fragments.
-
-**Implementation:**
-```python
-from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler
-
-# Load and reduce DRFP
-drfp = pd.read_csv(f'{DATA_PATH}/drfps_catechol_lookup.csv', index_col=0)
-scaler = StandardScaler()
-drfp_scaled = scaler.fit_transform(drfp)
-pca = PCA(n_components=20)  # or 30-50
-drfp_pca = pca.fit_transform(drfp_scaled)
-
-# Combine with Spange
-combined_features = np.hstack([spange_features, drfp_pca_features])
-```
-
-**Expected impact**: Medium-high. Different feature representations often capture different patterns.
-
-### Priority 2: Non-Linear Solvent Mixing Features
-**Why**: Linear interpolation assumes properties mix linearly, but real solvent mixtures often have non-linear effects.
-
-**Implementation:**
-```python
-# Instead of: mixed = A * (1-pct) + B * pct
-# Try concatenation:
-mixed = np.hstack([A_features, B_features, pct, pct**2, A_features * pct, B_features * (1-pct)])
-```
-
-**Expected impact**: Medium. May help with full data task specifically.
-
-### Priority 3: Deeper/Wider MLP Architecture
-**Why**: Current architecture [128, 128, 64] may be too shallow for the complexity.
-
-**Implementation:**
-```python
-# Try deeper architecture
-hidden_dims = [256, 256, 128, 64]  # or [512, 256, 128, 64]
-
-# Add residual connections
-class ResidualBlock(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(dim, dim),
-            nn.BatchNorm1d(dim),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(dim, dim),
-            nn.BatchNorm1d(dim)
-        )
-    def forward(self, x):
-        return F.relu(x + self.net(x))
-```
-
-**Expected impact**: Medium. More capacity may help if features are rich enough.
-
-### Priority 4: Per-Target Specialized Models
-**Why**: SM (starting material) follows different kinetics than products. Separate optimization may help.
-
-**Implementation:**
-```python
-class PerTargetModel:
-    def __init__(self):
-        self.models = [MLPModel() for _ in range(3)]  # One per target
-    
-    def train_model(self, X_train, y_train):
-        for i, model in enumerate(self.models):
-            model.train_model(X_train, y_train[:, i:i+1])
-    
-    def predict(self, X_test):
-        preds = [m.predict(X_test) for m in self.models]
-        return torch.cat(preds, dim=1)
-```
-
-**Expected impact**: Medium. Different targets may have different optimal architectures.
-
-### Priority 5: Gaussian Process Regression
-**Why**: Good for small data with uncertainty quantification. May work well given dataset size (~650-1200 samples).
+### Priority 1: Gaussian Process Regression with RBF Kernel
+**Rationale:** GP is specifically designed for small datasets and provides uncertainty estimates. The GAUCHE library has chemistry-specific kernels, but even a simple RBF kernel on Spange descriptors could work well.
 
 **Implementation:**
 ```python
 from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import RBF, Matern, WhiteKernel
+from sklearn.gaussian_process.kernels import RBF, WhiteKernel, ConstantKernel
 
-kernel = Matern(nu=2.5) + WhiteKernel()
-gp = GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=10)
+class GPModel:
+    def __init__(self, data='single'):
+        self.data_type = data
+        self.featurizer = KineticFeaturizer(mixed=(data=='full'))
+        self.models = []  # One per target
+        
+    def train_model(self, X_train, y_train):
+        X_feats = self.featurizer.featurize(X_train)
+        y_vals = y_train.values
+        
+        kernel = ConstantKernel(1.0) * RBF(length_scale=1.0) + WhiteKernel(noise_level=0.1)
+        
+        for i in range(3):  # 3 targets
+            gp = GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=5, normalize_y=True)
+            gp.fit(X_feats, y_vals[:, i])
+            self.models.append(gp)
+    
+    def predict(self, X_test):
+        X_feats = self.featurizer.featurize(X_test)
+        preds = []
+        for model in self.models:
+            pred, _ = model.predict(X_feats, return_std=True)
+            preds.append(pred)
+        return torch.tensor(np.column_stack(preds))
 ```
 
-**Expected impact**: Medium. May provide different error patterns for ensembling.
+### Priority 2: Non-linear Solvent Mixing for Full Data
+**Rationale:** Current approach uses linear interpolation: `A*(1-pct) + B*pct`. This may not capture non-linear mixing effects.
+
+**Implementation options:**
+1. **Concatenate features:** `[A_features, B_features, pct]` instead of interpolating
+2. **Add interaction terms:** `A_features * B_features * pct`
+3. **Separate models:** Train different models for different mixing ratios
+
+```python
+class NonLinearMixingFeaturizer:
+    def featurize(self, X, flip=False):
+        # ... kinetic features ...
+        
+        if self.mixed:
+            A_feats = self.spange.loc[X["SOLVENT A NAME"]].values
+            B_feats = self.spange.loc[X["SOLVENT B NAME"]].values
+            pct = X["SolventB%"].values.reshape(-1, 1)
+            
+            # Concatenate instead of interpolate
+            X_solvent = np.hstack([A_feats, B_feats, pct, A_feats * B_feats])
+            # Or add interaction: A_feats * pct, B_feats * (1-pct), A_feats * B_feats
+```
+
+### Priority 3: Per-Target Optimization
+**Rationale:** SM follows different kinetics than products. SM decreases monotonically with reaction progress, while products have more complex behavior.
+
+**Implementation:**
+- Train separate models for SM vs Products
+- Use different architectures/hyperparameters per target
+- SM: simpler model (more predictable)
+- Products: more complex model (non-linear behavior)
+
+### Priority 4: Stronger Regularization on MLP
+**Rationale:** With only 656/1227 samples and 18 features, overfitting is a risk.
+
+**Changes to try:**
+- Increase dropout: 0.3 or 0.4 instead of 0.2
+- Increase weight decay: 1e-4 instead of 1e-5
+- Simpler architecture: [64, 64] instead of [128, 128, 64]
+- Earlier stopping: patience=10 instead of 20
+
+### Priority 5: Submit Best Model for LB Calibration
+**Rationale:** We have 5 submissions remaining and 0 used. We need to verify CV-LB correlation.
+
+**Action:** After trying GP or non-linear mixing, submit the best result to calibrate.
 
 ## What NOT to Try
 
-1. **TabPFN** - Requires HuggingFace authentication for gated model. Dead end.
-2. **LightGBM/XGBoost alone** - Already tested, performs worse than MLP (0.10019 vs 0.08819).
-3. **Simple ensemble with weak models** - Dragged down performance. Only ensemble strong models.
-4. **Hyperparameter tuning on current architecture** - Need fundamentally different approaches first.
+1. **Feature expansion with DRFP/Fragprints** - Already tried, made things worse (0.10767)
+2. **Deeper networks** - More capacity = more overfitting on small data
+3. **TabPFN** - Requires HuggingFace authentication which failed
+4. **Pure tree-based models** - LightGBM/XGBoost alone performed worse than MLP
 
 ## Validation Notes
 
-- **CV scheme**: Leave-one-solvent-out (24 folds) for single, leave-one-ramp-out (13 folds) for full
-- **Metric**: RMSE averaged across both tasks
-- **No LB submissions yet** - Should submit once we see CV improvement to calibrate CV-LB gap
+- **Single Solvent:** Leave-one-solvent-out CV (24 folds)
+- **Full Data:** Leave-one-ramp-out CV (13 folds)
+- **Overall score:** Average of both task scores
+- **Key insight:** This tests GENERALIZATION to unseen solvents, not interpolation
 
-## Implementation Checklist
+## Implementation Order
 
-1. ✅ Model class with `train_model(X_train, y_train)` and `predict(X_test)` methods
-2. ✅ Featurizer that handles both single and mixed solvents
-3. ✅ Physics-informed features (Arrhenius kinetics)
-4. ✅ TTA for mixed solvent symmetry
-5. ✅ Ensemble of multiple seeds
-6. ⬜ Feature expansion with DRFP/fragprints
-7. ⬜ Non-linear mixing features
-8. ⬜ Deeper architecture with residual connections
-9. ⬜ Per-target specialized models
+1. **First:** Try Gaussian Process with RBF kernel on baseline features
+2. **Second:** If GP doesn't improve, try non-linear solvent mixing
+3. **Third:** Try stronger regularization on MLP
+4. **Fourth:** Submit best result for LB feedback
 
-## Next Experiment Recommendation
+## Key Code References
 
-**Experiment 003: Feature Expansion + Deeper MLP**
-
-Combine:
-1. Spange descriptors (13 features)
-2. DRFP with PCA to 20 components
-3. Arrhenius kinetics features (3 features)
-4. Deeper MLP [256, 256, 128, 64] with residual connections
-5. TTA for mixed solvents
-6. Ensemble of 5 models
-
-This addresses the evaluator's concern about unexplored feature space while maintaining the proven MLP architecture.
-
-**Alternative if Feature Expansion doesn't help:**
-- Try non-linear mixing features (concatenate A+B instead of interpolate)
-- Try Gaussian Process as a different model family
-- Try per-target specialized models with different architectures
+- Baseline MLP: `/home/code/experiments/001_baseline/baseline.ipynb`
+- Featurizer with Arrhenius: Same notebook, `KineticFeaturizer` class
+- Template structure: Must follow Kaggle template exactly
