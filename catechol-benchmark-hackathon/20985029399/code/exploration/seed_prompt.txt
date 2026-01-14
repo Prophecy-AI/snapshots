@@ -1,0 +1,205 @@
+# Catechol Reaction Yield Prediction - Seed Prompt
+
+## Competition Overview
+This is a chemistry/reaction yield prediction problem. The goal is to predict yields (SM, Product 2, Product 3) for the allyl substituted catechol reaction under different solvent conditions and process parameters (temperature, residence time).
+
+**Reference notebooks for data characteristics:**
+- `exploration/eda.ipynb` - Contains full EDA: data shapes, feature distributions, target distributions, solvent counts
+
+## CRITICAL SUBMISSION CONSTRAINTS
+
+**MANDATORY STRUCTURE:**
+- The submission MUST follow the template notebook structure
+- Only the last 3 cells can be modified, and ONLY the `model = MLPModel()` line can be changed
+- Model must implement: `train_model(X_train, y_train)` and `predict(X_test)` methods
+- Two tasks: single_solvent (leave-one-solvent-out CV, 24 folds) and full (leave-one-ramp-out CV, 13 folds)
+- Target order in Y: ["Product 2", "Product 3", "SM"]
+
+**DATA CONTAMINATION RULES:**
+- Pre-training on solvent mixture data to predict full solvent data = NOT ALLOWED
+- Different hyperparameters for different tasks (full vs single) ARE allowed
+- Different hyperparameters for different objectives (SM vs Product 1) ARE allowed
+
+## Key Data Characteristics
+
+**Single Solvent Data:**
+- 656 samples, 24 unique solvents
+- Leave-one-solvent-out CV (24 folds, ~27 samples per solvent on average)
+- Temperature: 175-225°C, Residence Time: 2-15 minutes
+
+**Full Data (Mixtures):**
+- 1227 samples, 13 unique solvent pair ramps
+- Leave-one-ramp-out CV (13 folds)
+- SolventB% ranges from 0.0 to 1.0 (continuous mixing ratio)
+
+**Targets:**
+- SM (starting material), Product 2, Product 3 - all yields in [0, 1]
+- Targets are NOT constrained to sum to 1 (can have side products)
+
+**Feature Lookup Tables Available:**
+- Spange descriptors (13 features) - physical/chemical properties - MOST COMMONLY USED
+- ACS PCA descriptors (5 features) - PCA of green chemistry properties
+- DRFP (2048 features) - differential reaction fingerprints
+- Fragprints (2133 features) - molecular fingerprints
+
+## Winning Approaches from Top Kernels
+
+### 1. Physics-Informed Features (Arrhenius Kinetics) - Score: 0.09831
+**Key insight:** Chemical reactions follow Arrhenius kinetics where rate depends on temperature exponentially.
+
+**Feature Engineering:**
+```python
+temp_k = temp_c + 273.15  # Convert to Kelvin
+inv_temp = 1000.0 / temp_k  # Inverse temperature (Arrhenius)
+log_time = np.log(time + 1e-6)  # Log residence time
+interaction = inv_temp * log_time  # Kinetic interaction term
+```
+
+**Test Time Augmentation (TTA) for Symmetry:**
+- For mixed solvents, (A, B) is chemically identical to (B, A)
+- Predict with both orderings and average: `final = (pred_AB + pred_BA) / 2`
+- Also augment training data with both orderings
+
+### 2. Robust MLP Architecture
+**Architecture:**
+- BatchNorm1d at input
+- Hidden layers: [128, 128, 64] with BatchNorm, ReLU, Dropout(0.2)
+- Sigmoid output (constrains predictions to [0, 1])
+
+**Training:**
+- HuberLoss (robust to outliers) instead of MSE
+- Adam optimizer with lr=5e-4, weight_decay=1e-5
+- ReduceLROnPlateau scheduler (factor=0.5, patience=20)
+- Gradient clipping: clip_grad_norm_(1.0)
+- 300 epochs
+
+### 3. Ensemble/Bagging
+- Train 5-7 models with different seeds
+- Average predictions for final output
+- Reduces variance significantly
+
+### 4. Additional Feature Engineering
+From other kernels:
+- `rt^2`, `temp^2` - polynomial features
+- `log1p(rt)`, `log1p(temp)` - log transforms
+- `rt * temp` - interaction term
+- StandardScaler for all numeric features
+
+## Model Recommendations
+
+### Primary Approach: Physics-Informed MLP with TTA
+1. **Feature Engineering:**
+   - Use Spange descriptors (13 features) as base
+   - Add Arrhenius-inspired features: 1/T, ln(t), 1/T * ln(t)
+   - StandardScaler normalization
+
+2. **Architecture:**
+   - Input BatchNorm
+   - 3-4 hidden layers [128, 128, 64] or [256, 128, 64]
+   - BatchNorm + ReLU + Dropout(0.2) after each hidden layer
+   - Sigmoid output layer
+
+3. **Training:**
+   - HuberLoss or SmoothL1Loss
+   - AdamW optimizer (lr=5e-4, weight_decay=1e-5)
+   - CosineAnnealingLR or ReduceLROnPlateau
+   - Early stopping with patience ~30
+   - 200-300 epochs
+
+4. **Inference:**
+   - For full data: TTA with symmetric solvent swapping
+   - Ensemble 5-7 models with different seeds
+
+### Alternative Approaches to Try
+
+**TabPFN (Tabular Foundation Model):**
+- Transformer pre-trained on millions of synthetic datasets
+- Excels on small tabular datasets (<10K samples)
+- No hyperparameter tuning needed
+- Particularly strong for regression on chemistry data
+- May work well given our small dataset size
+
+**Gradient Boosting (XGBoost/LightGBM):**
+- MultiOutputRegressor wrapper
+- Feature engineering same as MLP
+- Post-processing: clip to [0, 1]
+- May work well for single solvent task
+
+**Gaussian Process:**
+- Good for small data with uncertainty quantification
+- Use Spange descriptors as kernel features
+- Iterative refinement possible
+
+## Solvent Featurization for Mixed Solvents
+
+**Linear Mixing (Standard Approach):**
+```python
+mixed_features = A_features * (1 - pct_B) + B_features * pct_B
+```
+
+**Considerations:**
+- This assumes linear interpolation of solvent properties
+- May not capture non-linear mixing effects
+- Alternative: concatenate both solvent features + mixing ratio
+
+## Validation Strategy
+
+**Single Solvent Task:**
+- Leave-one-solvent-out CV (24 folds)
+- Each fold leaves out all data for one solvent
+- Tests generalization to unseen solvents
+
+**Full Data Task:**
+- Leave-one-ramp-out CV (13 folds)
+- Each fold leaves out one solvent pair combination
+- Tests generalization to unseen solvent mixtures
+
+## Post-Processing
+
+1. **Clip predictions to [0, 1]:** `predictions = np.clip(predictions, 0, 1)`
+2. **Optional normalization:** Some approaches normalize rows to sum to 1, but this may not be physically correct for this reaction
+
+## Key Insights from Research
+
+1. **Solvent descriptors matter:** Spange descriptors (physical/chemical properties) work better than fingerprints for this task
+2. **Physics-informed features help:** Arrhenius kinetics features significantly improve predictions
+3. **Symmetry exploitation:** TTA for mixed solvents provides free performance boost
+4. **Robust loss functions:** HuberLoss handles outliers better than MSE
+5. **Ensemble reduces variance:** 5-7 model ensemble with different seeds
+6. **Small data considerations:** TabPFN or other foundation models may help with limited samples
+
+## Advanced Techniques from Literature
+
+**Physics-Informed Neural Networks (PINNs):**
+- Embed Arrhenius law directly into loss function
+- Can learn rate constants while respecting physics
+- Three-stage training: fit data → learn physics → fine-tune
+
+**Chemical Reaction Neural Networks (CRNNs):**
+- Encode mass action and Arrhenius laws in architecture
+- Interpretable kinetic parameters
+- Good for uncertainty quantification
+
+**Data Augmentation for Chemistry:**
+- SMILES randomization (different valid SMILES for same molecule)
+- Reaction SMILES permutation
+- Symmetric solvent swapping (already implemented in TTA)
+
+## Implementation Checklist
+
+1. ✅ Model class with `train_model(X_train, y_train)` and `predict(X_test)` methods
+2. ✅ Featurizer that handles both single and mixed solvents
+3. ✅ Physics-informed features (Arrhenius kinetics)
+4. ✅ TTA for mixed solvent symmetry
+5. ✅ Ensemble of multiple seeds
+6. ✅ Robust loss function (Huber/SmoothL1)
+7. ✅ Proper normalization (StandardScaler)
+8. ✅ Output clipping to [0, 1]
+
+## Target Score
+Beat **0.047400** (lower is better - likely RMSE or similar metric)
+
+Current best public kernel: 0.09831 with Arrhenius kinetics + TTA approach
+
+**Gap to close:** Need ~2x improvement from best public approach to beat target.
+Consider: deeper ensembles, better feature engineering, alternative architectures (TabPFN), or combining multiple approaches.
