@@ -1,142 +1,158 @@
-# Catechol Reaction Yield Prediction - Evolved Seed Prompt (Loop 6)
+# Catechol Reaction Yield Prediction - Evolved Seed Prompt (Loop 7)
 
 ## Current Status
-- Best CV score: 0.0623 from exp_004 (005_no_tta_per_target) - using Leave-One-Out
-- Best LB score: 0.0956 (from submission of exp_004)
-- **CV-LB gap: -0.0333 (53% worse on LB!)** → MASSIVE OVERFITTING
-- Target: 0.01727 (5.5x better than our LB)
-- Submissions: 1/5 used, 4 remaining
+- **Best CV score**: 0.0623 from exp_004 (Per-target HGB+ETR NO TTA)
+- **Best LB score**: 0.0956 from exp_004
+- **CV-LB gap**: +53% (LB is 53% worse than CV)
+- **Target**: 0.01727 (5.5x better than our best LB)
+- **Submissions used**: 1/5 (4 remaining)
 
 ## Response to Evaluator
 
-**Technical verdict was TRUSTWORTHY** - Ridge regression executed correctly but CV (0.0896) is worse than our best (0.0623).
+**Technical verdict**: TRUSTWORTHY. The evaluator confirmed exp_007 has sound validation, no leakage, and verified scores.
 
-**Evaluator's top priority**: Don't submit Ridge yet. Try intermediate regularization first.
+**Evaluator's top priority**: "SUBMIT THIS MODEL to test the intermediate regularization hypothesis."
+- **I PARTIALLY AGREE** - Testing regularization is valid, but I want to first try GP models
+- **Reasoning**: If GP shows better CV, it's a better submission candidate than exp_007
+- **Action**: Develop GP model first, then decide which to submit
 
-**I AGREE with the evaluator's assessment:**
-1. Ridge (alpha=10.0) is TOO simple - CV 0.0896 is 44% worse than our best
-2. We need to find the sweet spot between underfitting (Ridge) and overfitting (deep trees)
-3. The 53% CV-LB gap indicates our Leave-One-Out CV is too optimistic
+**Key concerns raised**:
+1. **Model Family Saturation**: All experiments use tree-based models - AGREED, GP is fundamentally different
+2. **Gap to Target is Enormous**: 5.5x gap suggests fundamentally different approaches needed - AGREED
+3. **GroupKFold vs LOO**: Top kernel uses 5-fold GroupKFold - worth considering
 
-**Key insight from my analysis (evolver_loop6_analysis.ipynb):**
-- **GroupKFold (5-fold) gives more realistic CV estimates** than Leave-One-Out
-- GroupKFold CV: 0.073 vs LOO CV: 0.069 for ETR(depth=10) - GroupKFold is 6% more pessimistic
-- This better simulates the test scenario with completely unseen solvents
-
-## CRITICAL INSIGHT: Optimal Regularization Level
-
-From my analysis with GroupKFold CV:
-
-| Model | GroupKFold CV | Notes |
-|-------|---------------|-------|
-| ETR(depth=7) | **0.0713** | OPTIMAL - best balance |
-| ETR(depth=5) | 0.0724 | Slightly underfitting |
-| ETR(depth=10) | 0.0730 | Slightly overfitting |
-| Ridge(alpha=100) | 0.0839 | Too simple |
-| Ridge(alpha=10) | 0.0899 | Way too simple |
-
-**The sweet spot is ETR with depth=7, not depth=10 (current) or Ridge (too simple).**
-
-## CRITICAL INSIGHT: Feature Engineering
-
-From my analysis with GroupKFold CV:
-
-| Features | GroupKFold CV | Notes |
-|----------|---------------|-------|
-| DRFP-PCA(15) + Spange + ACS_PCA | **0.0706** | BEST combined |
-| ACS_PCA (5-dim) | 0.0708 | Surprisingly good alone |
-| Spange (13-dim) | 0.0713 | Current baseline |
-| DRFP-PCA alone | 0.107-0.109 | MUCH WORSE alone |
-| Fragprints-PCA alone | 0.096-0.101 | WORSE alone |
-
-**Key insight: Higher-dimensional features (DRFP, Fragprints) perform WORSE alone but improve when combined with Spange.**
+**My synthesis**: 
+- Develop GP-based model as fundamentally different approach (Priority 1)
+- If GP CV is competitive, submit GP instead of exp_007
+- GP may have smaller CV-LB gap due to better extrapolation
 
 ## Data Understanding
 
 **Reference notebooks:**
-- `exploration/evolver_loop6_analysis.ipynb` - GroupKFold vs LOO, regularization comparison, feature comparison
-- `exploration/evolver_loop5_lb_feedback.ipynb` - CV-LB gap analysis, hardest solvents
-- `exploration/evolver_loop4_analysis.ipynb` - TTA hurts performance discovery
+- `exploration/evolver_loop7_analysis.ipynb` - GP feasibility test shows GP (0.0988) comparable to ETR (0.1053)
+- `exploration/evolver_loop5_lb_feedback.ipynb` - CV-LB gap analysis
+- `exploration/evolver_loop6_analysis.ipynb` - Regularization analysis
 
-**Key patterns:**
-1. **Hardest solvents**: HFIP (0.145 MAE), Ethylene Glycol (0.122), Water.Acetonitrile (0.112)
-2. **These are chemically unique** with high Spange distances from centroid
-3. **Temperature dominates**: Strong correlation with SM (-0.82), P2 (0.72)
-4. **TTA HURTS performance** - confirmed in loop 4
+**Key patterns to exploit:**
+1. **Chemically unique solvents are hardest**: Water (7.51 avg dist), HFIP (7.29), Cyclohexane (6.21)
+2. **GP shows promise**: Quick test shows GP comparable to ETR, may extrapolate better
+3. **TTA HURTS mixed solvents**: DO NOT use TTA
+4. **Per-target models work**: Different models for SM vs Products
 
-## Recommended Approaches (Priority Order)
+## Recommended Approaches
 
-### 1. INTERMEDIATE REGULARIZATION WITH COMBINED FEATURES (HIGHEST PRIORITY)
-Based on my analysis, the optimal configuration is:
+### Priority 1: Gaussian Process Model (HIGHEST PRIORITY - UNEXPLORED)
+**Why**: GPs are specifically designed for small datasets and may extrapolate better to unseen solvents. Quick test showed GP (0.0988) comparable to ETR (0.1053).
+
+**Implementation**:
 ```python
-# ExtraTrees with depth=7 (not 10, not 5)
-ExtraTreesRegressor(
-    n_estimators=200,
-    max_depth=7,       # OPTIMAL - was 10
-    min_samples_leaf=2,
-    random_state=42
-)
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import Matern, WhiteKernel, ConstantKernel
 
-# Combined features: DRFP-PCA(15) + Spange + ACS_PCA
-# This achieved 0.0706 GroupKFold CV - best of all feature sets
+class GPModel(BaseModel):
+    def __init__(self, data='single'):
+        self.data_type = data
+        self.mixed = (data == 'full')
+        self.targets = ['Product 2', 'Product 3', 'SM']
+        self.spange = SPANGE_DF  # Use global loaded features
+        self.scaler = StandardScaler()
+        self.models = {}
+    
+    def _build_features(self, X):
+        # Arrhenius kinetics + Spange descriptors
+        rt = X['Residence Time'].values.reshape(-1, 1).astype(np.float64)
+        temp = X['Temperature'].values.reshape(-1, 1).astype(np.float64)
+        temp_k = temp + 273.15
+        inv_temp = 1000.0 / temp_k
+        log_time = np.log(rt + 1e-6)
+        interaction = inv_temp * log_time
+        
+        if self.mixed:
+            pct = X['SolventB%'].values.reshape(-1, 1)
+            A_spange = self.spange.loc[X['SOLVENT A NAME']].values
+            B_spange = self.spange.loc[X['SOLVENT B NAME']].values
+            spange_feats = A_spange * (1 - pct) + B_spange * pct
+            return np.hstack([rt, temp, inv_temp, log_time, interaction, pct, spange_feats])
+        else:
+            spange_feats = self.spange.loc[X['SOLVENT NAME']].values
+            return np.hstack([rt, temp, inv_temp, log_time, interaction, spange_feats])
+    
+    def train_model(self, X_train, y_train):
+        X_feat = self._build_features(X_train)
+        X_scaled = self.scaler.fit_transform(X_feat)
+        y = y_train.values
+        
+        for i, target in enumerate(self.targets):
+            # Matern kernel with nu=2.5 (twice differentiable)
+            kernel = ConstantKernel(1.0) * Matern(length_scale=1.0, nu=2.5) + WhiteKernel(noise_level=0.1)
+            gp = GaussianProcessRegressor(
+                kernel=kernel, 
+                alpha=0.1,  # Regularization
+                normalize_y=True, 
+                n_restarts_optimizer=2,
+                random_state=42
+            )
+            gp.fit(X_scaled, y[:, i])
+            self.models[target] = gp
+    
+    def predict(self, X):
+        X_feat = self._build_features(X)
+        X_scaled = self.scaler.transform(X_feat)
+        
+        preds = []
+        for target in self.targets:
+            pred = self.models[target].predict(X_scaled)
+            preds.append(pred.reshape(-1, 1))
+        
+        preds = np.hstack(preds)
+        preds = np.clip(preds, 0, 1)
+        return torch.tensor(preds, dtype=torch.double)
 ```
 
-### 2. PER-TARGET MODEL WITH INTERMEDIATE REGULARIZATION (HIGH PRIORITY)
-Keep the per-target approach (HGB for SM, ETR for Products) but reduce depth:
-```python
-# For Products: ETR with depth=7 (was 10)
-ExtraTreesRegressor(max_depth=7, min_samples_leaf=3)
+### Priority 2: If GP CV is good, SUBMIT IT
+- If GP achieves CV < 0.070, submit to test LB
+- GP may have smaller CV-LB gap due to better extrapolation
 
-# For SM: HGB with depth=4 (was 5)
-HistGradientBoostingRegressor(max_depth=4, learning_rate=0.05)
-```
+### Priority 3: MLP with Strong Regularization (if GP fails)
+- Dropout: 0.2-0.3
+- Weight decay: 1e-4
+- BatchNorm after each layer
+- HuberLoss (robust to outliers)
 
-### 3. ENSEMBLE OF MULTIPLE REGULARIZATION LEVELS (MEDIUM PRIORITY)
-Average predictions from models with different regularization:
-- ETR(depth=5) - more regularized
-- ETR(depth=7) - optimal
-- ETR(depth=10) - less regularized
-This hedges against the unknown test distribution.
-
-### 4. SUBMIT TO VERIFY GROUPKFOLD CORRELATION (MEDIUM PRIORITY)
-After implementing the above, submit to verify if GroupKFold CV correlates better with LB than Leave-One-Out.
+### Priority 4: Ensemble of Diverse Models
+- GP + ETR + MLP weighted average
+- Only if individual models show promise
 
 ## What NOT to Try
 
-1. **Ridge regression alone** - Too simple, CV 0.0839-0.101
-2. **DRFP or Fragprints alone** - Perform WORSE than Spange (0.10-0.11 vs 0.07)
-3. **TTA** - Confirmed to hurt performance (30% worse)
-4. **Deeper trees (depth > 10)** - Will increase overfitting
-5. **Leave-One-Out CV as primary metric** - Too optimistic, use GroupKFold
+1. **TTA for mixed solvents** - Confirmed to hurt performance
+2. **Deep trees (depth > 10)** - Overfits to training solvents
+3. **Submitting exp_007 before trying GP** - GP is more promising
+4. **Complex ensembles without diversity** - Need fundamentally different models
 
-## Template Compliance (MANDATORY)
+## Validation Notes
 
-- Last 3 cells MUST remain unchanged from template
-- ONLY change: `model = YourModel()` line
-- Same hyperparameters across ALL folds
-- Model class needs: `__init__`, `train_model(X_train, y_train)`, `predict(X_test)` → torch tensor [N, 3]
+- **CV scheme**: Leave-one-solvent-out for single, leave-one-ramp-out for full
+- **CV-LB gap**: 53% - CV is too optimistic
+- **Hardest solvents**: HFIP (0.145 MAE), Ethylene Glycol (0.122), Water.Acetonitrile (0.112)
 
-## Next Experiment: 007_intermediate_regularization
+## CRITICAL CONSTRAINTS (MUST FOLLOW)
 
-**Goal**: Find the sweet spot between underfitting and overfitting.
+1. **Template compliance**: Last 3 cells must match template exactly
+2. **Only change model definition line**: `model = GPModel(data='single')` and `model = GPModel(data='full')`
+3. **Same hyperparameters across all folds**
+4. **No data leakage**: Scalers fit on training data only within each fold
+5. **No TTA for mixed solvents**
 
-**Approach**:
-1. Use ExtraTrees with depth=7 (optimal from analysis)
-2. Combined features: DRFP-PCA(15) + Spange + ACS_PCA
-3. Per-target models (HGB for SM, ETR for Products)
-4. NO TTA
+## Experiment to Run
 
-**Expected outcome**: 
-- GroupKFold CV ~0.07 (better than current 0.0623 LOO CV)
-- But LB may be BETTER due to less overfitting
-- This tests the hypothesis that intermediate regularization generalizes better
+**Experiment 008: Gaussian Process Model**
+- Use Matern kernel (nu=2.5) with WhiteKernel
+- Arrhenius kinetics features + Spange descriptors
+- Per-target GP models (one for each of Product 2, Product 3, SM)
+- alpha=0.1 for regularization
+- normalize_y=True for better convergence
 
-## Key Insight
+**Expected outcome**: CV ~0.07, potentially better LB due to better extrapolation to unseen solvents.
 
-The target (0.01727) is 5.5x better than our LB (0.0956). This is a HUGE gap. The solution likely involves:
-1. **Intermediate regularization** (depth=7, not 10 or Ridge)
-2. **Combined features** (DRFP-PCA + Spange + ACS_PCA)
-3. **Per-target models** (different models for SM vs Products)
-4. **Ensemble of diverse models** (hedge against unknown test distribution)
-
-**DO NOT GIVE UP** - The target IS achievable. We've identified the optimal regularization level and feature combination. Now we need to implement and verify.
+The target IS reachable. GP models may be the key to closing the CV-LB gap.
