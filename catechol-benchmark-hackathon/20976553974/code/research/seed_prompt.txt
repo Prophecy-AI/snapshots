@@ -1,7 +1,7 @@
-# Catechol Reaction Yield Prediction - Seed Prompt (Loop 28)
+# Catechol Reaction Yield Prediction - Seed Prompt (Loop 29)
 
 ## Current Status
-- **Best CV score**: 0.0623 from exp_004/exp_005 (HGB+ETR per-target, NO TTA)
+- **Best CV score**: 0.0623 from exp_004/exp_005/exp_028 (HGB+ETR per-target, NO TTA)
 - **Best LB score**: 0.0956 from exp_004/exp_016
 - **CV-LB gap**: +53% (LB = 0.986*CV + 0.0333, R²=0.988)
 - **Target**: 0.01727 (5.5x better than best LB)
@@ -9,106 +9,107 @@
 
 ## Response to Evaluator
 
-**Technical verdict was CONCERNS.** The evaluator correctly identified:
-1. **Data augmentation bug in exp_027**: The model had flip augmentation that wasn't in exp_005, causing CV 0.0810 instead of 0.0623. This is a valid finding.
-2. **Template compliance issue**: Cell 10 exists after the "FINAL CELL" - must be removed before submission.
+**Technical verdict was TRUSTWORTHY.** exp_028 successfully replicated exp_005's CV 0.0623.
 
-**Evaluator's top priority**: Fix the implementation bug to match exp_005's CV 0.0623.
+**Evaluator's top priority**: Implement a proper GNN approach since tree-based models have plateaued.
 
 **My synthesis**: 
-- Fixing the bug would only get us to CV 0.0623 → predicted LB ~0.093
-- This is still 5.4x from target (0.01727)
-- The evaluator is correct that the bug should be fixed, BUT fixing it won't reach the target
-- We need a FUNDAMENTALLY DIFFERENT approach that breaks the CV-LB linear relationship
+- The evaluator is CORRECT that tree-based models have plateaued
+- Analysis shows CV-LB relationship predicts we need NEGATIVE CV to reach target - IMPOSSIBLE
+- This confirms we need a FUNDAMENTALLY DIFFERENT approach
+- The target IS achievable (someone did it), so there must be an approach with a DIFFERENT CV-LB relationship
 
-**Key insight**: The CV-LB relationship (LB = 0.986*CV + 0.0333) predicts we need CV = -0.016 to reach target. This is IMPOSSIBLE. The target IS achievable (someone did it), so there must be an approach that has a DIFFERENT CV-LB relationship - one where the model generalizes better to unseen solvents.
+**Key insight from analysis**: 
+- Strong correlations between Spange physics features and targets (ET(30) ~0.7 with products, -0.84 with SM)
+- These physics-based features capture generalizable chemical principles
+- Models that leverage these principles should generalize better to unseen solvents
 
 ## Data Understanding
 
 **Reference notebooks:**
-- `exploration/evolver_loop27_lb_feedback.ipynb` - CV-LB relationship analysis
-- `exploration/evolver_loop24_analysis.ipynb` - Feature importance analysis
-- `exploration/evolver_loop21_analysis.ipynb` - CV-LB gap analysis across models
+- `exploration/evolver_loop28_analysis.ipynb` - CV-LB relationship analysis, feature correlations
+- `exploration/evolver_loop27_lb_feedback.ipynb` - Previous CV-LB analysis
+- `exploration/eda.ipynb` - Initial EDA
 
 **Key patterns:**
 1. **CV-LB correlation is 0.988** - Lower CV reliably predicts lower LB
-2. **All models have ~50% CV-LB gap** - This is data-specific, not model-specific
+2. **BUT**: The intercept (0.0333) means even CV=0 gives LB=0.0333 > target
 3. **Test set has COMPLETELY NEW solvents** - Models memorize solvent-specific patterns
-4. **Best features**: 0.8*ACS_PCA + 0.2*Spange with Arrhenius kinetics
+4. **Best features**: ET(30), alpha, SA from Spange descriptors correlate strongly with targets
 5. **Per-target architecture works best**: HGB for SM, ETR for Products
 
 **The fundamental problem:**
 - Our models learn solvent-specific patterns that don't generalize
 - The test set has solvents NEVER seen in training
 - We need models that learn GENERALIZABLE chemical principles
+- The winning approach must have a DIFFERENT CV-LB relationship (lower intercept)
 
 ## Recommended Approaches
 
-### Priority 1: Graph Neural Network with Pretrained Embeddings
-**Rationale**: Research shows GNNs with transfer learning achieve best results in ultra-low data regimes (20-30 samples). The key is using pretrained molecular embeddings.
+### Priority 1: Improved GNN with Pretrained Embeddings
+**Rationale**: exp_020 GNN achieved CV 0.099 (worse than trees), but the implementation was basic. Research shows pretrained GNNs achieve best results in low-data regimes.
 
-**Implementation**:
+**Key improvements over exp_020**:
+1. Use Graph Attention Networks (GAT) instead of GCN - attention helps focus on important atoms
+2. Add edge features (bond type, conjugation) - exp_020 only had node features
+3. Use pretrained molecular embeddings if available
+4. Longer training with proper learning rate schedule (cosine annealing)
+5. Multi-task learning across all 3 targets
+
+**Implementation guidance**:
 ```python
-import torch
-import torch_geometric
-from torch_geometric.nn import GCNConv, GATConv, global_mean_pool
-
-class MolecularGNN(torch.nn.Module):
-    def __init__(self, node_features, hidden_dim=64, num_layers=3):
-        super().__init__()
-        self.convs = torch.nn.ModuleList()
-        self.convs.append(GATConv(node_features, hidden_dim))
-        for _ in range(num_layers - 1):
-            self.convs.append(GATConv(hidden_dim, hidden_dim))
-        self.fc = torch.nn.Linear(hidden_dim + process_features, 3)
-    
-    def forward(self, x, edge_index, batch, process_features):
-        for conv in self.convs:
-            x = conv(x, edge_index)
-            x = F.relu(x)
-        x = global_mean_pool(x, batch)
-        x = torch.cat([x, process_features], dim=1)
-        return torch.sigmoid(self.fc(x))
+# Key architecture improvements
+class ImprovedGNN(nn.Module):
+    def __init__(self):
+        # Use GAT instead of GCN
+        self.conv1 = GATConv(node_features, hidden_dim, heads=4)
+        self.conv2 = GATConv(hidden_dim*4, hidden_dim, heads=4)
+        self.conv3 = GATConv(hidden_dim*4, hidden_dim, heads=1)
+        
+        # Add edge features
+        self.edge_encoder = nn.Linear(edge_features, hidden_dim)
+        
+        # Multi-task heads with shared representation
+        self.shared = nn.Linear(hidden_dim + process_dim, 128)
+        self.head_sm = nn.Linear(128, 1)
+        self.head_p2 = nn.Linear(128, 1)
+        self.head_p3 = nn.Linear(128, 1)
 ```
 
-**Key considerations**:
-- Use RDKit to convert solvent SMILES to molecular graphs
-- Node features: atom type, hybridization, aromaticity, etc.
-- Edge features: bond type, conjugation, ring membership
-- Combine graph embedding with process features (RT, Temp)
+### Priority 2: Physics-Informed Neural Network
+**Rationale**: The Spange features (ET(30), alpha, etc.) have strong correlations with targets. A model that explicitly uses these physics-based features should generalize better.
 
-### Priority 2: Multi-Task Learning with Shared Representation
-**Rationale**: The three targets (SM, Product 2, Product 3) are chemically related. Learning a shared representation could improve generalization.
+**Key idea**: Instead of learning arbitrary patterns, constrain the model to learn physically meaningful relationships.
 
 **Implementation**:
-- Single encoder for all targets
-- Separate prediction heads per target
-- Joint training with task-specific loss weighting
+1. Use Spange features as primary inputs (not just concatenated)
+2. Add physics-based interaction terms (ET(30) × Temperature, alpha × Residence Time)
+3. Use monotonicity constraints where appropriate (higher temperature → more products)
+4. Regularize to prefer simpler, more generalizable relationships
 
-### Priority 3: Physics-Informed Features
-**Rationale**: The Arrhenius kinetics features helped. More physics-based features could improve generalization.
+### Priority 3: Ensemble with Diversity
+**Rationale**: If different model types have different CV-LB relationships, ensembling might help.
 
-**New features to try**:
-- Activation energy proxy: exp(-Ea/RT) where Ea is estimated from solvent properties
-- Solvent polarity × temperature interaction
-- Residence time × solvent viscosity interaction
-- Hansen solubility parameters
-
-### Priority 4: Ensemble of Diverse Architectures
-**Rationale**: If GNN has different CV-LB relationship than tree models, ensembling could help.
+**Key idea**: Combine tree-based (exp_005) with neural network approaches.
 
 **Implementation**:
-- Train GNN model (new approach)
-- Keep best tree model (exp_005)
-- Weighted average based on validation performance
+1. Keep best tree model (HGB+ETR per-target)
+2. Add improved GNN
+3. Add physics-informed NN
+4. Weight by validation performance on held-out solvents
+
+### Priority 4: Domain Adaptation / Adversarial Training
+**Rationale**: The CV-LB gap suggests distribution shift. Adversarial training can learn features that are invariant to solvent identity.
+
+**Key idea**: Train a discriminator to predict which solvent the data came from, and train the main model to fool the discriminator while predicting yields.
 
 ## What NOT to Try
 
-1. **More tree-based variations** - 27 experiments show this approach plateaus at CV ~0.062
-2. **Stronger regularization** - exp_021 showed this HURTS performance
+1. **More tree-based variations** - 28 experiments show this approach plateaus at CV ~0.062
+2. **Simple MLP without pretrained embeddings** - exp_010/019 showed this underperforms trees
 3. **GroupKFold validation** - Breaks submission structure (exp_011/012 failed)
 4. **Data augmentation (flip)** - Proven to hurt full data performance
-5. **Simple MLP without pretrained embeddings** - exp_010/019 showed this underperforms trees
+5. **Stronger regularization alone** - exp_021 showed this HURTS performance
 
 ## Validation Notes
 
@@ -130,4 +131,9 @@ class MolecularGNN(torch.nn.Module):
 - Everything else in the last three cells MUST remain exactly the same
 
 ## Experiment Naming
-Next experiment: `exp_028_gnn_pretrained`
+Next experiment: `exp_029_improved_gnn`
+
+## Key Questions to Answer
+1. Can an improved GNN achieve better CV than trees (< 0.062)?
+2. Does the GNN have a different CV-LB relationship (lower intercept)?
+3. Can physics-informed features improve generalization?
