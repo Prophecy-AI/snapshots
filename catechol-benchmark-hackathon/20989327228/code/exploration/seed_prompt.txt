@@ -1,0 +1,114 @@
+# Chemical Reaction Yield Prediction - Techniques Guide
+
+## Problem Overview
+This is a multi-output regression problem predicting 3 reaction yields (SM, Product 2, Product 3) for chemical reactions under different solvent and process conditions. The evaluation uses a custom cross-validation procedure with leave-one-solvent-out (single solvent data) and leave-one-ramp-out (mixture data).
+
+**Reference notebooks for data characteristics:**
+- `exploration/eda.ipynb` - Contains full EDA: data shapes, feature distributions, target distributions
+
+## Key Techniques from Top Solutions
+
+### 1. Physics-Informed Feature Engineering (CRITICAL)
+**Arrhenius Kinetics Features** - The best performing solutions use physics-informed features:
+- `1/Temperature` (inverse temperature in Kelvin: 1000/(T + 273.15))
+- `ln(Time)` (log of residence time)
+- `inv_temp * log_time` (interaction term)
+
+This captures the Arrhenius equation relationship between temperature and reaction rates.
+
+**Additional Numeric Features:**
+- `rt^2`, `temp^2` (polynomial features)
+- `log1p(rt)`, `log1p(temp)` (log transforms)
+- `rt * temp` (interaction)
+
+### 2. Chemical Symmetry Exploitation (KEY INSIGHT)
+For mixed solvents, a mixture of "Solvent A + Solvent B" is physically identical to "Solvent B + Solvent A".
+
+**Test Time Augmentation (TTA):**
+- Predict twice: once with (A, B) and once with (B, A) flipped
+- Average the predictions
+- This respects physical symmetry and reduces variance
+
+**Training Augmentation:**
+- Also train on both (A, B) and (B, A) versions of the data
+- Doubles training data effectively
+
+### 3. Solvent Featurization
+**Spange descriptors** are the best for linear mixing (13 features):
+- dielectric constant, ET(30), alpha, beta, pi*, SA, SB, SP, SdP, N, n, f(n), delta
+
+**Linear Mixing for Mixed Solvents:**
+```
+mixed_features = A_features * (1 - pct) + B_features * pct
+```
+where pct is SolventB%.
+
+**Other available features:**
+- ACS PCA descriptors (5 features) - compact
+- DRFPS (2048 features) - high-dimensional
+- Fragprints (2133 features) - high-dimensional
+
+### 4. Model Architecture
+**MLP Architecture (proven effective):**
+```
+BatchNorm1d(input_dim)
+Linear(input_dim, 128) -> BatchNorm1d -> ReLU -> Dropout(0.2)
+Linear(128, 128) -> BatchNorm1d -> ReLU -> Dropout(0.2)
+Linear(128, 64) -> BatchNorm1d -> ReLU -> Dropout(0.2)
+Linear(64, 3) -> Sigmoid()
+```
+
+**Training Configuration:**
+- Loss: HuberLoss (robust to outliers) or SmoothL1Loss
+- Optimizer: Adam with lr=5e-4, weight_decay=1e-5
+- Scheduler: ReduceLROnPlateau (factor=0.5, patience=20)
+- Gradient clipping: max_norm=1.0
+- Epochs: 250-300
+- Batch size: 32
+
+### 5. Ensemble Strategies
+**Bagging:**
+- Train 5-7 models with different random seeds
+- Average predictions
+- Reduces variance significantly
+
+**Multi-seed ensemble:**
+- Use seeds like [42, 77, 2025]
+- Train separate models per seed per fold
+- Average all predictions
+
+### 6. Post-Processing
+- Clip predictions to [0, 1] range
+- Consider normalizing so SM + Product2 + Product3 ≈ 1 (chemical constraint)
+
+### 7. CV Procedure (MUST FOLLOW)
+**Task 0 - Single Solvent:**
+- Leave-one-solvent-out cross-validation
+- 24 folds (one per solvent)
+
+**Task 1 - Full Data (Mixtures):**
+- Leave-one-ramp-out cross-validation
+- 13 folds (one per solvent pair)
+
+**Submission format:**
+- Must use exact template with last 3 cells unchanged
+- Only modify model definition line
+
+## Recommended Approach
+
+1. **Start with Spange descriptors** - best for linear mixing
+2. **Add Arrhenius kinetics features** - physics-informed
+3. **Use MLP with BatchNorm and Dropout** - proven architecture
+4. **Implement symmetry TTA** for mixed solvents - key improvement
+5. **Ensemble 5-7 models** with different seeds
+6. **Use HuberLoss** for robustness
+
+## Target Score
+Beat 0.017270 (lower is better). Top kernels achieve ~0.09831 with Arrhenius + TTA approach.
+
+## Data Characteristics
+- Full data: 1227 rows, 13 solvent pairs
+- Single solvent: 656 rows, 24 solvents
+- Temperature: 175-225°C
+- Residence Time: 2-15 minutes
+- Targets: SM, Product 2, Product 3 (yields 0-1)
