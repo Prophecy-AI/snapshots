@@ -1,4 +1,4 @@
-# Catechol Reaction Yield Prediction - Evolved Seed Prompt (Loop 7)
+# Catechol Reaction Yield Prediction - Evolved Seed Prompt (Loop 8)
 
 ## Current Status
 - **Best CV score**: 0.0623 from exp_004 (Per-target HGB+ETR NO TTA)
@@ -9,150 +9,142 @@
 
 ## Response to Evaluator
 
-**Technical verdict**: TRUSTWORTHY. The evaluator confirmed exp_007 has sound validation, no leakage, and verified scores.
+**Technical verdict**: TRUSTWORTHY. The evaluator confirmed exp_007 (GP) has sound validation, no leakage, and verified scores.
 
-**Evaluator's top priority**: "SUBMIT THIS MODEL to test the intermediate regularization hypothesis."
-- **I PARTIALLY AGREE** - Testing regularization is valid, but I want to first try GP models
-- **Reasoning**: If GP shows better CV, it's a better submission candidate than exp_007
-- **Action**: Develop GP model first, then decide which to submit
+**Evaluator's top priority**: "SUBMIT exp_006 (intermediate regularization, CV 0.0689) to test the regularization hypothesis."
+- **I AGREE** - We need LB feedback to calibrate our strategy
+- **Reasoning**: With 4 submissions remaining, we can afford to test this hypothesis
+- **Action**: Submit exp_006 to verify if regularization reduces CV-LB gap
 
 **Key concerns raised**:
-1. **Model Family Saturation**: All experiments use tree-based models - AGREED, GP is fundamentally different
-2. **Gap to Target is Enormous**: 5.5x gap suggests fundamentally different approaches needed - AGREED
-3. **GroupKFold vs LOO**: Top kernel uses 5-fold GroupKFold - worth considering
+1. **GP Underperforms on CV**: GP CV (0.0721) is 16% worse than best tree-based CV (0.0623) - ACKNOWLEDGED
+2. **Submission Strategy Critical**: We need LB feedback to guide strategy - AGREED
+3. **Gap to Target is Enormous**: 3.6x gap from best CV to target - ACKNOWLEDGED
 
 **My synthesis**: 
-- Develop GP-based model as fundamentally different approach (Priority 1)
-- If GP CV is competitive, submit GP instead of exp_007
-- GP may have smaller CV-LB gap due to better extrapolation
+- Submit exp_006 to test regularization hypothesis
+- If LB improves proportionally, continue with regularization + ensemble
+- If LB doesn't improve, pivot to fundamentally different approaches
 
 ## Data Understanding
 
 **Reference notebooks:**
-- `exploration/evolver_loop7_analysis.ipynb` - GP feasibility test shows GP (0.0988) comparable to ETR (0.1053)
+- `exploration/evolver_loop8_analysis.ipynb` - Strategic assessment and kernel analysis
+- `exploration/evolver_loop7_analysis.ipynb` - GP feasibility test
 - `exploration/evolver_loop5_lb_feedback.ipynb` - CV-LB gap analysis
-- `exploration/evolver_loop6_analysis.ipynb` - Regularization analysis
 
 **Key patterns to exploit:**
-1. **Chemically unique solvents are hardest**: Water (7.51 avg dist), HFIP (7.29), Cyclohexane (6.21)
-2. **GP shows promise**: Quick test shows GP comparable to ETR, may extrapolate better
+1. **Top kernels use ensemble of MLP+XGB+RF+LGB** with learned weights
+2. **GroupKFold (5-fold)** gives more realistic CV than Leave-One-Out
 3. **TTA HURTS mixed solvents**: DO NOT use TTA
 4. **Per-target models work**: Different models for SM vs Products
 
 ## Recommended Approaches
 
-### Priority 1: Gaussian Process Model (HIGHEST PRIORITY - UNEXPLORED)
-**Why**: GPs are specifically designed for small datasets and may extrapolate better to unseen solvents. Quick test showed GP (0.0988) comparable to ETR (0.1053).
+### Priority 1: SUBMIT exp_006 (IMMEDIATE)
+**Why**: We need LB feedback to calibrate our strategy. exp_006 has intermediate regularization (CV 0.0689).
+
+**Expected outcome**: 
+- If LB improves proportionally (e.g., LB ~0.09), regularization helps
+- If LB doesn't improve (e.g., LB ~0.10), we need different approaches
+
+### Priority 2: Diverse Ensemble (GP + ETR + MLP)
+**Why**: Top kernels use ensemble of diverse model families. We have GP (0.0721), ETR (0.0623), and can add MLP.
 
 **Implementation**:
 ```python
-from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import Matern, WhiteKernel, ConstantKernel
-
-class GPModel(BaseModel):
+class DiverseEnsemble(BaseModel):
     def __init__(self, data='single'):
         self.data_type = data
         self.mixed = (data == 'full')
-        self.targets = ['Product 2', 'Product 3', 'SM']
-        self.spange = SPANGE_DF  # Use global loaded features
-        self.scaler = StandardScaler()
-        self.models = {}
-    
-    def _build_features(self, X):
-        # Arrhenius kinetics + Spange descriptors
-        rt = X['Residence Time'].values.reshape(-1, 1).astype(np.float64)
-        temp = X['Temperature'].values.reshape(-1, 1).astype(np.float64)
-        temp_k = temp + 273.15
-        inv_temp = 1000.0 / temp_k
-        log_time = np.log(rt + 1e-6)
-        interaction = inv_temp * log_time
-        
-        if self.mixed:
-            pct = X['SolventB%'].values.reshape(-1, 1)
-            A_spange = self.spange.loc[X['SOLVENT A NAME']].values
-            B_spange = self.spange.loc[X['SOLVENT B NAME']].values
-            spange_feats = A_spange * (1 - pct) + B_spange * pct
-            return np.hstack([rt, temp, inv_temp, log_time, interaction, pct, spange_feats])
-        else:
-            spange_feats = self.spange.loc[X['SOLVENT NAME']].values
-            return np.hstack([rt, temp, inv_temp, log_time, interaction, spange_feats])
+        self.gp_model = GPModel(data=data)
+        self.etr_model = ETRModel(data=data)
+        self.mlp_model = MLPModel(data=data)
+        self.weights = [0.3, 0.4, 0.3]  # GP, ETR, MLP
     
     def train_model(self, X_train, y_train):
-        X_feat = self._build_features(X_train)
-        X_scaled = self.scaler.fit_transform(X_feat)
-        y = y_train.values
-        
-        for i, target in enumerate(self.targets):
-            # Matern kernel with nu=2.5 (twice differentiable)
-            kernel = ConstantKernel(1.0) * Matern(length_scale=1.0, nu=2.5) + WhiteKernel(noise_level=0.1)
-            gp = GaussianProcessRegressor(
-                kernel=kernel, 
-                alpha=0.1,  # Regularization
-                normalize_y=True, 
-                n_restarts_optimizer=2,
-                random_state=42
-            )
-            gp.fit(X_scaled, y[:, i])
-            self.models[target] = gp
+        self.gp_model.train_model(X_train, y_train)
+        self.etr_model.train_model(X_train, y_train)
+        self.mlp_model.train_model(X_train, y_train)
     
     def predict(self, X):
-        X_feat = self._build_features(X)
-        X_scaled = self.scaler.transform(X_feat)
+        gp_pred = self.gp_model.predict(X)
+        etr_pred = self.etr_model.predict(X)
+        mlp_pred = self.mlp_model.predict(X)
         
-        preds = []
-        for target in self.targets:
-            pred = self.models[target].predict(X_scaled)
-            preds.append(pred.reshape(-1, 1))
-        
-        preds = np.hstack(preds)
-        preds = np.clip(preds, 0, 1)
-        return torch.tensor(preds, dtype=torch.double)
+        final = (self.weights[0] * gp_pred + 
+                 self.weights[1] * etr_pred + 
+                 self.weights[2] * mlp_pred)
+        return torch.tensor(final, dtype=torch.double)
 ```
 
-### Priority 2: If GP CV is good, SUBMIT IT
-- If GP achieves CV < 0.070, submit to test LB
-- GP may have smaller CV-LB gap due to better extrapolation
+### Priority 3: Stacking with Meta-Learner
+**Why**: Stacking can capture complementary information from diverse base models.
 
-### Priority 3: MLP with Strong Regularization (if GP fails)
-- Dropout: 0.2-0.3
-- Weight decay: 1e-4
-- BatchNorm after each layer
-- HuberLoss (robust to outliers)
+**Implementation**:
+- Train base models (GP, ETR, MLP) on folds
+- Use base model predictions as features for meta-learner (Ridge)
+- May improve generalization to unseen solvents
 
-### Priority 4: Ensemble of Diverse Models
-- GP + ETR + MLP weighted average
-- Only if individual models show promise
+### Priority 4: MLP with Strong Regularization
+**Why**: Top kernels use MLP with BatchNorm + Dropout + LR scheduler.
+
+**Implementation**:
+```python
+class RegularizedMLP(nn.Module):
+    def __init__(self, input_dim, output_dim=3):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.BatchNorm1d(input_dim),
+            nn.Linear(input_dim, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(128, 64),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(64, output_dim),
+            nn.Sigmoid()
+        )
+    
+    def forward(self, x):
+        return self.net(x)
+```
 
 ## What NOT to Try
 
 1. **TTA for mixed solvents** - Confirmed to hurt performance
 2. **Deep trees (depth > 10)** - Overfits to training solvents
-3. **Submitting exp_007 before trying GP** - GP is more promising
+3. **GP alone** - CV 0.0721 is worse than ETR 0.0623
 4. **Complex ensembles without diversity** - Need fundamentally different models
 
 ## Validation Notes
 
 - **CV scheme**: Leave-one-solvent-out for single, leave-one-ramp-out for full
 - **CV-LB gap**: 53% - CV is too optimistic
-- **Hardest solvents**: HFIP (0.145 MAE), Ethylene Glycol (0.122), Water.Acetonitrile (0.112)
+- **Hardest solvents**: HFIP (0.174 MAE), Cyclohexane (0.154), Acetonitrile.Acetic Acid (0.117)
 
 ## CRITICAL CONSTRAINTS (MUST FOLLOW)
 
 1. **Template compliance**: Last 3 cells must match template exactly
-2. **Only change model definition line**: `model = GPModel(data='single')` and `model = GPModel(data='full')`
+2. **Only change model definition line**: `model = YourModel(data='single')` and `model = YourModel(data='full')`
 3. **Same hyperparameters across all folds**
 4. **No data leakage**: Scalers fit on training data only within each fold
 5. **No TTA for mixed solvents**
 
-## Experiment to Run
+## Experiments to Run
 
-**Experiment 008: Gaussian Process Model**
-- Use Matern kernel (nu=2.5) with WhiteKernel
-- Arrhenius kinetics features + Spange descriptors
-- Per-target GP models (one for each of Product 2, Product 3, SM)
-- alpha=0.1 for regularization
-- normalize_y=True for better convergence
+**Experiment 009: Diverse Ensemble (GP + ETR + MLP)**
+- Combine GP, ExtraTrees, and MLP predictions
+- Weighted average: 0.3*GP + 0.4*ETR + 0.3*MLP
+- May reduce variance and improve generalization
 
-**Expected outcome**: CV ~0.07, potentially better LB due to better extrapolation to unseen solvents.
+**Experiment 010: Stacking with Meta-Learner**
+- Train base models (GP, ETR, MLP) on folds
+- Use base model predictions as features for Ridge meta-learner
+- May capture complementary information
 
-The target IS reachable. GP models may be the key to closing the CV-LB gap.
+**Expected outcome**: CV ~0.06-0.07, potentially better LB due to ensemble diversity.
+
+The target IS reachable. Ensemble diversity and stacking may be the key to closing the CV-LB gap.
