@@ -1,34 +1,41 @@
-# Catechol Reaction Yield Prediction - Evolved Seed Prompt (Loop 1)
+# Catechol Reaction Yield Prediction - Evolved Seed Prompt (Loop 2)
 
 ## Current Status
-- Best CV score: 0.08819 from exp_000 (Physics-Informed MLP Baseline)
+- Best CV score: **0.08819** from exp_000 (Physics-Informed MLP Baseline)
 - Best LB score: Not yet submitted
-- CV-LB gap: Unknown (no submissions yet)
-- Target: 0.047400 (need ~47% reduction in RMSE)
+- Target: **0.04740** (need ~46% RMSE reduction)
+- Submissions remaining: 5/5
 
 ## Response to Evaluator
 
-**Technical verdict was TRUSTWORTHY** - The baseline implementation is sound with proper validation methodology.
+**Technical verdict**: TRUSTWORTHY - The evaluator confirmed sound validation methodology with no leakage.
 
-**Evaluator's top priority: Try TabPFN** - I AGREE. TabPFN is specifically designed for small tabular datasets and has shown strong performance on chemistry tasks. This is the highest-leverage experiment to try next.
+**Evaluator's top priority**: Debug and fully test TabPFN. 
+- **My response**: TabPFN v6.3.0 requires HuggingFace authentication for gated model access. The older v0.1.10 only supports classification, not regression. This is a dead end without HF credentials. **Pivoting to feature expansion and architecture improvements instead.**
 
-**Key concerns raised:**
-1. Gap to target is large (need ~47% reduction) - Addressed by exploring fundamentally different architectures
-2. Limited feature exploration (only Spange descriptors) - Will explore DRFP/fragprints with dimensionality reduction
-3. No architecture diversity (only MLP) - TabPFN represents a fundamentally different approach
-4. Submission template compliance - Will ensure model class is compatible with template structure
+**Key concerns raised**:
+1. **Ensemble with weak components** - Agreed. LightGBM (0.10019) dragged down the ensemble. Will not include weak models in future ensembles.
+2. **Feature space not explored** - Agreed. DRFP and fragprints are available but unused. Analysis shows they have only ~150 non-zero columns each, so PCA to 20-50 components is feasible.
+3. **Large gap to target** - Agreed. Need fundamentally different approaches, not incremental tweaks.
 
 ## Data Understanding
 
 **Reference notebooks:**
-- `exploration/eda.ipynb` - Full EDA with data shapes, feature distributions
-- `research/kernels/sanidhyavijay24_arrhenius-kinetics-tta-0-09831/` - Best public kernel approach
+- `exploration/eda.ipynb` - Full EDA with data shapes, distributions
+- `exploration/evolver_loop2_analysis.ipynb` - Gap analysis, feature exploration
 
 **Key patterns to exploit:**
-1. **Arrhenius kinetics** - 1/T, ln(t), 1/T*ln(t) features capture temperature-dependent reaction rates
-2. **Solvent symmetry** - For mixed solvents, (A,B) = (B,A) chemically → TTA for free performance
-3. **Small dataset** - 656 + 1227 samples → TabPFN's sweet spot
-4. **Multiple descriptor sets** - Spange (13), DRFP (2048), fragprints (2133) available
+
+1. **Feature expansion opportunity**: DRFP (2048→165 non-zero) and fragprints (2133→144 non-zero) can be reduced to ~20-50 PCs capturing 100% variance. These may contain patterns Spange descriptors miss.
+
+2. **Non-linear solvent mixing**: Current linear interpolation `A*(1-pct) + B*pct` may not capture real mixture effects. Try:
+   - Concatenate both solvent features + mixing ratio (don't interpolate)
+   - Add interaction terms between A and B features
+   - Add polynomial terms of mixing ratio
+
+3. **Per-solvent variance**: Some solvents (Acetonitrile.Acetic Acid, IPA, Decanol) have very high SM variance (>0.43). These are harder to predict and may need special handling.
+
+4. **Baseline gap**: Predicting mean gives RMSE=0.2353. Our best (0.08819) is 62.5% better. Target requires another 46% improvement - this is substantial.
 
 ## CRITICAL SUBMISSION CONSTRAINTS
 
@@ -41,110 +48,139 @@
 
 ## Recommended Approaches (Priority Order)
 
-### 1. TabPFN Regressor (HIGHEST PRIORITY)
-**Why:** TabPFN is a transformer-based foundation model specifically designed for small tabular datasets. Published in Nature 2025, it "consistently beats standard MLPs and gradient-boosted trees on low-sample drug-discovery benchmarks."
+### Priority 1: Feature Expansion with DRFP/Fragprints + PCA
+**Why**: Spange descriptors (13 features) may not capture all relevant chemistry. DRFP captures reaction fingerprints, fragprints capture molecular fragments.
 
 **Implementation:**
 ```python
-from tabpfn import TabPFNRegressor
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
 
-class TabPFNModel:
-    def __init__(self, data='single'):
-        self.data_type = data
-        self.featurizer = KineticFeaturizer(mixed=(data=='full'))
-        self.models = []  # One per target
-        
+# Load and reduce DRFP
+drfp = pd.read_csv(f'{DATA_PATH}/drfps_catechol_lookup.csv', index_col=0)
+scaler = StandardScaler()
+drfp_scaled = scaler.fit_transform(drfp)
+pca = PCA(n_components=20)  # or 30-50
+drfp_pca = pca.fit_transform(drfp_scaled)
+
+# Combine with Spange
+combined_features = np.hstack([spange_features, drfp_pca_features])
+```
+
+**Expected impact**: Medium-high. Different feature representations often capture different patterns.
+
+### Priority 2: Non-Linear Solvent Mixing Features
+**Why**: Linear interpolation assumes properties mix linearly, but real solvent mixtures often have non-linear effects.
+
+**Implementation:**
+```python
+# Instead of: mixed = A * (1-pct) + B * pct
+# Try concatenation:
+mixed = np.hstack([A_features, B_features, pct, pct**2, A_features * pct, B_features * (1-pct)])
+```
+
+**Expected impact**: Medium. May help with full data task specifically.
+
+### Priority 3: Deeper/Wider MLP Architecture
+**Why**: Current architecture [128, 128, 64] may be too shallow for the complexity.
+
+**Implementation:**
+```python
+# Try deeper architecture
+hidden_dims = [256, 256, 128, 64]  # or [512, 256, 128, 64]
+
+# Add residual connections
+class ResidualBlock(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.BatchNorm1d(dim),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(dim, dim),
+            nn.BatchNorm1d(dim)
+        )
+    def forward(self, x):
+        return F.relu(x + self.net(x))
+```
+
+**Expected impact**: Medium. More capacity may help if features are rich enough.
+
+### Priority 4: Per-Target Specialized Models
+**Why**: SM (starting material) follows different kinetics than products. Separate optimization may help.
+
+**Implementation:**
+```python
+class PerTargetModel:
+    def __init__(self):
+        self.models = [MLPModel() for _ in range(3)]  # One per target
+    
     def train_model(self, X_train, y_train):
-        X_feats = self.featurizer.featurize(X_train).numpy()
-        for i in range(3):  # 3 targets
-            model = TabPFNRegressor()
-            model.fit(X_feats, y_train.values[:, i])
-            self.models.append(model)
+        for i, model in enumerate(self.models):
+            model.train_model(X_train, y_train[:, i:i+1])
     
     def predict(self, X_test):
-        X_feats = self.featurizer.featurize(X_test).numpy()
-        preds = np.column_stack([m.predict(X_feats) for m in self.models])
-        return torch.tensor(preds)
+        preds = [m.predict(X_test) for m in self.models]
+        return torch.cat(preds, dim=1)
 ```
 
-**Notes:**
-- Use same Arrhenius kinetics features + Spange descriptors
-- No hyperparameter tuning needed
-- May need to handle TTA separately for mixed solvents
-- Install with: pip install tabpfn
+**Expected impact**: Medium. Different targets may have different optimal architectures.
 
-### 2. Ensemble of Diverse Models
-**Why:** The "mixall" kernel shows that combining MLP + XGBoost + RandomForest + LightGBM with weighted averaging can be effective.
-
-**Implementation:**
-- Train MLP, XGBoost, LightGBM, RandomForest on same features
-- Use weighted averaging (optimize weights with Optuna if time permits)
-- Weights normalized to sum to 1
-
-### 3. Feature Expansion with Dimensionality Reduction
-**Why:** DRFP (2048 features) and fragprints (2133 features) contain rich molecular information that Spange (13 features) may miss.
+### Priority 5: Gaussian Process Regression
+**Why**: Good for small data with uncertainty quantification. May work well given dataset size (~650-1200 samples).
 
 **Implementation:**
 ```python
-# Load high-dimensional features
-drfp = load_features('drfps_catechol')  # 2048 features
-fragprints = load_features('fragprints')  # 2133 features
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import RBF, Matern, WhiteKernel
 
-# Apply PCA to reduce dimensionality
-from sklearn.decomposition import PCA
-pca_drfp = PCA(n_components=50)
-pca_frag = PCA(n_components=50)
-
-# Combine with Spange + kinetic features
-combined_features = np.hstack([
-    kinetic_features,  # 5 features
-    spange_features,   # 13 features
-    pca_drfp.fit_transform(drfp_features),  # 50 features
-    pca_frag.fit_transform(frag_features),  # 50 features
-])
+kernel = Matern(nu=2.5) + WhiteKernel()
+gp = GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=10)
 ```
 
-### 4. Per-Target Specialized Models
-**Why:** SM (starting material) may have different dynamics than Products. Different models for different targets could improve predictions.
-
-### 5. LightGBM with Per-Target Optimization
-**Why:** LightGBM kernel shows best fold MSE=0.0010 for single solvent, MSE=0.0040 for full data. Per-target regressors with early stopping.
+**Expected impact**: Medium. May provide different error patterns for ensembling.
 
 ## What NOT to Try
 
-1. **More MLP hyperparameter tuning** - Incremental improvements won't close the 47% gap
-2. **Simple feature scaling changes** - Already using StandardScaler/BatchNorm
-3. **Different loss functions alone** - HuberLoss already used, not the bottleneck
+1. **TabPFN** - Requires HuggingFace authentication for gated model. Dead end.
+2. **LightGBM/XGBoost alone** - Already tested, performs worse than MLP (0.10019 vs 0.08819).
+3. **Simple ensemble with weak models** - Dragged down performance. Only ensemble strong models.
+4. **Hyperparameter tuning on current architecture** - Need fundamentally different approaches first.
 
 ## Validation Notes
 
-**CV Scheme (MUST FOLLOW):**
-- Single solvent: Leave-one-solvent-out CV (24 folds)
-- Full data: Leave-one-ramp-out CV (13 folds)
+- **CV scheme**: Leave-one-solvent-out (24 folds) for single, leave-one-ramp-out (13 folds) for full
+- **Metric**: RMSE averaged across both tasks
+- **No LB submissions yet** - Should submit once we see CV improvement to calibrate CV-LB gap
 
-**Template Compliance:**
-- Model must have `train_model(X_train, y_train)` and `predict(X_test)` methods
-- Last 3 cells of notebook must match template exactly
-- Only `model = ModelClass()` line can be changed
+## Implementation Checklist
 
-## Experiment Priority Queue
+1. ✅ Model class with `train_model(X_train, y_train)` and `predict(X_test)` methods
+2. ✅ Featurizer that handles both single and mixed solvents
+3. ✅ Physics-informed features (Arrhenius kinetics)
+4. ✅ TTA for mixed solvent symmetry
+5. ✅ Ensemble of multiple seeds
+6. ⬜ Feature expansion with DRFP/fragprints
+7. ⬜ Non-linear mixing features
+8. ⬜ Deeper architecture with residual connections
+9. ⬜ Per-target specialized models
 
-1. **exp_001: TabPFN Regressor** - Highest leverage, no tuning needed
-2. **exp_002: TabPFN + TTA** - Add TTA for mixed solvents to TabPFN
-3. **exp_003: Ensemble (TabPFN + MLP + LightGBM)** - Combine best approaches
-4. **exp_004: Feature expansion with DRFP/fragprints** - Richer molecular representation
-5. **exp_005: Per-target specialized models** - Different architectures per target
+## Next Experiment Recommendation
 
-## Key Insights from Research
+**Experiment 003: Feature Expansion + Deeper MLP**
 
-1. **TabPFN excels on small data** - Published in Nature 2025, specifically designed for <10K samples
-2. **Ensemble diversity matters** - Combining MLP + tree-based models improves robustness
-3. **Physics-informed features help** - Arrhenius kinetics features validated in baseline
-4. **TTA is free performance** - Exploiting solvent symmetry reduces variance
-5. **Per-target LightGBM** - Separate models per target with early stopping showed best fold scores
+Combine:
+1. Spange descriptors (13 features)
+2. DRFP with PCA to 20 components
+3. Arrhenius kinetics features (3 features)
+4. Deeper MLP [256, 256, 128, 64] with residual connections
+5. TTA for mixed solvents
+6. Ensemble of 5 models
 
-## Target Score
-Beat **0.047400** (lower is better - RMSE)
+This addresses the evaluator's concern about unexplored feature space while maintaining the proven MLP architecture.
 
-Current best: 0.08819 (need ~47% reduction)
-The target IS reachable - we haven't found the right model family yet.
+**Alternative if Feature Expansion doesn't help:**
+- Try non-linear mixing features (concatenate A+B instead of interpolate)
+- Try Gaussian Process as a different model family
+- Try per-target specialized models with different architectures
