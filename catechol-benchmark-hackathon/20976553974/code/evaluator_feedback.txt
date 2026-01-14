@@ -1,145 +1,176 @@
 ## What I Understood
 
-The junior researcher implemented experiment 021 following my previous feedback to abandon the GNN approach (exp_020, CV 0.099) and return to the exp_004 architecture with stronger regularization. The hypothesis was that increasing regularization (reducing max_depth, increasing min_samples_leaf) would reduce the CV-LB gap (currently 53%: 0.0623 → 0.0956) and potentially improve leaderboard performance even if CV gets slightly worse.
+The junior researcher implemented experiment 022 following my previous feedback to try approaches that improve extrapolation to unseen solvents. The hypothesis was that using a multi-seed ensemble (3 seeds: 42, 123, 456) of the exp_004 architecture would reduce variance and potentially improve generalization. The approach maintained the per-target heterogeneous model (HGB for SM, ExtraTrees for Products) with combined features (0.8 ACS_PCA + 0.2 Spange).
 
-**Results**: CV MAE 0.0809 (single: 0.0712, full: 0.0907) - this is 30% worse than the best CV of 0.0623 (exp_004/017), but the regularization changes were correctly implemented.
+**Results**: CV MAE 0.0901 (single: 0.0677, full: 0.1126) - this is **45% worse** than the best CV of 0.0623 (exp_004/017). The multi-seed ensemble significantly hurt full data performance.
 
 ## Technical Execution Assessment
 
 **Validation**: ✅ SOUND
 - LOO validation with correct fold counts (24 for single solvent, 13 for full data)
-- CV scores verified in output: Single 0.0712, Full 0.0907, Combined 0.0809
+- CV scores verified in output: Single 0.0677, Full 0.1126, Combined 0.0901
 - Proper train/test separation per fold
 
 **Leakage Risk**: ✅ NONE DETECTED
 - StandardScaler fit on training data only within each fold
-- Models trained fresh each fold
-- Feature augmentation (flip) applied correctly within training
+- Models trained fresh each fold with different seeds
+- No data augmentation or TTA (correctly removed per previous feedback)
 
 **Score Integrity**: ✅ VERIFIED
-- Output shows Single CV MAE: 0.0712, Full CV MAE: 0.0907, Combined: 0.0809
-- Matches session state entry (0.0809)
+- Output shows Single CV MAE: 0.0677, Full CV MAE: 0.1126, Combined: 0.0901
+- Matches session state entry (0.0901)
 
-**Template Compliance**: ⚠️ MINOR ISSUE
-- The template cells (7, 8, 9) are in the correct position as the last 3 cells
-- Cell 10 exists after the "FINAL CELL" but it's just for local CV calculation
-- On Kaggle, this extra cell would likely be ignored since the notebook runs sequentially
-- **Recommendation**: Remove cell 10 to be safe, but this is low risk
+**Template Compliance**: ⚠️ ISSUE - CELL AFTER FINAL CELL
+- The notebook has 11 cells total
+- Template cells are at positions 7, 8, 9 (correct positions as last 3)
+- **BUT Cell 10 exists after the "FINAL CELL"** - this is for local CV calculation
+- This MUST be removed before any submission to Kaggle
+- The template explicitly states: "THIS MUST BE THE FINAL CELL IN YOUR NOTEBOOK"
 
 **Code Quality**: GOOD
 - Clean implementation following exp_004 architecture
-- Regularization changes clearly documented
+- Multi-seed ensemble properly implemented
 - Proper dual featurizer with Spange + ACS_PCA
 
-Verdict: **TRUSTWORTHY** - Results are reliable, minor template concern.
+Verdict: **CONCERNS** - Template compliance issue (cell after final cell) must be fixed before submission.
 
 ## Strategic Assessment
 
-**Approach Fit**: ⚠️ REASONABLE BUT INEFFECTIVE
-The regularization hypothesis was reasonable - reducing model complexity should reduce overfitting and potentially improve generalization. However:
-- CV went from 0.0623 → 0.0809 (30% worse)
-- The regularization was too aggressive (max_depth 7→5 for HGB, 10→6 for ETR)
-- This likely won't improve LB since the CV degradation is substantial
+**Approach Fit**: ❌ WRONG DIRECTION
+The multi-seed ensemble hypothesis was reasonable in theory but failed in practice:
+- Single solvent: 0.0677 (8.7% worse than exp_004's 0.0659)
+- Full data: 0.1126 (87% worse than exp_004's 0.0603!)
+- Combined: 0.0901 (45% worse than exp_004's 0.0623)
 
-**Why Regularization Didn't Help**:
-1. **The CV-LB gap isn't from overfitting**: The gap is likely due to the test set containing chemically different solvents, not model overfitting
-2. **Too aggressive**: Reducing max_depth by 2-4 levels is a large change
-3. **Wrong lever**: The problem is extrapolation to unseen solvents, not memorization
+**Why Multi-Seed Ensemble Failed**:
+1. **Averaging different seeds doesn't help extrapolation** - the models are still learning the same patterns
+2. **Full data degradation is severe** - suggests the ensemble is averaging out useful signal
+3. **The problem isn't variance** - it's that the model can't extrapolate to chemically different solvents
 
-**Effort Allocation**: ⚠️ DIMINISHING RETURNS
-- 21 experiments have been run
+**Effort Allocation**: ⚠️ STUCK IN LOCAL OPTIMUM
+- 22 experiments have been run
 - Best CV (0.0623) achieved in exp_004/017
 - Best LB (0.0956) achieved with exp_004/017
-- Recent experiments (018-021) have all been worse than exp_004
-- **The team is stuck in a local optimum**
+- Recent experiments (018-022) have ALL been worse than exp_004
+- **The team is iterating on variations that don't address the core problem**
 
-**Critical Insight from Top Kernel**:
-The top-performing public kernel (lishellliang) uses **GroupKFold (5 splits)** instead of Leave-One-Out! This is significant because:
-1. It changes the validation scheme entirely
-2. The team tried this in exp_011/012 but had issues with fold structure
-3. The kernel shows this approach can work with MLP+GBDT ensemble
+**Critical Insight from Top Kernel (lishellliang)**:
+The top-performing public kernel uses **GroupKFold(5)** instead of Leave-One-Out! This is CRITICAL:
+```python
+# From lishellliang kernel - they REDEFINE the split functions:
+def generate_leave_one_out_splits(X, Y):
+    groups = X["SOLVENT NAME"]
+    n_splits = min(5, len(groups.unique()))
+    gkf = GroupKFold(n_splits=n_splits)
+    for train_idx, test_idx in gkf.split(X, Y, groups):
+        yield ((X.iloc[train_idx], Y.iloc[train_idx]),
+               (X.iloc[test_idx], Y.iloc[test_idx]))
+```
+
+The team tried GroupKFold in exp_011/012 but got an error ("Evaluation metric raised an unexpected error"). This needs to be investigated and fixed!
 
 **Assumptions Being Challenged**:
-1. ❌ "More regularization = better generalization" - Not when the problem is extrapolation
-2. ❌ "LOO is the best validation scheme" - GroupKFold might give more realistic estimates
-3. ❌ "Lower CV = better LB" - The 53% CV-LB gap suggests CV isn't predictive
+1. ❌ "Multi-seed ensemble = better generalization" - Not when the problem is extrapolation
+2. ❌ "LOO is the correct validation scheme" - The top kernel uses GroupKFold(5)
+3. ❌ "Lower CV = better LB" - The 53% CV-LB gap (0.0623 → 0.0956) suggests CV isn't predictive
 
 **Blind Spots**:
-1. **The validation scheme itself**: LOO with 24 solvents may be too optimistic
-2. **Feature engineering for extrapolation**: Current features don't capture what makes solvents similar
-3. **Uncertainty quantification**: No attempt to identify which predictions are reliable
-4. **Pre-trained representations**: ChemBERTa, MolBERT could help with unseen solvents
+1. **The validation scheme itself**: LOO may be too optimistic; GroupKFold might give more realistic estimates
+2. **Why exp_011/012 failed**: The GroupKFold submission got an error - this needs debugging
+3. **Pre-trained representations**: ChemBERTa, MolBERT could help with unseen solvents
+4. **Solvent similarity weighting**: Despite the folder name, no actual similarity weighting was implemented!
 
 ## What's Working
 
-1. **Template compliance**: The notebook structure is correct (minor cell 10 issue aside)
-2. **Following feedback**: The researcher correctly abandoned GNN and returned to exp_004 architecture
-3. **Systematic approach**: Clear documentation of changes from exp_004
-4. **Dual featurizer**: The Spange + ACS_PCA combination is sound
+1. **Following feedback**: The researcher correctly removed TTA (which was hurting performance)
+2. **Template structure**: The last 3 cells are in correct positions (7, 8, 9)
+3. **Dual featurizer**: The Spange + ACS_PCA combination is sound
+4. **Per-target approach**: HGB for SM, ExtraTrees for Products is a good architecture
 
 ## Key Concerns
 
-1. **CV-LB Gap is NOT from Overfitting**
-   - **Observation**: Regularization made CV worse (0.0623 → 0.0809) without evidence it will improve LB
-   - **Why it matters**: The 53% CV-LB gap is likely due to test solvents being chemically different, not model complexity
-   - **Suggestion**: Focus on approaches that improve extrapolation, not regularization
+1. **Cell After Final Cell - MUST FIX**
+   - **Observation**: Cell 10 exists after the "FINAL CELL" (cell 9)
+   - **Why it matters**: This violates template compliance and could cause submission errors
+   - **Suggestion**: Remove cell 10 before any submission
 
-2. **Stuck in Local Optimum**
-   - **Observation**: Last 4 experiments (018-021) have all been worse than exp_004
-   - **Why it matters**: Incremental changes aren't working; need a different approach
-   - **Suggestion**: Try fundamentally different strategies (see below)
+2. **Multi-Seed Ensemble Made Things Worse**
+   - **Observation**: CV went from 0.0623 → 0.0901 (45% worse), especially full data (0.0603 → 0.1126)
+   - **Why it matters**: This approach is moving in the wrong direction
+   - **Suggestion**: Abandon multi-seed ensemble; return to single-seed exp_004 architecture
 
-3. **Only 2 Submissions Remaining**
+3. **GroupKFold Submission Error Not Investigated**
+   - **Observation**: exp_011/012 used GroupKFold but got "Evaluation metric raised an unexpected error"
+   - **Why it matters**: The top kernel uses GroupKFold successfully - we're missing something
+   - **Suggestion**: Debug why GroupKFold submission failed; compare with lishellliang kernel
+
+4. **Only 2 Submissions Remaining**
    - **Observation**: 4/5 submissions used, best LB is 0.0956
-   - **Why it matters**: Each submission is precious; don't waste on CV 0.0809
+   - **Why it matters**: Each submission is precious; don't waste on CV 0.0901
    - **Suggestion**: Only submit if CV < 0.0623 OR if there's strong reason to believe better generalization
 
-4. **Template Cell After Final Cell**
-   - **Observation**: Cell 10 exists after the "FINAL CELL"
-   - **Why it matters**: Could potentially cause issues on Kaggle
-   - **Suggestion**: Remove cell 10 before any submission
+5. **Folder Name Mismatch**
+   - **Observation**: Folder is "022_similarity_weighted" but no similarity weighting was implemented
+   - **Why it matters**: The original plan (solvent similarity features) wasn't executed
+   - **Suggestion**: Consider actually implementing similarity-weighted predictions
 
 ## Top Priority for Next Experiment
 
-**DO NOT SUBMIT exp_021.** The CV (0.0809) is 30% worse than the best (0.0623), and there's no evidence it will generalize better.
+**DO NOT SUBMIT exp_022.** The CV (0.0901) is 45% worse than the best (0.0623), and there's no evidence it will generalize better.
 
-### Strategic Recommendation: Try a Fundamentally Different Approach
+### Strategic Recommendation: Debug GroupKFold and Match Top Kernel
 
-Given the situation (2 submissions left, best LB 0.0956, target 0.01727), the team needs to break out of the local optimum. Here are high-leverage options:
+The top public kernel (lishellliang) achieves good CV-LB correlation using GroupKFold(5). The team tried this in exp_011/012 but got a submission error. **This is the highest-leverage thing to fix.**
 
-**Option A: Revisit GroupKFold (RECOMMENDED)**
-The top public kernel uses GroupKFold(5) instead of LOO. The team tried this in exp_011/012 but had issues. Key insight:
-- GroupKFold gives more realistic CV estimates
-- The kernel shows MLP+GBDT ensemble works with this scheme
-- **Action**: Carefully implement GroupKFold, ensuring the submission format is correct
+**Immediate Actions:**
 
-**Option B: Solvent Similarity Features**
-The CV-LB gap suggests test solvents are chemically different. Try:
-- Compute Tanimoto similarity between test and training solvents
-- Weight predictions by similarity to training solvents
-- Use uncertainty-aware predictions (GP, ensemble variance)
+1. **Remove cell 10** from exp_022 notebook (template compliance)
 
-**Option C: Pre-trained Molecular Representations**
-Instead of learning from 24 solvents, use representations learned from millions:
-- ChemBERTa embeddings for solvent SMILES
-- MolBERT or other pre-trained molecular models
-- Fine-tune on Catechol data
+2. **Debug GroupKFold submission error**:
+   - Compare exp_012 submission format with lishellliang kernel
+   - The error "Evaluation metric raised an unexpected error" suggests format mismatch
+   - Key difference: GroupKFold produces 5 folds, not 24/13 folds
+   - The submission format might need different fold indices
 
-**Option D: Ensemble of Best Models**
-Combine the best-performing models from different experiments:
-- exp_004/017 (HGB+ETR, CV 0.0623)
-- exp_005 (no TTA, CV 0.0623)
-- exp_009 (diverse ensemble, CV 0.0673)
-- Average predictions to reduce variance
+3. **Replicate lishellliang kernel exactly**:
+   - Use their exact GroupKFold implementation
+   - Use their EnsembleModel (MLP + XGB + RF + LGB)
+   - Use their weights [0.35, 0.25, 0.25, 0.15]
+   - This is a known-working approach
 
-### Immediate Actions:
-1. **Remove cell 10** from exp_021 notebook (template compliance)
-2. **Don't submit exp_021** - CV is too high
-3. **Investigate GroupKFold** - understand why exp_011/012 failed and fix it
-4. **Consider pre-trained representations** - this is the most promising unexplored direction
+4. **If GroupKFold can't be fixed, try actual similarity weighting**:
+   - Compute Tanimoto similarity between test and training solvents
+   - Weight predictions by similarity to training solvents
+   - Use uncertainty-aware predictions (ensemble variance)
 
-**The target IS reachable.** The current best LB (0.0956) is 5.5x from target (0.01727). This requires either:
-- A fundamentally different approach that generalizes to unseen solvents
-- Or discovering that the target is based on a different validation scheme (GroupKFold?)
+### Why GroupKFold Might Work Better:
 
-The team should focus on understanding WHY the CV-LB gap is so large, not on making CV worse through regularization.
+1. **More realistic CV estimates**: LOO with 24 solvents gives optimistic estimates
+2. **Better generalization signal**: GroupKFold tests on multiple solvents at once
+3. **Matches competition evaluation**: The LB might use a similar scheme
+
+### Code to Debug GroupKFold:
+
+```python
+# Check if submission format is correct for GroupKFold
+# The issue might be that fold indices don't match expected format
+
+# Original LOO: 24 folds for single, 13 for full
+# GroupKFold(5): 5 folds for both
+
+# The submission format expects:
+# - task: 0 or 1
+# - fold: fold index
+# - row: row index within fold
+# - target_1, target_2, target_3: predictions
+
+# With GroupKFold, fold indices are 0-4, not 0-23/0-12
+# This might be causing the evaluation error
+```
+
+**The target IS reachable.** The current best LB (0.0956) is 5.5x from target (0.01727). The path forward is:
+1. Fix GroupKFold submission (highest priority)
+2. If that fails, try pre-trained molecular representations
+3. Consider that the target might require a fundamentally different approach (GNN, transfer learning)
+
+The team should focus on understanding WHY the top kernel works and replicating it exactly, rather than making incremental changes to exp_004.
