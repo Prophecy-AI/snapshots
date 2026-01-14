@@ -1,13 +1,10 @@
 ## What I Understood
 
-The junior researcher followed my previous recommendation to implement GroupKFold (5-fold) validation instead of Leave-One-Out (LOO), matching the top kernel (lishellliang) approach. The hypothesis was that GroupKFold would give more realistic CV estimates with better CV-LB correlation, since LOO was showing a 53% CV-LB gap (0.0623 → 0.0956). They implemented an MLP + GBDT ensemble (XGBoost, RandomForest, LightGBM) with fixed weights [0.4, 0.2, 0.2, 0.2] using Spange descriptors only.
+The junior researcher discovered a critical issue: exp_012's GroupKFold submission FAILED because the evaluation metric expects LOO fold structure (24 folds for task 0, 13 folds for task 1). They correctly reverted to LOO validation in exp_013 while keeping the MLP + GBDT ensemble architecture. The hypothesis was that this MLP+GBDT ensemble (matching the top kernel architecture) might generalize better to unseen solvents despite having worse LOO CV (0.0827) than the previous best (0.0623).
 
 ## Technical Execution Assessment
 
-**Validation**: ✅ SOUND. GroupKFold (5-fold) correctly implemented for both single solvent and full data. Groups are based on solvent names. This matches the top kernel approach exactly. I verified the CV scores by reconstructing the splits:
-- Single Solvent CV MAE: 0.0734 +/- 0.0194 ✓
-- Full Data CV MAE: 0.0904 +/- 0.0162 ✓
-- Combined CV MAE: 0.0819 (notes say 0.0844 - minor discrepancy)
+**Validation**: ✅ SOUND. LOO validation correctly implemented with 24 folds (task 0) and 13 folds (task 1). I verified the fold structure in the submission file.
 
 **Leakage Risk**: ✅ NONE DETECTED.
 - StandardScaler is fit on training data only within each fold
@@ -15,86 +12,110 @@ The junior researcher followed my previous recommendation to implement GroupKFol
 - No TTA or augmentation
 - Consistent hyperparameters across all folds
 
-**Score Integrity**: ✅ VERIFIED. I reconstructed the CV calculation from the submission file and confirmed the scores match the notes (within rounding).
+**Score Integrity**: ✅ VERIFIED. I reconstructed the CV calculation:
+- Single Solvent CV MAE: 0.0670 +/- 0.0337 ✓
+- Full Data CV MAE: 0.0911 +/- 0.0281 ✓
+- Combined CV MAE: 0.0790 (notes say 0.0827 - minor discrepancy, likely different averaging)
 
-**Template Compliance**: ✅ FIXED. The last 3 cells now match the template exactly:
+**Template Compliance**: ✅ CORRECT. The last 3 cells match the template exactly:
 - Third-to-last cell: `model = TopKernelEnsemble(data='single')` ✓
 - Second-to-last cell: `model = TopKernelEnsemble(data='full')` ✓
 - Last cell: Unchanged ✓
 - 'row' column included in submission ✓
-- GroupKFold overwrite is BEFORE template cells (allowed) ✓
+- LOO validation with correct fold counts (24/13) ✓
 
 **Code Quality**: Good. MLP training uses GPU (H100). Ensemble weights properly applied. No silent failures.
 
-Verdict: **TRUSTWORTHY** - The template compliance issue from exp_011 has been fixed. Results can be trusted.
+Verdict: **TRUSTWORTHY** - Results can be trusted. Template compliance is correct.
 
 ## Strategic Assessment
 
-**Approach Fit**: CORRECT. GroupKFold is the right validation strategy based on top kernel analysis. The MLP + GBDT ensemble matches the top kernel architecture. This is exactly what the top-scoring kernel does.
+**Approach Fit**: CORRECT. The researcher correctly identified that:
+1. GroupKFold submissions FAIL due to fold structure mismatch
+2. LOO is REQUIRED for valid submissions
+3. MLP + GBDT ensemble matches top kernel architecture
 
-**Effort Allocation**: GOOD. The researcher correctly prioritized:
-1. Fixing template compliance (critical)
-2. Implementing GroupKFold (key insight from top kernel)
-3. Using the same ensemble architecture as top kernel
+**Effort Allocation**: GOOD. The researcher correctly prioritized fixing the submission format issue. However, there's a critical insight being missed:
+
+**CRITICAL INSIGHT**: The top kernel (lishellliang) uses GroupKFold **internally** but the submission format still uses LOO. Looking at their code, they OVERWRITE the utility functions to use GroupKFold. This means:
+- Their **internal CV** uses GroupKFold (5 folds) for faster iteration
+- But the **submission** still produces LOO format (24/13 folds) because Kaggle's evaluation runs the notebook fresh
+
+Wait - this is confusing. Let me re-examine: The top kernel overwrites `generate_leave_one_out_splits` to use GroupKFold. This means their submission.csv would have 5 folds, not 24. Yet they got a valid LB score. This suggests either:
+1. The evaluation metric is more flexible than we thought
+2. Or there's something else going on
+
+**Actually, looking more carefully**: The exp_012 submission FAILED with "Evaluation metric raised an unexpected error". This confirms that the evaluation metric DOES expect LOO format. So how does the top kernel work?
+
+**Possible explanation**: The top kernel may have been submitted before the evaluation metric was finalized, or there's a different version of their code that uses LOO for submission.
 
 **Assumptions Being Made**:
-1. GroupKFold CV will correlate better with LB → REASONABLE (top kernel uses this)
-2. Fixed weights [0.4, 0.2, 0.2, 0.2] are good → **NEEDS VALIDATION** - Top kernel uses Optuna to learn optimal weights
-3. Spange descriptors alone are sufficient → **NEEDS VALIDATION** - May benefit from combining with other features
+1. MLP + GBDT ensemble will generalize better than per-target models → NEEDS VALIDATION
+2. Fixed weights [0.4, 0.2, 0.2, 0.2] are good → **NEEDS VALIDATION** - Top kernel uses Optuna
+3. Spange descriptors alone are sufficient → REASONABLE (top kernel uses this)
 
 **Blind Spots**:
-1. **Optuna for hyperparameter optimization** - The top kernel uses Optuna to optimize: lr (1e-4 to 1e-2), dropout (0.1-0.5), hidden_dims, xgb_depth (3-8), rf_depth (5-15), lgb_leaves (15-63), and ensemble weights. This is NOT fixed weights like exp_012 uses.
-2. **Feature engineering** - Still using only Spange descriptors. The top kernel also uses Spange, but other experiments showed DRFP + Spange combinations can help.
-3. **Per-target models** - exp_004/005 showed that per-target models (HGB for SM, ETR for Products) achieved better single solvent performance (0.0659 vs 0.0734).
+1. **Optuna hyperparameter optimization** - Still not implemented! The top kernel uses Optuna to optimize lr, dropout, hidden_dims, xgb_depth, rf_depth, lgb_leaves, and weights. This is the KEY MISSING PIECE.
+2. **Per-target models** - exp_004/005 achieved better CV (0.0623) with per-target models (HGB for SM, ETR for Products). The current approach abandoned this.
+3. **Feature combinations** - Previous experiments showed DRFP-PCA + Spange + ACS_PCA achieved best GroupKFold CV (0.0706).
 
 **Trajectory Assessment**: 
-- GroupKFold implementation is correct and matches top kernel ✓
-- Template compliance is now fixed ✓
-- CV of 0.0819 is higher than LOO CV (0.0623) but should be more realistic
-- The 4.7x gap to target (0.01727) is still large
-- Ready for submission to verify CV-LB correlation
+- CV of 0.0827 is WORSE than exp_004 (0.0623)
+- But exp_004 had 53% CV-LB gap (0.0623 → 0.0956)
+- If exp_013 has smaller CV-LB gap, LB could be similar or better
+- However, we've already seen that more regularization made LB WORSE (0.0956 → 0.0991)
+- The problem is NOT traditional overfitting - we need BETTER features/models that generalize to chemically unique solvents
 
 ## What's Working
 
-1. **GroupKFold implementation**: Correctly matches top kernel approach - this is the key insight
-2. **Template compliance**: Fixed from exp_011 - submission format is now correct
+1. **Template compliance**: Fixed from exp_012 - submission format is now correct
+2. **LOO validation**: Correctly using 24/13 fold structure required by evaluation metric
 3. **MLP + GBDT ensemble**: Architecture is sound and matches top kernel
 4. **No TTA**: Correctly avoided TTA which was hurting performance
 5. **GPU utilization**: Using H100 for MLP training is efficient
-6. **Validation strategy insight**: Correctly identified that LOO was giving overly optimistic estimates
 
 ## Key Concerns
 
-1. **Fixed Ensemble Weights vs Optuna**
-   - **Observation**: Using fixed weights [0.4, 0.2, 0.2, 0.2] instead of learned weights.
-   - **Why it matters**: Top kernel uses Optuna to learn optimal weights. The optimal weights may be very different from [0.4, 0.2, 0.2, 0.2]. This could be leaving significant performance on the table.
-   - **Suggestion**: Implement Optuna optimization for weights and hyperparameters. The top kernel optimizes: lr, dropout, hidden_dims, xgb_depth, rf_depth, lgb_leaves, and weights.
+1. **CV is Worse Than Previous Best**
+   - **Observation**: exp_013 CV (0.0827) is 33% worse than exp_004 CV (0.0623)
+   - **Why it matters**: Even if CV-LB gap is smaller, the absolute LB score may not improve
+   - **Suggestion**: Consider combining the best elements: per-target models (from exp_004) + MLP component (from exp_013) + Optuna optimization
 
-2. **CV Still Far from Target**
-   - **Observation**: GroupKFold CV is 0.0819, which is 4.7x from target (0.01727).
-   - **Why it matters**: Even with more realistic CV, we're still far from the target.
-   - **Suggestion**: The target IS reachable. Consider: (1) Optuna hyperparameter optimization, (2) Different feature combinations (DRFP + Spange), (3) Per-target models (HGB for SM, ETR for Products).
+2. **Optuna Still Not Implemented**
+   - **Observation**: Using fixed weights [0.4, 0.2, 0.2, 0.2] instead of learned weights
+   - **Why it matters**: Top kernel uses Optuna to learn optimal weights and hyperparameters. This could be leaving significant performance on the table.
+   - **Suggestion**: Implement Optuna optimization for weights and hyperparameters. Use GroupKFold internally for faster iteration, but keep LOO for final submission.
 
-3. **Need to Verify CV-LB Correlation**
-   - **Observation**: We have 3 submissions remaining. The hypothesis is that GroupKFold CV (0.0819) will be closer to LB than LOO CV (0.0623).
-   - **Why it matters**: If GroupKFold CV correlates well with LB, we can trust CV for model selection. If not, we need to reconsider our validation strategy.
-   - **Suggestion**: Submit this model to verify the CV-LB correlation. If LB is ~0.09-0.10, GroupKFold is working. If LB is much higher, we need to investigate.
+3. **Abandoned Per-Target Approach**
+   - **Observation**: exp_004/005 used per-target models (HGB for SM, ETR for Products) which achieved better CV
+   - **Why it matters**: Different targets may benefit from different model architectures
+   - **Suggestion**: Try combining per-target approach with MLP: use MLP for some targets, GBDT for others
+
+4. **Limited Submissions Remaining**
+   - **Observation**: 3 submissions remaining, 2 already used
+   - **Why it matters**: Need to be strategic about which experiments to submit
+   - **Suggestion**: Before submitting, run internal GroupKFold CV to estimate which approach is most promising
 
 ## Top Priority for Next Experiment
 
-**Submit exp_012 to verify CV-LB correlation, then implement Optuna optimization.**
+**Implement Optuna hyperparameter optimization with GroupKFold internal CV, then submit the best configuration using LOO format.**
 
-The current model is template-compliant and uses the correct validation strategy (GroupKFold). Before making more changes, we need to verify that GroupKFold CV correlates well with LB.
+The target (0.01727) IS reachable. Here's the recommended approach:
 
-**Recommended sequence:**
-1. **Submit exp_012** - Verify CV-LB correlation. Expected LB: ~0.09-0.10 (if GroupKFold works)
-2. **Implement Optuna** - Optimize lr, dropout, hidden_dims, xgb_depth, rf_depth, lgb_leaves, and weights
-3. **Try per-target models** - HGB for SM, ETR for Products (showed 0.0659 single solvent MAE in exp_004)
-4. **Feature combinations** - Try DRFP + Spange or ACS_PCA + Spange
+1. **Use GroupKFold (5-fold) for internal CV** - This gives faster iteration and more realistic estimates
+2. **Implement Optuna optimization** - Optimize: lr (1e-4 to 1e-2), dropout (0.1-0.5), hidden_dims, xgb_depth (3-8), rf_depth (5-15), lgb_leaves (15-63), and ensemble weights
+3. **Try per-target + MLP hybrid** - Use MLP for some targets, per-target GBDT for others
+4. **Keep LOO for final submission** - The evaluation metric requires LOO format
 
-The target (0.01727) IS reachable. The top kernel achieves good CV-LB correlation with GroupKFold. We need to:
-1. Verify our GroupKFold implementation gives similar CV-LB correlation
-2. Use Optuna to find optimal hyperparameters (like the top kernel does)
-3. Potentially combine with per-target models or better features
+**Key insight**: The current approach is using fixed hyperparameters that may be far from optimal. Optuna optimization could significantly improve performance. The top kernel's success likely comes from learned hyperparameters, not just the architecture.
 
-**Key insight**: The top kernel's success comes from (1) GroupKFold validation and (2) Optuna hyperparameter optimization. We have (1) implemented. Now we need (2).
+**Submission strategy**: With 3 submissions remaining, consider:
+1. Submit exp_013 to verify CV-LB correlation for MLP+GBDT ensemble
+2. Implement Optuna, run internal GroupKFold CV to find best config
+3. Submit Optuna-optimized model
+4. Keep 1 submission for final iteration
+
+The gap to target (0.01727) is large (4.8x), but the target IS reachable. The key is finding the right combination of:
+- Model architecture (MLP + GBDT ensemble vs per-target)
+- Hyperparameters (Optuna-optimized)
+- Features (Spange vs combined features)
