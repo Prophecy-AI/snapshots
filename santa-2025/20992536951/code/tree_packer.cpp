@@ -514,7 +514,7 @@ void saveCSV(const string& fn, const map<int, Cfg>& cfg) {
         if (cfg.count(n)) {
             const Cfg& c = cfg.at(n);
             for (int i = 0; i < n; i++)
-                f << setfill('0') << setw(3) << n << "_" << i << ",s" << c.x[i] << ",s" << c.y[i] << ",s" << c.a[i] << "\n";
+                f << setfill('0') << setw(3) << n << "_" << i << "," << c.x[i] << "," << c.y[i] << "," << c.a[i] << "\n";
         }
     }
 }

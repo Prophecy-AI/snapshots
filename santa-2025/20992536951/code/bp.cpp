@@ -99,9 +99,9 @@ void parse_csv(const string& filename) {
         int n = stoi(id_str.substr(0, 3));
 
         // Remove 's' prefix
-        long double x = stold(x_str.substr(1));
-        long double y = stold(y_str.substr(1));
-        long double deg = stold(deg_str.substr(1));
+        long double x = stold(x_str);
+        long double y = stold(y_str);
+        long double deg = stold(deg_str);
 
         data[n].push_back({x, y, deg});
     }
@@ -128,9 +128,9 @@ void save_csv(const string& filename) {
     for (int n = 1; n <= MAX_N; n++) {
         for (int i = 0; i < configs[n].n; i++) {
             f << setw(3) << setfill('0') << n << "_" << i << ",";
-            f << "s" << configs[n].x[i] << ",";
-            f << "s" << configs[n].y[i] << ",";
-            f << "s" << configs[n].a[i] << "\n";
+            f << configs[n].x[i] << ",";
+            f << configs[n].y[i] << ",";
+            f << configs[n].a[i] << "\n";
         }
     }
 }
