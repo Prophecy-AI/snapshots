@@ -1,17 +1,17 @@
 {
-  "phase": "executor",
+  "phase": "evaluator",
   "loop_count": 3,
   "last_submission": null,
   "competition_id": "catechol-benchmark-hackathon",
   "seed_prompt": "# Catechol Reaction Yield Prediction - Evolved Seed Prompt (Loop 2)\n\n## Current Status\n- Best CV score: **0.08819** from exp_000 (Physics-Informed MLP Baseline)\n- Best LB score: Not yet submitted\n- Target: **0.04740** (need ~46% RMSE reduction)\n- Submissions remaining: 5/5\n\n## Response to Evaluator\n\n**Technical verdict**: TRUSTWORTHY - The evaluator confirmed sound validation methodology with no leakage.\n\n**Evaluator's top priority**: Debug and fully test TabPFN. \n- **My response**: TabPFN v6.3.0 requires HuggingFace authentication for gated model access. The older v0.1.10 only supports classification, not regression. This is a dead end without HF credentials. **Pivoting to feature expansion and architecture improvements instead.**\n\n**Key concerns raised**:\n1. **Ensemble with weak components** - Agreed. LightGBM (0.10019) dragged down the ensemble. Will not include weak models in future ensembles.\n2. **Feature space not explored** - Agreed. DRFP and fragprints are available but unused. Analysis shows they have only ~150 non-zero columns each, so PCA to 20-50 components is feasible.\n3. **Large gap to target** - Agreed. Need fundamentally different approaches, not incremental tweaks.\n\n## Data Understanding\n\n**Reference notebooks:**\n- `exploration/eda.ipynb` - Full EDA with data shapes, distributions\n- `exploration/evolver_loop2_analysis.ipynb` - Gap analysis, feature exploration\n\n**Key patterns to exploit:**\n\n1. **Feature expansion opportunity**: DRFP (2048\u2192165 non-zero) and fragprints (2133\u2192144 non-zero) can be reduced to ~20-50 PCs capturing 100% variance. These may contain patterns Spange descriptors miss.\n\n2. **Non-linear solvent mixing**: Current linear interpolation `A*(1-pct) + B*pct` may not capture real mixture effects. Try:\n   - Concatenate both solvent features + mixing ratio (don't interpolate)\n   - Add interaction terms between A and B features\n   - Add polynomial terms of mixing ratio\n\n3. **Per-solvent variance**: Some solvents (Acetonitrile.Acetic Acid, IPA, Decanol) have very high SM variance (>0.43). These are harder to predict and may need special handling.\n\n4. **Baseline gap**: Predicting mean gives RMSE=0.2353. Our best (0.08819) is 62.5% better. Target requires another 46% improvement - this is substantial.\n\n## CRITICAL SUBMISSION CONSTRAINTS\n\n**MANDATORY STRUCTURE:**\n- The submission MUST follow the template notebook structure\n- Only the last 3 cells can be modified, and ONLY the `model = MLPModel()` line can be changed\n- Model must implement: `train_model(X_train, y_train)` and `predict(X_test)` methods\n- Two tasks: single_solvent (leave-one-solvent-out CV, 24 folds) and full (leave-one-ramp-out CV, 13 folds)\n- Target order in Y: [\"Product 2\", \"Product 3\", \"SM\"]\n\n## Recommended Approaches (Priority Order)\n\n### Priority 1: Feature Expansion with DRFP/Fragprints + PCA\n**Why**: Spange descriptors (13 features) may not capture all relevant chemistry. DRFP captures reaction fingerprints, fragprints capture molecular fragments.\n\n**Implementation:**\n```python\nfrom sklearn.decomposition import PCA\nfrom sklearn.preprocessing import StandardScaler\n\n# Load and reduce DRFP\ndrfp = pd.read_csv(f'{DATA_PATH}/drfps_catechol_lookup.csv', index_col=0)\nscaler = StandardScaler()\ndrfp_scaled = scaler.fit_transform(drfp)\npca = PCA(n_components=20)  # or 30-50\ndrfp_pca = pca.fit_transform(drfp_scaled)\n\n# Combine with Spange\ncombined_features = np.hstack([spange_features, drfp_pca_features])\n```\n\n**Expected impact**: Medium-high. Different feature representations often capture different patterns.\n\n### Priority 2: Non-Linear Solvent Mixing Features\n**Why**: Linear interpolation assumes properties mix linearly, but real solvent mixtures often have non-linear effects.\n\n**Implementation:**\n```python\n# Instead of: mixed = A * (1-pct) + B * pct\n# Try concatenation:\nmixed = np.hstack([A_features, B_features, pct, pct**2, A_features * pct, B_features * (1-pct)])\n```\n\n**Expected impact**: Medium. May help with full data task specifically.\n\n### Priority 3: Deeper/Wider MLP Architecture\n**Why**: Current architecture [128, 128, 64] may be too shallow for the complexity.\n\n**Implementation:**\n```python\n# Try deeper architecture\nhidden_dims = [256, 256, 128, 64]  # or [512, 256, 128, 64]\n\n# Add residual connections\nclass ResidualBlock(nn.Module):\n    def __init__(self, dim):\n        super().__init__()\n        self.net = nn.Sequential(\n            nn.Linear(dim, dim),\n            nn.BatchNorm1d(dim),\n            nn.ReLU(),\n            nn.Dropout(0.2),\n            nn.Linear(dim, dim),\n            nn.BatchNorm1d(dim)\n        )\n    def forward(self, x):\n        return F.relu(x + self.net(x))\n```\n\n**Expected impact**: Medium. More capacity may help if features are rich enough.\n\n### Priority 4: Per-Target Specialized Models\n**Why**: SM (starting material) follows different kinetics than products. Separate optimization may help.\n\n**Implementation:**\n```python\nclass PerTargetModel:\n    def __init__(self):\n        self.models = [MLPModel() for _ in range(3)]  # One per target\n    \n    def train_model(self, X_train, y_train):\n        for i, model in enumerate(self.models):\n            model.train_model(X_train, y_train[:, i:i+1])\n    \n    def predict(self, X_test):\n        preds = [m.predict(X_test) for m in self.models]\n        return torch.cat(preds, dim=1)\n```\n\n**Expected impact**: Medium. Different targets may have different optimal architectures.\n\n### Priority 5: Gaussian Process Regression\n**Why**: Good for small data with uncertainty quantification. May work well given dataset size (~650-1200 samples).\n\n**Implementation:**\n```python\nfrom sklearn.gaussian_process import GaussianProcessRegressor\nfrom sklearn.gaussian_process.kernels import RBF, Matern, WhiteKernel\n\nkernel = Matern(nu=2.5) + WhiteKernel()\ngp = GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=10)\n```\n\n**Expected impact**: Medium. May provide different error patterns for ensembling.\n\n## What NOT to Try\n\n1. **TabPFN** - Requires HuggingFace authentication for gated model. Dead end.\n2. **LightGBM/XGBoost alone** - Already tested, performs worse than MLP (0.10019 vs 0.08819).\n3. **Simple ensemble with weak models** - Dragged down performance. Only ensemble strong models.\n4. **Hyperparameter tuning on current architecture** - Need fundamentally different approaches first.\n\n## Validation Notes\n\n- **CV scheme**: Leave-one-solvent-out (24 folds) for single, leave-one-ramp-out (13 folds) for full\n- **Metric**: RMSE averaged across both tasks\n- **No LB submissions yet** - Should submit once we see CV improvement to calibrate CV-LB gap\n\n## Implementation Checklist\n\n1. \u2705 Model class with `train_model(X_train, y_train)` and `predict(X_test)` methods\n2. \u2705 Featurizer that handles both single and mixed solvents\n3. \u2705 Physics-informed features (Arrhenius kinetics)\n4. \u2705 TTA for mixed solvent symmetry\n5. \u2705 Ensemble of multiple seeds\n6. \u2b1c Feature expansion with DRFP/fragprints\n7. \u2b1c Non-linear mixing features\n8. \u2b1c Deeper architecture with residual connections\n9. \u2b1c Per-target specialized models\n\n## Next Experiment Recommendation\n\n**Experiment 003: Feature Expansion + Deeper MLP**\n\nCombine:\n1. Spange descriptors (13 features)\n2. DRFP with PCA to 20 components\n3. Arrhenius kinetics features (3 features)\n4. Deeper MLP [256, 256, 128, 64] with residual connections\n5. TTA for mixed solvents\n6. Ensemble of 5 models\n\nThis addresses the evaluator's concern about unexplored feature space while maintaining the proven MLP architecture.\n\n**Alternative if Feature Expansion doesn't help:**\n- Try non-linear mixing features (concatenate A+B instead of interpolate)\n- Try Gaussian Process as a different model family\n- Try per-target specialized models with different architectures",
   "evaluator_feedback": "## What I Understood\n\nThe junior researcher attempted to improve upon the MLP baseline (0.08819) by creating an ensemble of MLP + LightGBM + XGBoost with weighted averaging (0.5/0.25/0.25). The hypothesis was that combining diverse model families would reduce variance and improve predictions. They also attempted TabPFN (as I recommended) but encountered HuggingFace authentication issues that prevented full execution. The ensemble achieved 0.08989 overall RMSE - slightly worse than the MLP baseline alone.\n\n## Technical Execution Assessment\n\n**Validation**: SOUND. The implementation correctly uses:\n- Leave-one-solvent-out CV (24 folds) for single solvent task\n- Leave-one-ramp-out CV (13 folds) for full data task\n- Proper train/test splits with no data leakage between folds\n- Standard deviation reported (0.04324 for single, 0.03510 for full)\n\n**Leakage Risk**: NONE DETECTED.\n- Features computed per-fold from training data only\n- Scalers fitted on training data only\n- No target information leaking into features\n\n**Score Integrity**: VERIFIED.\n- Single Solvent CV RMSE: 0.08807 \u00b1 0.04324\n- Full Data CV RMSE: 0.09171 \u00b1 0.03510\n- Overall CV RMSE: 0.08989\n- Scores match execution output in notebook\n\n**Code Quality**: GOOD.\n- Reproducibility: Seeds set appropriately\n- GPU utilization confirmed\n- No silent failures observed\n- Proper gradient clipping and learning rate scheduling\n\n**TabPFN Attempt**: INCOMPLETE.\n- TabPFN was imported successfully but the full CV wasn't executed\n- The notebook shows cells without execution timestamps after the initial import test\n- This is a missed opportunity - TabPFN should be fully tested\n\nVerdict: **TRUSTWORTHY** (for the ensemble experiment)\n\n## Strategic Assessment\n\n**Approach Fit**: SUBOPTIMAL\nThe ensemble approach makes theoretical sense, but the execution reveals a key insight: **LightGBM alone performed significantly worse (0.10019) than MLP (0.08819)**. Adding a weaker model to an ensemble typically degrades performance unless the models are complementary. The 0.5/0.25/0.25 weighting still gives too much weight to underperforming models.\n\n**Why the Ensemble Didn't Help**:\n1. LightGBM (0.10019) is ~13% worse than MLP baseline\n2. XGBoost likely similar to LightGBM (tree-based models share similar biases)\n3. Averaging with weaker models pulls down the ensemble\n4. The models aren't truly diverse - they're all using the same features\n\n**Effort Allocation**: PARTIALLY MISALLOCATED\n- Time spent on ensemble when individual components weren't strong\n- TabPFN attempt was abandoned due to authentication issues - this should have been debugged\n- No exploration of richer feature sets (DRFP, fragprints)\n\n**Assumptions Being Made**:\n1. Linear mixing of solvent features is sufficient - NOT VALIDATED\n2. Same architecture works for all targets - NOT VALIDATED\n3. Spange descriptors capture all relevant chemistry - NOT VALIDATED\n\n**Blind Spots - CRITICAL**:\n\n1. **TabPFN Not Fully Tested**: The most promising approach was abandoned. TabPFN doesn't require HuggingFace authentication for basic usage - the error might be a configuration issue or version mismatch.\n\n2. **Feature Engineering Stagnation**: Still only using Spange descriptors (13 features). The competition provides:\n   - DRFP (2048 features) - differential reaction fingerprints\n   - Fragprints (2133 features) - molecular fingerprints\n   - These could capture patterns Spange misses\n\n3. **No Per-Target Analysis**: The three targets (SM, Product 2, Product 3) may have different optimal models. SM (starting material) follows different kinetics than products.\n\n4. **Non-Linear Solvent Mixing**: Current approach uses linear interpolation: `A*(1-pct) + B*pct`. Real solvent mixtures often have non-linear effects (synergistic/antagonistic).\n\n**Trajectory**: NEEDS PIVOT\nTwo experiments have shown that incremental changes to the MLP approach aren't closing the gap. Current best: 0.08819, Target: 0.04740. Need ~46% reduction in RMSE. This requires fundamentally different approaches, not ensemble tweaks.\n\n## What's Working\n\n1. \u2705 Physics-informed features (Arrhenius kinetics) - validated as beneficial\n2. \u2705 TTA for symmetry exploitation - provides consistent improvement\n3. \u2705 Robust training setup (HuberLoss, gradient clipping, LR scheduling)\n4. \u2705 Correct validation methodology\n5. \u2705 Clean, reproducible code structure\n\n## Key Concerns\n\n### 1. TabPFN Abandoned Prematurely\n- **Observation**: TabPFN import succeeded but full CV wasn't run due to \"HuggingFace authentication\"\n- **Why it matters**: TabPFN is specifically designed for small tabular datasets and could provide significant improvement. Basic TabPFN usage doesn't require HuggingFace auth.\n- **Suggestion**: Debug the TabPFN issue. Try:\n  ```python\n  from tabpfn import TabPFNRegressor\n  model = TabPFNRegressor(device='cuda')  # or 'cpu'\n  model.fit(X_train, y_train)\n  preds = model.predict(X_test)\n  ```\n  If authentication is truly required, try `huggingface-cli login` or set `HF_TOKEN` environment variable.\n\n### 2. Ensemble with Weak Components\n- **Observation**: LightGBM alone (0.10019) is worse than MLP (0.08819), yet it's included in ensemble\n- **Why it matters**: Ensembling weak models with strong ones degrades performance\n- **Suggestion**: Either improve LightGBM significantly (different features, hyperparameters) or remove it. Consider ensemble only if components are comparable in strength.\n\n### 3. Feature Space Not Explored\n- **Observation**: Only Spange descriptors (13 features) used across all experiments\n- **Why it matters**: DRFP (2048) and fragprints (2133) contain rich molecular information that could capture patterns Spange misses\n- **Suggestion**: Try:\n  - DRFP with PCA to ~50-100 components\n  - Fragprints with PCA to ~50-100 components\n  - Concatenate Spange + reduced DRFP/fragprints\n\n### 4. Large Gap to Target\n- **Observation**: Best score 0.08819, target 0.04740 - need ~46% reduction\n- **Why it matters**: Incremental improvements won't close this gap\n- **Suggestion**: Need fundamentally different approaches:\n  - TabPFN (foundation model for small tabular data)\n  - Gaussian Processes (good for small data with uncertainty)\n  - Per-target specialized models\n  - Richer feature representations\n\n## Top Priority for Next Experiment\n\n**DEBUG AND FULLY TEST TabPFN**\n\nRationale:\n1. TabPFN is specifically designed for small tabular datasets (<10K samples) - exactly our problem size\n2. The import succeeded, suggesting the package is installed correctly\n3. Basic TabPFN usage should NOT require HuggingFace authentication\n4. If it does require auth, this is a solvable configuration issue\n5. TabPFN could provide the step-change improvement needed to approach the target\n\nImplementation steps:\n```python\n# Step 1: Test basic TabPFN without auth\nfrom tabpfn import TabPFNRegressor\nimport os\n\n# If auth is needed, try setting token\n# os.environ['HF_TOKEN'] = 'your_token_here'\n\n# Step 2: Simple test on one fold\nmodel = TabPFNRegressor(device='cuda')\nmodel.fit(X_train_fold, y_train_fold[:, 0])  # Single target first\npreds = model.predict(X_test_fold)\n\n# Step 3: If working, run full CV with per-target models\n```\n\nIf TabPFN truly cannot be made to work, the fallback priority is:\n1. **Feature expansion**: Add DRFP/fragprints with PCA dimensionality reduction\n2. **Per-target models**: Train separate optimized models for SM vs Products\n3. **Non-linear solvent mixing**: Try concatenating both solvent features + mixing ratio instead of linear interpolation\n\nThe target IS reachable. The gap suggests we haven't found the right model family or feature representation yet. TabPFN represents the highest-leverage experiment to try next.\n",
   "latest_experiment": {
-    "id": "exp_001",
-    "name": "LightGBM Per-Target + Ensemble (MLP+LightGBM+XGBoost)",
-    "model_type": "Ensemble",
-    "score": 0.08989,
-    "notes": "Tried two approaches: (1) LightGBM alone with per-target optimization achieved 0.10019 overall RMSE - worse than MLP baseline. (2) Ensemble of MLP + LightGBM + XGBoost with weights 0.5/0.25/0.25 achieved 0.08989 - also slightly worse than MLP baseline (0.08819). TabPFN was attempted but requires HuggingFace authentication for the gated model. The MLP baseline remains our best model. Next: try feature expansion with DRFP/fragprints using PCA dimensionality reduction.",
-    "timestamp": "2026-01-14T08:33:23.275912"
+    "id": "exp_002",
+    "name": "Feature Expansion (Spange + DRFP PCA + Fragprints PCA) + Deeper MLP",
+    "model_type": "MLP",
+    "score": 0.10767,
+    "notes": "Added DRFP (20 PCA components, 99.85% variance) and Fragprints (20 PCA components, 99.05% variance) to Spange descriptors. Total 58 features vs 18 in baseline. Used deeper MLP [256, 256, 128, 64]. Result: WORSE than baseline (0.10767 vs 0.08819). The additional molecular fingerprint features added noise rather than signal. Single Solvent: 0.10092 \u00b1 0.05125, Full Data: 0.11443 \u00b1 0.03098. Conclusion: Spange descriptors alone are sufficient; DRFP/fragprints don't help for this task.",
+    "timestamp": "2026-01-14T09:57:12.370867"
   },
   "competitive_intel": "## Available Competitive Intelligence\n\n- Competition description: `../research/description.md`\n- 5 top kernel notebooks in `../research/kernels/`",
   "target_score": 0.0474,
@@ -1375,6 +1375,413 @@
           "tool_use_id": "toolu_01ArLPKoydrdfcGwwd3E3Cbi",
           "content": "Transitioning to next phase",
           "is_error": false
+        },
+        {
+          "type": "text",
+          "text": "\ud83d\udd04 **EVALUATION COMPLETE - RESUMING**\n\n## Evaluator Feedback\n## What I Understood\n\nThe junior researcher attempted to improve upon the MLP baseline (0.08819) by creating an ensemble of MLP + LightGBM + XGBoost with weighted averaging (0.5/0.25/0.25). The hypothesis was that combining diverse model families would reduce variance and improve predictions. They also attempted TabPFN (as I recommended) but encountered HuggingFace authentication issues that prevented full execution. The ensemble achieved 0.08989 overall RMSE - slightly worse than the MLP baseline alone.\n\n## Technical Execution Assessment\n\n**Validation**: SOUND. The implementation correctly uses:\n- Leave-one-solvent-out CV (24 folds) for single solvent task\n- Leave-one-ramp-out CV (13 folds) for full data task\n- Proper train/test splits with no data leakage between folds\n- Standard deviation reported (0.04324 for single, 0.03510 for full)\n\n**Leakage Risk**: NONE DETECTED.\n- Features computed per-fold from training data only\n- Scalers fitted on training data only\n- No target information leaking into features\n\n**Score Integrity**: VERIFIED.\n- Single Solvent CV RMSE: 0.08807 \u00b1 0.04324\n- Full Data CV RMSE: 0.09171 \u00b1 0.03510\n- Overall CV RMSE: 0.08989\n- Scores match execution output in notebook\n\n**Code Quality**: GOOD.\n- Reproducibility: Seeds set appropriately\n- GPU utilization confirmed\n- No silent failures observed\n- Proper gradient clipping and learning rate scheduling\n\n**TabPFN Attempt**: INCOMPLETE.\n- TabPFN was imported successfully but the full CV wasn't executed\n- The notebook shows cells without execution timestamps after the initial import test\n- This is a missed opportunity - TabPFN should be fully tested\n\nVerdict: **TRUSTWORTHY** (for the ensemble experiment)\n\n## Strategic Assessment\n\n**Approach Fit**: SUBOPTIMAL\nThe ensemble approach makes theoretical sense, but the execution reveals a key insight: **LightGBM alone performed significantly worse (0.10019) than MLP (0.08819)**. Adding a weaker model to an ensemble typically degrades performance unless the models are complementary. The 0.5/0.25/0.25 weighting still gives too much weight to underperforming models.\n\n**Why the Ensemble Didn't Help**:\n1. LightGBM (0.10019) is ~13% worse than MLP baseline\n2. XGBoost likely similar to LightGBM (tree-based models share similar biases)\n3. Averaging with weaker models pulls down the ensemble\n4. The models aren't truly diverse - they're all using the same features\n\n**Effort Allocation**: PARTIALLY MISALLOCATED\n- Time spent on ensemble when individual components weren't strong\n- TabPFN attempt was abandoned due to authentication issues - this should have been debugged\n- No exploration of richer feature sets (DRFP, fragprints)\n\n**Assumptions Being Made**:\n1. Linear mixing of solvent features is sufficient - NOT VALIDATED\n2. Same architecture works for all targets - NOT VALIDATED\n3. Spange descriptors capture all relevant chemistry - NOT VALIDATED\n\n**Blind Spots - CRITICAL**:\n\n1. **TabPFN Not Fully Tested**: The most promising approach was abandoned. TabPFN doesn't require HuggingFace authentication for basic usage - the error might be a configuration issue or version mismatch.\n\n2. **Feature Engineering Stagnation**: Still only using Spange descriptors (13 features). The competition provides:\n   - DRFP (2048 features) - differential reaction fingerprints\n   - Fragprints (2133 features) - molecular fingerprints\n   - These could capture patterns Spange misses\n\n3. **No Per-Target Analysis**: The three targets (SM, Product 2, Product 3) may have different optimal models. SM (starting material) follows different kinetics than products.\n\n4. **Non-Linear Solvent Mixing**: Current approach uses linear interpolation: `A*(1-pct) + B*pct`. Real solvent mixtures often have non-linear effects (synergistic/antagonistic).\n\n**Trajectory**: NEEDS PIVOT\nTwo experiments have shown that incremental changes to the MLP approach aren't closing the gap. Current best: 0.08819, Target: 0.04740. Need ~46% reduction in RMSE. This requires fundamentally different approaches, not ensemble tweaks.\n\n## What's Working\n\n1. \u2705 Physics-informed features (Arrhenius kinetics) - validated as beneficial\n2. \u2705 TTA for symmetry exploitation - provides consistent improvement\n3. \u2705 Robust training setup (HuberLoss, gradient clipping, LR scheduling)\n4. \u2705 Correct validation methodology\n5. \u2705 Clean, reproducible code structure\n\n## Key Concerns\n\n### 1. TabPFN Abandoned Prematurely\n- **Observation**: TabPFN import succeeded but full CV wasn't run due to \"HuggingFace authentication\"\n- **Why it matters**: TabPFN is specifically designed for small tabular datasets and could provide significant improvement. Basic TabPFN usage doesn't require HuggingFace auth.\n- **Suggestion**: Debug the TabPFN issue. Try:\n  ```python\n  from tabpfn import TabPFNRegressor\n  model = TabPFNRegressor(device='cuda')  # or 'cpu'\n  model.fit(X_train, y_train)\n  preds = model.predict(X_test)\n  ```\n  If authentication is truly required, try `huggingface-cli login` or set `HF_TOKEN` environment variable.\n\n### 2. Ensemble with Weak Components\n- **Observation**: LightGBM alone (0.10019) is worse than MLP (0.08819), yet it's included in ensemble\n- **Why it matters**: Ensembling weak models with strong ones degrades performance\n- **Suggestion**: Either improve LightGBM significantly (different features, hyperparameters) or remove it. Consider ensemble only if components are comparable in strength.\n\n### 3. Feature Space Not Explored\n- **Observation**: Only Spange descriptors (13 features) used across all experiments\n- **Why it matters**: DRFP (2048) and fragprints (2133) contain rich molecular information that could capture patterns Spange misses\n- **Suggestion**: Try:\n  - DRFP with PCA to ~50-100 components\n  - Fragprints with PCA to ~50-100 components\n  - Concatenate Spange + reduced DRFP/fragprints\n\n### 4. Large Gap to Target\n- **Observation**: Best score 0.08819, target 0.04740 - need ~46% reduction\n- **Why it matters**: Incremental improvements won't close this gap\n- **Suggestion**: Need fundamentally different approaches:\n  - TabPFN (foundation model for small tabular data)\n  - Gaussian Processes (good for small data with uncertainty)\n  - Per-target specialized models\n  - Richer feature representations\n\n## Top Priority for Next Experiment\n\n**DEBUG AND FULLY TEST TabPFN**\n\nRationale:\n1. TabPFN is specifically designed for small tabular datasets (<10K samples) - exactly our problem size\n2. The import succeeded, suggesting the package is installed correctly\n3. Basic TabPFN usage should NOT require HuggingFace authentication\n4. If it does require auth, this is a solvable configuration issue\n5. TabPFN could provide the step-change improvement needed to approach the target\n\nImplementation steps:\n```python\n# Step 1: Test basic TabPFN without auth\nfrom tabpfn import TabPFNRegressor\nimport os\n\n# If auth is needed, try setting token\n# os.environ['HF_TOKEN'] = 'your_token_here'\n\n# Step 2: Simple test on one fold\nmodel = TabPFNRegressor(device='cuda')\nmodel.fit(X_train_fold, y_train_fold[:, 0])  # Single target first\npreds = model.predict(X_test_fold)\n\n# Step 3: If working, run full CV with per-target models\n```\n\nIf TabPFN truly cannot be made to work, the fallback priority is:\n1. **Feature expansion**: Add DRFP/fragprints with PCA dimensionality reduction\n2. **Per-target models**: Train separate optimized models for SM vs Products\n3. **Non-linear solvent mixing**: Try concatenating both solvent features + mixing ratio instead of linear interpolation\n\nThe target IS reachable. The gap suggests we haven't found the right model family or feature representation yet. TabPFN represents the highest-leverage experiment to try next.\n\n\n## Updated Strategy\n# Catechol Reaction Yield Prediction - Evolved Seed Prompt (Loop 2)\n\n## Current Status\n- Best CV score: **0.08819** from exp_000 (Physics-Informed MLP Baseline)\n- Best LB score: Not yet submitted\n- Target: **0.04740** (need ~46% RMSE reduction)\n- Submissions remaining: 5/5\n\n## Response to Evaluator\n\n**Technical verdict**: TRUSTWORTHY - The evaluator confirmed sound validation methodology with no leakage.\n\n**Evaluator's top priority**: Debug and fully test TabPFN. \n- **My response**: TabPFN v6.3.0 requires HuggingFace authentication for gated model access. The older v0.1.10 only supports classification, not regression. This is a dead end without HF credentials. **Pivoting to feature expansion and architecture improvements instead.**\n\n**Key concerns raised**:\n1. **Ensemble with weak components** - Agreed. LightGBM (0.10019) dragged down the ensemble. Will not include weak models in future ensembles.\n2. **Feature space not explored** - Agreed. DRFP and fragprints are available but unused. Analysis shows they have only ~150 non-zero columns each, so PCA to 20-50 components is feasible.\n3. **Large gap to target** - Agreed. Need fundamentally different approaches, not incremental tweaks.\n\n## Data Understanding\n\n**Reference notebooks:**\n- `exploration/eda.ipynb` - Full EDA with data shapes, distributions\n- `exploration/evolver_loop2_analysis.ipynb` - Gap analysis, feature exploration\n\n**Key patterns to exploit:**\n\n1. **Feature expansion opportunity**: DRFP (2048\u2192165 non-zero) and fragprints (2133\u2192144 non-zero) can be reduced to ~20-50 PCs capturing 100% variance. These may contain patterns Spange descriptors miss.\n\n2. **Non-linear solvent mixing**: Current linear interpolation `A*(1-pct) + B*pct` may not capture real mixture effects. Try:\n   - Concatenate both solvent features + mixing ratio (don't interpolate)\n   - Add interaction terms between A and B features\n   - Add polynomial terms of mixing ratio\n\n3. **Per-solvent variance**: Some solvents (Acetonitrile.Acetic Acid, IPA, Decanol) have very high SM variance (>0.43). These are harder to predict and may need special handling.\n\n4. **Baseline gap**: Predicting mean gives RMSE=0.2353. Our best (0.08819) is 62.5% better. Target requires another 46% improvement - this is substantial.\n\n## CRITICAL SUBMISSION CONSTRAINTS\n\n**MANDATORY STRUCTURE:**\n- The submission MUST follow the template notebook structure\n- Only the last 3 cells can be modified, and ONLY the `model = MLPModel()` line can be changed\n- Model must implement: `train_model(X_train, y_train)` and `predict(X_test)` methods\n- Two tasks: single_solvent (leave-one-solvent-out CV, 24 folds) and full (leave-one-ramp-out CV, 13 folds)\n- Target order in Y: [\"Product 2\", \"Product 3\", \"SM\"]\n\n## Recommended Approaches (Priority Order)\n\n### Priority 1: Feature Expansion with DRFP/Fragprints + PCA\n**Why**: Spange descriptors (13 features) may not capture all relevant chemistry. DRFP captures reaction fingerprints, fragprints capture molecular fragments.\n\n**Implementation:**\n```python\nfrom sklearn.decomposition import PCA\nfrom sklearn.preprocessing import StandardScaler\n\n# Load and reduce DRFP\ndrfp = pd.read_csv(f'{DATA_PATH}/drfps_catechol_lookup.csv', index_col=0)\nscaler = StandardScaler()\ndrfp_scaled = scaler.fit_transform(drfp)\npca = PCA(n_components=20)  # or 30-50\ndrfp_pca = pca.fit_transform(drfp_scaled)\n\n# Combine with Spange\ncombined_features = np.hstack([spange_features, drfp_pca_features])\n```\n\n**Expected impact**: Medium-high. Different feature representations often capture different patterns.\n\n### Priority 2: Non-Linear Solvent Mixing Features\n**Why**: Linear interpolation assumes properties mix linearly, but real solvent mixtures often have non-linear effects.\n\n**Implementation:**\n```python\n# Instead of: mixed = A * (1-pct) + B * pct\n# Try concatenation:\nmixed = np.hstack([A_features, B_features, pct, pct**2, A_features * pct, B_features * (1-pct)])\n```\n\n**Expected impact**: Medium. May help with full data task specifically.\n\n### Priority 3: Deeper/Wider MLP Architecture\n**Why**: Current architecture [128, 128, 64] may be too shallow for the complexity.\n\n**Implementation:**\n```python\n# Try deeper architecture\nhidden_dims = [256, 256, 128, 64]  # or [512, 256, 128, 64]\n\n# Add residual connections\nclass ResidualBlock(nn.Module):\n    def __init__(self, dim):\n        super().__init__()\n        self.net = nn.Sequential(\n            nn.Linear(dim, dim),\n            nn.BatchNorm1d(dim),\n            nn.ReLU(),\n            nn.Dropout(0.2),\n            nn.Linear(dim, dim),\n            nn.BatchNorm1d(dim)\n        )\n    def forward(self, x):\n        return F.relu(x + self.net(x))\n```\n\n**Expected impact**: Medium. More capacity may help if features are rich enough.\n\n### Priority 4: Per-Target Specialized Models\n**Why**: SM (starting material) follows different kinetics than products. Separate optimization may help.\n\n**Implementation:**\n```python\nclass PerTargetModel:\n    def __init__(self):\n        self.models = [MLPModel() for _ in range(3)]  # One per target\n    \n    def train_model(self, X_train, y_train):\n        for i, model in enumerate(self.models):\n            model.train_model(X_train, y_train[:, i:i+1])\n    \n    def predict(self, X_test):\n        preds = [m.predict(X_test) for m in self.models]\n        return torch.cat(preds, dim=1)\n```\n\n**Expected impact**: Medium. Different targets may have different optimal architectures.\n\n### Priority 5: Gaussian Process Regression\n**Why**: Good for small data with uncertainty quantification. May work well given dataset size (~650-1200 samples).\n\n**Implementation:**\n```python\nfrom sklearn.gaussian_process import GaussianProcessRegressor\nfrom sklearn.gaussian_process.kernels import RBF, Matern, WhiteKernel\n\nkernel = Matern(nu=2.5) + WhiteKernel()\ngp = GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=10)\n```\n\n**Expected impact**: Medium. May provide different error patterns for ensembling.\n\n## What NOT to Try\n\n1. **TabPFN** - Requires HuggingFace authentication for gated model. Dead end.\n2. **LightGBM/XGBoost alone** - Already tested, performs worse than MLP (0.10019 vs 0.08819).\n3. **Simple ensemble with weak models** - Dragged down performance. Only ensemble strong models.\n4. **Hyperparameter tuning on current architecture** - Need fundamentally different approaches first.\n\n## Validation Notes\n\n- **CV scheme**: Leave-one-solvent-out (24 folds) for single, leave-one-ramp-out (13 folds) for full\n- **Metric**: RMSE averaged across both tasks\n- **No LB submissions yet** - Should submit once we see CV improvement to calibrate CV-LB gap\n\n## Implementation Checklist\n\n1. \u2705 Model class with `train_model(X_train, y_train)` and `predict(X_test)` methods\n2. \u2705 Featurizer that handles both single and mixed solvents\n3. \u2705 Physics-informed features (Arrhenius kinetics)\n4. \u2705 TTA for mixed solvent symmetry\n5. \u2705 Ensemble of multiple seeds\n6. \u2b1c Feature expansion with DRFP/fragprints\n7. \u2b1c Non-linear mixing features\n8. \u2b1c Deeper architecture with residual connections\n9. \u2b1c Per-target specialized models\n\n## Next Experiment Recommendation\n\n**Experiment 003: Feature Expansion + Deeper MLP**\n\nCombine:\n1. Spange descriptors (13 features)\n2. DRFP with PCA to 20 components\n3. Arrhenius kinetics features (3 features)\n4. Deeper MLP [256, 256, 128, 64] with residual connections\n5. TTA for mixed solvents\n6. Ensemble of 5 models\n\nThis addresses the evaluator's concern about unexplored feature space while maintaining the proven MLP architecture.\n\n**Alternative if Feature Expansion doesn't help:**\n- Try non-linear mixing features (concatenate A+B instead of interpolate)\n- Try Gaussian Process as a different model family\n- Try per-target specialized models with different architectures\n\nContinue experimenting based on the updated guidance above."
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": "Begin experimenting. Follow the seed prompt strategy and create your first baseline.\n\n**IMPORTANT:** Before starting, read `session_state.json` to see existing data findings and notebook references. The strategy below will mention which notebooks to reference for data understanding.\n\n\n## EXISTING DATA FINDINGS\nThe following insights have already been discovered. Reference these instead of re-doing EDA:\n\n- **exploration/eda.ipynb**: Data structure: Single solvent data has 656 samples with 24 unique solvents (leave-one-solvent-out CV = 24 folds). Full data has 1227 samples with 13 unique solvent pair ramps (leave-one-ramp-out CV =...\n- **exploration/eda.ipynb**: Feature lookup tables: Spange descriptors (13 features - physical/chemical properties), ACS PCA (5 features), DRFP (2048 features - reaction fingerprints), Fragprints (2133 features). Spange is most c...\n- **Web search: neural network architectures for small chemistry datasets**: TabPFN (Tabular Prior-data Fitted Network) is a transformer-based foundation model that excels on small tabular datasets (<10K samples). It requires no hyperparameter tuning and can make predictions i...\n- **research/kernels/lishellliang_mixall-runtime-is-only-2m-15s-but-good-cv-lb/mixall-runtime-is-only-2m-15s-but-good-cv-lb.ipynb**: Ensemble approach (mixall kernel): Combines MLP + XGBoost + RandomForest + LightGBM with weighted averaging. Uses Optuna for hyperparameter optimization. Weights are normalized (Dirichlet-like). Uses ...\n- **research/kernels/tobimichigan_catechol-pipeline-with-lightgbm/catechol-pipeline-with-lightgbm.ipynb**: LightGBM pipeline: Uses per-target LightGBM regressors (3 separate models), early stopping with 100-round patience, lr=0.03, max_depth=6. Best single fold MSE=0.0010, best full fold MSE=0.0040. Uses i...\n- **Web search: TabPFN for regression**: TabPFN v2 Regressor: pip install tabpfn, then use TabPFNRegressor(). Works on datasets up to 10,000 rows. Requires Python 3.9+, PyTorch 2.1+. For best results use AutoTabPFNRegressor from tabpfn-exten...\n- **Web search: non-linear solvent mixing ML**: Non-linear solvent mixing: Linear interpolation (A*(1-pct) + B*pct) may not capture real solvent mixture effects. Better approaches: (1) Concatenate both solvent features + mixing ratio instead of int...\n- **exploration/eda.ipynb + evaluator feedback**: Feature expansion opportunity: DRFP (2048 features) and fragprints (2133 features) are available but unused. These capture molecular fingerprints that may contain patterns Spange descriptors miss. Sho...\n- **exploration/evolver_loop2_analysis.ipynb**: DRFP has only 165 non-zero columns out of 2048, fragprints has 144 non-zero out of 2133. First 50 PCs capture 100% variance for both. Can safely use PCA to reduce to ~20-50 components without informat...\n- **exploration/evolver_loop2_analysis.ipynb**: Baseline (predict mean) RMSE = 0.2353. Our best model (0.08819) achieves 62.5% improvement over baseline. Target (0.04740) requires 46.3% further improvement from current best. This is a significant g...\n\nRead `session_state.json` for the complete list and all notebook references.\n\n## SEED PROMPT STRATEGY\n# Catechol Reaction Yield Prediction - Evolved Seed Prompt (Loop 2)\n\n## Current Status\n- Best CV score: **0.08819** from exp_000 (Physics-Informed MLP Baseline)\n- Best LB score: Not yet submitted\n- Target: **0.04740** (need ~46% RMSE reduction)\n- Submissions remaining: 5/5\n\n## Response to Evaluator\n\n**Technical verdict**: TRUSTWORTHY - The evaluator confirmed sound validation methodology with no leakage.\n\n**Evaluator's top priority**: Debug and fully test TabPFN. \n- **My response**: TabPFN v6.3.0 requires HuggingFace authentication for gated model access. The older v0.1.10 only supports classification, not regression. This is a dead end without HF credentials. **Pivoting to feature expansion and architecture improvements instead.**\n\n**Key concerns raised**:\n1. **Ensemble with weak components** - Agreed. LightGBM (0.10019) dragged down the ensemble. Will not include weak models in future ensembles.\n2. **Feature space not explored** - Agreed. DRFP and fragprints are available but unused. Analysis shows they have only ~150 non-zero columns each, so PCA to 20-50 components is feasible.\n3. **Large gap to target** - Agreed. Need fundamentally different approaches, not incremental tweaks.\n\n## Data Understanding\n\n**Reference notebooks:**\n- `exploration/eda.ipynb` - Full EDA with data shapes, distributions\n- `exploration/evolver_loop2_analysis.ipynb` - Gap analysis, feature exploration\n\n**Key patterns to exploit:**\n\n1. **Feature expansion opportunity**: DRFP (2048\u2192165 non-zero) and fragprints (2133\u2192144 non-zero) can be reduced to ~20-50 PCs capturing 100% variance. These may contain patterns Spange descriptors miss.\n\n2. **Non-linear solvent mixing**: Current linear interpolation `A*(1-pct) + B*pct` may not capture real mixture effects. Try:\n   - Concatenate both solvent features + mixing ratio (don't interpolate)\n   - Add interaction terms between A and B features\n   - Add polynomial terms of mixing ratio\n\n3. **Per-solvent variance**: Some solvents (Acetonitrile.Acetic Acid, IPA, Decanol) have very high SM variance (>0.43). These are harder to predict and may need special handling.\n\n4. **Baseline gap**: Predicting mean gives RMSE=0.2353. Our best (0.08819) is 62.5% better. Target requires another 46% improvement - this is substantial.\n\n## CRITICAL SUBMISSION CONSTRAINTS\n\n**MANDATORY STRUCTURE:**\n- The submission MUST follow the template notebook structure\n- Only the last 3 cells can be modified, and ONLY the `model = MLPModel()` line can be changed\n- Model must implement: `train_model(X_train, y_train)` and `predict(X_test)` methods\n- Two tasks: single_solvent (leave-one-solvent-out CV, 24 folds) and full (leave-one-ramp-out CV, 13 folds)\n- Target order in Y: [\"Product 2\", \"Product 3\", \"SM\"]\n\n## Recommended Approaches (Priority Order)\n\n### Priority 1: Feature Expansion with DRFP/Fragprints + PCA\n**Why**: Spange descriptors (13 features) may not capture all relevant chemistry. DRFP captures reaction fingerprints, fragprints capture molecular fragments.\n\n**Implementation:**\n```python\nfrom sklearn.decomposition import PCA\nfrom sklearn.preprocessing import StandardScaler\n\n# Load and reduce DRFP\ndrfp = pd.read_csv(f'{DATA_PATH}/drfps_catechol_lookup.csv', index_col=0)\nscaler = StandardScaler()\ndrfp_scaled = scaler.fit_transform(drfp)\npca = PCA(n_components=20)  # or 30-50\ndrfp_pca = pca.fit_transform(drfp_scaled)\n\n# Combine with Spange\ncombined_features = np.hstack([spange_features, drfp_pca_features])\n```\n\n**Expected impact**: Medium-high. Different feature representations often capture different patterns.\n\n### Priority 2: Non-Linear Solvent Mixing Features\n**Why**: Linear interpolation assumes properties mix linearly, but real solvent mixtures often have non-linear effects.\n\n**Implementation:**\n```python\n# Instead of: mixed = A * (1-pct) + B * pct\n# Try concatenation:\nmixed = np.hstack([A_features, B_features, pct, pct**2, A_features * pct, B_features * (1-pct)])\n```\n\n**Expected impact**: Medium. May help with full data task specifically.\n\n### Priority 3: Deeper/Wider MLP Architecture\n**Why**: Current architecture [128, 128, 64] may be too shallow for the complexity.\n\n**Implementation:**\n```python\n# Try deeper architecture\nhidden_dims = [256, 256, 128, 64]  # or [512, 256, 128, 64]\n\n# Add residual connections\nclass ResidualBlock(nn.Module):\n    def __init__(self, dim):\n        super().__init__()\n        self.net = nn.Sequential(\n            nn.Linear(dim, dim),\n            nn.BatchNorm1d(dim),\n            nn.ReLU(),\n            nn.Dropout(0.2),\n            nn.Linear(dim, dim),\n            nn.BatchNorm1d(dim)\n        )\n    def forward(self, x):\n        return F.relu(x + self.net(x))\n```\n\n**Expected impact**: Medium. More capacity may help if features are rich enough.\n\n### Priority 4: Per-Target Specialized Models\n**Why**: SM (starting material) follows different kinetics than products. Separate optimization may help.\n\n**Implementation:**\n```python\nclass PerTargetModel:\n    def __init__(self):\n        self.models = [MLPModel() for _ in range(3)]  # One per target\n    \n    def train_model(self, X_train, y_train):\n        for i, model in enumerate(self.models):\n            model.train_model(X_train, y_train[:, i:i+1])\n    \n    def predict(self, X_test):\n        preds = [m.predict(X_test) for m in self.models]\n        return torch.cat(preds, dim=1)\n```\n\n**Expected impact**: Medium. Different targets may have different optimal architectures.\n\n### Priority 5: Gaussian Process Regression\n**Why**: Good for small data with uncertainty quantification. May work well given dataset size (~650-1200 samples).\n\n**Implementation:**\n```python\nfrom sklearn.gaussian_process import GaussianProcessRegressor\nfrom sklearn.gaussian_process.kernels import RBF, Matern, WhiteKernel\n\nkernel = Matern(nu=2.5) + WhiteKernel()\ngp = GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=10)\n```\n\n**Expected impact**: Medium. May provide different error patterns for ensembling.\n\n## What NOT to Try\n\n1. **TabPFN** - Requires HuggingFace authentication for gated model. Dead end.\n2. **LightGBM/XGBoost alone** - Already tested, performs worse than MLP (0.10019 vs 0.08819).\n3. **Simple ensemble with weak models** - Dragged down performance. Only ensemble strong models.\n4. **Hyperparameter tuning on current architecture** - Need fundamentally different approaches first.\n\n## Validation Notes\n\n- **CV scheme**: Leave-one-solvent-out (24 folds) for single, leave-one-ramp-out (13 folds) for full\n- **Metric**: RMSE averaged across both tasks\n- **No LB submissions yet** - Should submit once we see CV improvement to calibrate CV-LB gap\n\n## Implementation Checklist\n\n1. \u2705 Model class with `train_model(X_train, y_train)` and `predict(X_test)` methods\n2. \u2705 Featurizer that handles both single and mixed solvents\n3. \u2705 Physics-informed features (Arrhenius kinetics)\n4. \u2705 TTA for mixed solvent symmetry\n5. \u2705 Ensemble of multiple seeds\n6. \u2b1c Feature expansion with DRFP/fragprints\n7. \u2b1c Non-linear mixing features\n8. \u2b1c Deeper architecture with residual connections\n9. \u2b1c Per-target specialized models\n\n## Next Experiment Recommendation\n\n**Experiment 003: Feature Expansion + Deeper MLP**\n\nCombine:\n1. Spange descriptors (13 features)\n2. DRFP with PCA to 20 components\n3. Arrhenius kinetics features (3 features)\n4. Deeper MLP [256, 256, 128, 64] with residual connections\n5. TTA for mixed solvents\n6. Ensemble of 5 models\n\nThis addresses the evaluator's concern about unexplored feature space while maintaining the proven MLP architecture.\n\n**Alternative if Feature Expansion doesn't help:**\n- Try non-linear mixing features (concatenate A+B instead of interpolate)\n- Try Gaussian Process as a different model family\n- Try per-target specialized models with different architectures\n\nStart with a simple baseline following this strategy. Reference the notebooks mentioned in the strategy for data understanding."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "REASONING: The evolver's top priority is Feature Expansion with DRFP/Fragprints + PCA combined with a deeper MLP architecture. Let me implement this as the next experiment."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01EEqijbx9v2uUoVTwzf1F2v",
+          "name": "Bash",
+          "input": {
+            "command": "mkdir -p /home/code/experiments/004_feature_expansion"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01EEqijbx9v2uUoVTwzf1F2v",
+          "content": "(no output)",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_016BQ8Q1yc5wGReJZHVaTyuU",
+          "name": "CreateNotebook",
+          "input": {
+            "notebook_path": "/home/code/experiments/004_feature_expansion/feature_expansion.ipynb",
+            "cells": [
+              {
+                "cell_type": "markdown",
+                "content": "# Experiment 004: Feature Expansion + Deeper MLP\n\nCombining:\n1. Spange descriptors (13 features)\n2. DRFP with PCA to 20-30 components\n3. Fragprints with PCA to 20-30 components  \n4. Arrhenius kinetics features (3 features)\n5. Deeper MLP [256, 256, 128, 64]\n6. TTA for mixed solvents\n7. Ensemble of 5 models"
+              },
+              {
+                "cell_type": "code",
+                "content": "import numpy as np\nimport pandas as pd\nimport torch\nimport torch.nn as nn\nfrom torch.utils.data import TensorDataset, DataLoader\nfrom sklearn.decomposition import PCA\nfrom sklearn.preprocessing import StandardScaler\nimport tqdm\nimport warnings\nwarnings.filterwarnings('ignore')\n\nprint(f\"GPU available: {torch.cuda.is_available()}\")\nif torch.cuda.is_available():\n    print(f\"GPU: {torch.cuda.get_device_name(0)}\")\ntorch.set_default_dtype(torch.double)"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Data loading utilities\nDATA_PATH = '/home/data'\n\nINPUT_LABELS_FULL_SOLVENT = [\"Residence Time\", \"Temperature\", \"SOLVENT A NAME\", \"SOLVENT B NAME\", \"SolventB%\"]\nINPUT_LABELS_SINGLE_SOLVENT = [\"Residence Time\", \"Temperature\", \"SOLVENT NAME\"]\nINPUT_LABELS_NUMERIC = [\"Residence Time\", \"Temperature\"]\nTARGET_LABELS = [\"Product 2\", \"Product 3\", \"SM\"]\n\ndef load_data(name=\"full\"):\n    if name == \"full\":\n        df = pd.read_csv(f'{DATA_PATH}/catechol_full_data_yields.csv')\n        X = df[INPUT_LABELS_FULL_SOLVENT]\n    else:\n        df = pd.read_csv(f'{DATA_PATH}/catechol_single_solvent_yields.csv')\n        X = df[INPUT_LABELS_SINGLE_SOLVENT]\n    return X, df[TARGET_LABELS]\n\ndef load_features(name=\"spange_descriptors\"):\n    return pd.read_csv(f'{DATA_PATH}/{name}_lookup.csv', index_col=0)\n\ndef generate_leave_one_out_splits(X, Y):\n    for solvent_name in sorted(X[\"SOLVENT NAME\"].unique()):\n        train_mask = X[\"SOLVENT NAME\"] != solvent_name\n        yield (X[train_mask], Y[train_mask]), (X[~train_mask], Y[~train_mask])\n\ndef generate_leave_one_ramp_out_splits(X, Y):\n    ramps = X[[\"SOLVENT A NAME\", \"SOLVENT B NAME\"]].drop_duplicates().sort_values([\"SOLVENT A NAME\", \"SOLVENT B NAME\"])\n    for _, row in ramps.iterrows():\n        train_mask = (X[[\"SOLVENT A NAME\", \"SOLVENT B NAME\"]] != row).any(axis=1)\n        yield (X[train_mask], Y[train_mask]), (X[~train_mask], Y[~train_mask])"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Load all feature sets\nSPANGE_DF = load_features('spange_descriptors')\nDRFP_DF = load_features('drfps_catechol')\nFRAGPRINTS_DF = load_features('fragprints')\n\nprint(f\"Spange: {SPANGE_DF.shape}\")\nprint(f\"DRFP: {DRFP_DF.shape}\")\nprint(f\"Fragprints: {FRAGPRINTS_DF.shape}\")\n\n# Check non-zero columns\ndrfp_nonzero = (DRFP_DF != 0).any(axis=0).sum()\nfrag_nonzero = (FRAGPRINTS_DF != 0).any(axis=0).sum()\nprint(f\"\\nDRFP non-zero columns: {drfp_nonzero}\")\nprint(f\"Fragprints non-zero columns: {frag_nonzero}\")"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Apply PCA to reduce DRFP and Fragprints\n# Fit PCA on all solvents (this is OK since it's just dimensionality reduction, not target-dependent)\n\n# DRFP PCA\ndrfp_scaler = StandardScaler()\ndrfp_scaled = drfp_scaler.fit_transform(DRFP_DF)\ndrfp_pca = PCA(n_components=30)\nDRFP_PCA = pd.DataFrame(\n    drfp_pca.fit_transform(drfp_scaled),\n    index=DRFP_DF.index,\n    columns=[f'drfp_pc{i}' for i in range(30)]\n)\nprint(f\"DRFP PCA explained variance: {drfp_pca.explained_variance_ratio_.sum():.4f}\")\n\n# Fragprints PCA\nfrag_scaler = StandardScaler()\nfrag_scaled = frag_scaler.fit_transform(FRAGPRINTS_DF)\nfrag_pca = PCA(n_components=30)\nFRAGPRINTS_PCA = pd.DataFrame(\n    frag_pca.fit_transform(frag_scaled),\n    index=FRAGPRINTS_DF.index,\n    columns=[f'frag_pc{i}' for i in range(30)]\n)\nprint(f\"Fragprints PCA explained variance: {frag_pca.explained_variance_ratio_.sum():.4f}\")\n\nprint(f\"\\nDRFP PCA shape: {DRFP_PCA.shape}\")\nprint(f\"Fragprints PCA shape: {FRAGPRINTS_PCA.shape}\")"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Extended Featurizer with all feature sets\nclass ExtendedFeaturizer:\n    \"\"\"Featurizer with Spange + DRFP PCA + Fragprints PCA + Arrhenius kinetics.\"\"\"\n    def __init__(self, mixed=False, use_drfp=True, use_fragprints=True):\n        self.mixed = mixed\n        self.use_drfp = use_drfp\n        self.use_fragprints = use_fragprints\n        \n        self.spange = SPANGE_DF\n        self.drfp_pca = DRFP_PCA if use_drfp else None\n        self.frag_pca = FRAGPRINTS_PCA if use_fragprints else None\n        \n        # Calculate feature dimension\n        # 2 numeric + 3 kinetic + 13 spange + 30 drfp_pca + 30 frag_pca = 78\n        self.feats_dim = 2 + 3 + 13\n        if use_drfp:\n            self.feats_dim += 30\n        if use_fragprints:\n            self.feats_dim += 30\n\n    def featurize(self, X, flip=False):\n        X_vals = X[INPUT_LABELS_NUMERIC].values.astype(np.float64)\n        \n        # Arrhenius kinetics features\n        temp_c, time_m = X_vals[:, 1:2], X_vals[:, 0:1]\n        temp_k = temp_c + 273.15\n        inv_temp = 1000.0 / temp_k\n        log_time = np.log(time_m + 1e-6)\n        interaction = inv_temp * log_time\n        X_kinetic = np.hstack([X_vals, inv_temp, log_time, interaction])\n        \n        # Solvent features\n        if self.mixed:\n            solvent_a = X[\"SOLVENT A NAME\"].values\n            solvent_b = X[\"SOLVENT B NAME\"].values\n            pct = X[\"SolventB%\"].values.reshape(-1, 1)\n            \n            if flip:\n                solvent_a, solvent_b = solvent_b, solvent_a\n                pct = 1 - pct\n            \n            # Spange features (linear mixing)\n            A_spange = self.spange.loc[solvent_a].values\n            B_spange = self.spange.loc[solvent_b].values\n            X_spange = A_spange * (1 - pct) + B_spange * pct\n            \n            features = [X_kinetic, X_spange]\n            \n            if self.use_drfp:\n                A_drfp = self.drfp_pca.loc[solvent_a].values\n                B_drfp = self.drfp_pca.loc[solvent_b].values\n                X_drfp = A_drfp * (1 - pct) + B_drfp * pct\n                features.append(X_drfp)\n            \n            if self.use_fragprints:\n                A_frag = self.frag_pca.loc[solvent_a].values\n                B_frag = self.frag_pca.loc[solvent_b].values\n                X_frag = A_frag * (1 - pct) + B_frag * pct\n                features.append(X_frag)\n        else:\n            solvent = X[\"SOLVENT NAME\"].values\n            X_spange = self.spange.loc[solvent].values\n            features = [X_kinetic, X_spange]\n            \n            if self.use_drfp:\n                X_drfp = self.drfp_pca.loc[solvent].values\n                features.append(X_drfp)\n            \n            if self.use_fragprints:\n                X_frag = self.frag_pca.loc[solvent].values\n                features.append(X_frag)\n        \n        return np.hstack(features)"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Deeper MLP architecture\nclass DeeperMLP(nn.Module):\n    def __init__(self, input_dim, hidden_dims=[256, 256, 128, 64], dropout=0.2):\n        super().__init__()\n        layers = [nn.BatchNorm1d(input_dim)]\n        prev_dim = input_dim\n        \n        for h_dim in hidden_dims:\n            layers.extend([\n                nn.Linear(prev_dim, h_dim),\n                nn.BatchNorm1d(h_dim),\n                nn.ReLU(),\n                nn.Dropout(dropout),\n            ])\n            prev_dim = h_dim\n        \n        layers.extend([nn.Linear(prev_dim, 3), nn.Sigmoid()])\n        self.net = nn.Sequential(*layers)\n    \n    def forward(self, x):\n        return self.net(x)"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Extended Model with feature expansion\nclass ExtendedModel(nn.Module):\n    def __init__(self, data='single', n_models=5, use_drfp=True, use_fragprints=True,\n                 hidden_dims=[256, 256, 128, 64], dropout=0.2, lr=5e-4, epochs=300):\n        super().__init__()\n        self.data_type = data\n        self.n_models = n_models\n        self.hidden_dims = hidden_dims\n        self.dropout = dropout\n        self.lr = lr\n        self.epochs = epochs\n        \n        self.featurizer = ExtendedFeaturizer(\n            mixed=(data=='full'), \n            use_drfp=use_drfp, \n            use_fragprints=use_fragprints\n        )\n        self.models = nn.ModuleList()\n\n    def train_model(self, X_train, y_train):\n        X_feats = self.featurizer.featurize(X_train, flip=False)\n        y_vals = y_train.values\n        \n        if self.data_type == 'full':\n            X_flip = self.featurizer.featurize(X_train, flip=True)\n            X_all = np.vstack([X_feats, X_flip])\n            y_all = np.vstack([y_vals, y_vals])\n        else:\n            X_all = X_feats\n            y_all = y_vals\n        \n        X_tensor = torch.tensor(X_all)\n        y_tensor = torch.tensor(y_all)\n        \n        input_dim = X_all.shape[1]\n        device = torch.device(\"cuda\" if torch.cuda.is_available() else \"cpu\")\n        \n        self.models = nn.ModuleList()\n        for i in range(self.n_models):\n            torch.manual_seed(42 + i)\n            model = DeeperMLP(input_dim, self.hidden_dims, self.dropout).to(device)\n            model.train()\n            self.models.append(model)\n            \n            dataset = TensorDataset(X_tensor, y_tensor)\n            loader = DataLoader(dataset, batch_size=32, shuffle=True)\n            \n            optimizer = torch.optim.AdamW(model.parameters(), lr=self.lr, weight_decay=1e-5)\n            criterion = nn.HuberLoss()\n            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=20)\n            \n            for epoch in range(self.epochs):\n                epoch_loss = 0.0\n                for inputs, targets in loader:\n                    inputs, targets = inputs.to(device), targets.to(device)\n                    optimizer.zero_grad()\n                    outputs = model(inputs)\n                    loss = criterion(outputs, targets)\n                    loss.backward()\n                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)\n                    optimizer.step()\n                    epoch_loss += loss.item() * inputs.size(0)\n                scheduler.step(epoch_loss / len(dataset))\n\n    def predict(self, X_test):\n        device = next(self.models[0].parameters()).device\n        \n        if self.data_type == 'full':\n            X_std = torch.tensor(self.featurizer.featurize(X_test, flip=False)).to(device)\n            X_flip = torch.tensor(self.featurizer.featurize(X_test, flip=True)).to(device)\n            \n            pred_sum = torch.zeros((len(X_test), 3)).to(device)\n            with torch.no_grad():\n                for model in self.models:\n                    model.eval()\n                    pred_sum += (model(X_std) + model(X_flip)) * 0.5\n            avg_pred = pred_sum / self.n_models\n        else:\n            X_t = torch.tensor(self.featurizer.featurize(X_test)).to(device)\n            pred_sum = torch.zeros((len(X_test), 3)).to(device)\n            with torch.no_grad():\n                for model in self.models:\n                    model.eval()\n                    pred_sum += model(X_t)\n            avg_pred = pred_sum / self.n_models\n        \n        return avg_pred.cpu()"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Test on single fold\nprint(\"Testing Extended Model on single fold...\")\nX, Y = load_data(\"single_solvent\")\nsplit_gen = generate_leave_one_out_splits(X, Y)\n(train_X, train_Y), (test_X, test_Y) = next(split_gen)\nprint(f\"Train: {len(train_X)}, Test: {len(test_X)}\")\n\nmodel = ExtendedModel(data='single', n_models=2, epochs=50)  # Quick test\nprint(f\"Feature dimension: {model.featurizer.feats_dim}\")\nmodel.train_model(train_X, train_Y)\n\npreds = model.predict(test_X)\nrmse = np.sqrt(((preds.numpy() - test_Y.values) ** 2).mean())\nprint(f\"Single fold RMSE: {rmse:.4f}\")"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Full CV for single solvent task\nprint(\"\\n\" + \"=\"*50)\nprint(\"TASK 0: Single Solvent (Leave-One-Solvent-Out CV)\")\nprint(\"=\"*50)\n\nX, Y = load_data(\"single_solvent\")\nsplit_generator = generate_leave_one_out_splits(X, Y)\nall_predictions = []\nfold_rmses = []\n\nfor fold_idx, split in tqdm.tqdm(enumerate(split_generator), total=24):\n    (train_X, train_Y), (test_X, test_Y) = split\n    \n    model = ExtendedModel(data='single', n_models=5, epochs=300)\n    model.train_model(train_X, train_Y)\n    \n    predictions = model.predict(test_X).numpy()\n    fold_rmse = np.sqrt(((predictions - test_Y.values) ** 2).mean())\n    fold_rmses.append(fold_rmse)\n    \n    for row_idx, row in enumerate(predictions):\n        all_predictions.append({\"task\": 0, \"fold\": fold_idx, \"row\": row_idx,\n                               \"target_1\": row[0], \"target_2\": row[1], \"target_3\": row[2]})\n\nsubmission_single_solvent = pd.DataFrame(all_predictions)\nprint(f\"\\nSingle Solvent CV RMSE: {np.mean(fold_rmses):.5f} \u00b1 {np.std(fold_rmses):.5f}\")"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Full CV for full data task\nprint(\"\\n\" + \"=\"*50)\nprint(\"TASK 1: Full Data (Leave-One-Ramp-Out CV)\")\nprint(\"=\"*50)\n\nX, Y = load_data(\"full\")\nsplit_generator = generate_leave_one_ramp_out_splits(X, Y)\nall_predictions = []\nfold_rmses_full = []\n\nfor fold_idx, split in tqdm.tqdm(enumerate(split_generator), total=13):\n    (train_X, train_Y), (test_X, test_Y) = split\n    \n    model = ExtendedModel(data='full', n_models=5, epochs=300)\n    model.train_model(train_X, train_Y)\n    \n    predictions = model.predict(test_X).numpy()\n    fold_rmse = np.sqrt(((predictions - test_Y.values) ** 2).mean())\n    fold_rmses_full.append(fold_rmse)\n    \n    for row_idx, row in enumerate(predictions):\n        all_predictions.append({\"task\": 1, \"fold\": fold_idx, \"row\": row_idx,\n                               \"target_1\": row[0], \"target_2\": row[1], \"target_3\": row[2]})\n\nsubmission_full_data = pd.DataFrame(all_predictions)\nprint(f\"\\nFull Data CV RMSE: {np.mean(fold_rmses_full):.5f} \u00b1 {np.std(fold_rmses_full):.5f}\")"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Save submission\nsubmission = pd.concat([submission_single_solvent, submission_full_data]).reset_index()\nsubmission.index.name = \"id\"\nsubmission.to_csv(\"/home/code/experiments/004_feature_expansion/submission.csv\", index=True)\nsubmission.to_csv(\"/home/submission/submission.csv\", index=True)\nprint(f\"Submission saved with {len(submission)} rows\")"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Final summary\nprint(\"\\n\" + \"=\"*50)\nprint(\"FINAL RESULTS - Feature Expansion + Deeper MLP\")\nprint(\"=\"*50)\nprint(f\"Single Solvent CV RMSE: {np.mean(fold_rmses):.5f} \u00b1 {np.std(fold_rmses):.5f}\")\nprint(f\"Full Data CV RMSE: {np.mean(fold_rmses_full):.5f} \u00b1 {np.std(fold_rmses_full):.5f}\")\noverall_rmse = (np.mean(fold_rmses) + np.mean(fold_rmses_full)) / 2\nprint(f\"\\nOverall CV RMSE: {overall_rmse:.5f}\")\nprint(f\"\\nComparison:\")\nprint(f\"  Baseline MLP (Spange only): 0.08819\")\nprint(f\"  Extended (Spange+DRFP+Frag): {overall_rmse:.5f}\")\nprint(f\"  Target:                      0.04740\")"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_016BQ8Q1yc5wGReJZHVaTyuU",
+          "content": "Created: /home/code/experiments/004_feature_expansion/feature_expansion.ipynb\n\nStrong Note: OOM is unrecoverable. Use strong models - just estimate memory first.",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01WYo56kVH7HrSEMqtjg3gbo",
+          "name": "OpenNotebook",
+          "input": {
+            "notebook_path": "/home/code/experiments/004_feature_expansion/feature_expansion.ipynb"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01WYo56kVH7HrSEMqtjg3gbo",
+          "content": "Already open: /home/code/experiments/004_feature_expansion/feature_expansion.ipynb (13 cells)",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01MvrQWNNN829DBosKJ3Moso",
+          "name": "ExecuteCellRange",
+          "input": {
+            "start_cell": 1,
+            "end_cell": 8,
+            "duration": 180
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01MvrQWNNN829DBosKJ3Moso",
+          "content": "Error: ValueError: n_components=30 must be between 0 and min(n_samples, n_features)=24 with svd_solver='full'",
+          "is_error": true
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "REASONING: The PCA components are too high - we only have 26 solvents, so max components is 25. Let me fix this."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01UQRMMg7ZZFS6LCfajnGYXX",
+          "name": "EditNotebookCell",
+          "input": {
+            "cell_index": 4,
+            "new_content": "# Apply PCA to reduce DRFP and Fragprints\n# Note: We only have 26 solvents, so max PCA components is 25\n\nN_COMPONENTS = 20  # Safe value below 26 solvents\n\n# DRFP PCA\ndrfp_scaler = StandardScaler()\ndrfp_scaled = drfp_scaler.fit_transform(DRFP_DF)\ndrfp_pca = PCA(n_components=N_COMPONENTS)\nDRFP_PCA = pd.DataFrame(\n    drfp_pca.fit_transform(drfp_scaled),\n    index=DRFP_DF.index,\n    columns=[f'drfp_pc{i}' for i in range(N_COMPONENTS)]\n)\nprint(f\"DRFP PCA explained variance: {drfp_pca.explained_variance_ratio_.sum():.4f}\")\n\n# Fragprints PCA\nfrag_scaler = StandardScaler()\nfrag_scaled = frag_scaler.fit_transform(FRAGPRINTS_DF)\nfrag_pca = PCA(n_components=N_COMPONENTS)\nFRAGPRINTS_PCA = pd.DataFrame(\n    frag_pca.fit_transform(frag_scaled),\n    index=FRAGPRINTS_DF.index,\n    columns=[f'frag_pc{i}' for i in range(N_COMPONENTS)]\n)\nprint(f\"Fragprints PCA explained variance: {frag_pca.explained_variance_ratio_.sum():.4f}\")\n\nprint(f\"\\nDRFP PCA shape: {DRFP_PCA.shape}\")\nprint(f\"Fragprints PCA shape: {FRAGPRINTS_PCA.shape}\")"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01UQRMMg7ZZFS6LCfajnGYXX",
+          "content": "Edited cell 4. Re-run to update kernel state.",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_012NGCkJFry4Kn8GnNXBCWeV",
+          "name": "EditNotebookCell",
+          "input": {
+            "cell_index": 5,
+            "new_content": "# Extended Featurizer with all feature sets\nclass ExtendedFeaturizer:\n    \"\"\"Featurizer with Spange + DRFP PCA + Fragprints PCA + Arrhenius kinetics.\"\"\"\n    def __init__(self, mixed=False, use_drfp=True, use_fragprints=True):\n        self.mixed = mixed\n        self.use_drfp = use_drfp\n        self.use_fragprints = use_fragprints\n        \n        self.spange = SPANGE_DF\n        self.drfp_pca = DRFP_PCA if use_drfp else None\n        self.frag_pca = FRAGPRINTS_PCA if use_fragprints else None\n        \n        # Calculate feature dimension\n        # 2 numeric + 3 kinetic + 13 spange + 20 drfp_pca + 20 frag_pca = 58\n        self.feats_dim = 2 + 3 + 13\n        if use_drfp:\n            self.feats_dim += N_COMPONENTS\n        if use_fragprints:\n            self.feats_dim += N_COMPONENTS\n\n    def featurize(self, X, flip=False):\n        X_vals = X[INPUT_LABELS_NUMERIC].values.astype(np.float64)\n        \n        # Arrhenius kinetics features\n        temp_c, time_m = X_vals[:, 1:2], X_vals[:, 0:1]\n        temp_k = temp_c + 273.15\n        inv_temp = 1000.0 / temp_k\n        log_time = np.log(time_m + 1e-6)\n        interaction = inv_temp * log_time\n        X_kinetic = np.hstack([X_vals, inv_temp, log_time, interaction])\n        \n        # Solvent features\n        if self.mixed:\n            solvent_a = X[\"SOLVENT A NAME\"].values\n            solvent_b = X[\"SOLVENT B NAME\"].values\n            pct = X[\"SolventB%\"].values.reshape(-1, 1)\n            \n            if flip:\n                solvent_a, solvent_b = solvent_b, solvent_a\n                pct = 1 - pct\n            \n            # Spange features (linear mixing)\n            A_spange = self.spange.loc[solvent_a].values\n            B_spange = self.spange.loc[solvent_b].values\n            X_spange = A_spange * (1 - pct) + B_spange * pct\n            \n            features = [X_kinetic, X_spange]\n            \n            if self.use_drfp:\n                A_drfp = self.drfp_pca.loc[solvent_a].values\n                B_drfp = self.drfp_pca.loc[solvent_b].values\n                X_drfp = A_drfp * (1 - pct) + B_drfp * pct\n                features.append(X_drfp)\n            \n            if self.use_fragprints:\n                A_frag = self.frag_pca.loc[solvent_a].values\n                B_frag = self.frag_pca.loc[solvent_b].values\n                X_frag = A_frag * (1 - pct) + B_frag * pct\n                features.append(X_frag)\n        else:\n            solvent = X[\"SOLVENT NAME\"].values\n            X_spange = self.spange.loc[solvent].values\n            features = [X_kinetic, X_spange]\n            \n            if self.use_drfp:\n                X_drfp = self.drfp_pca.loc[solvent].values\n                features.append(X_drfp)\n            \n            if self.use_fragprints:\n                X_frag = self.frag_pca.loc[solvent].values\n                features.append(X_frag)\n        \n        return np.hstack(features)"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_012NGCkJFry4Kn8GnNXBCWeV",
+          "content": "Edited cell 5. Re-run to update kernel state.",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01ECzW6nyAE3p6VyBqsa2XsA",
+          "name": "RestartKernel",
+          "input": {}
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01ECzW6nyAE3p6VyBqsa2XsA",
+          "content": "Restarted kernel for /home/code/experiments/004_feature_expansion/feature_expansion.ipynb",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01Gb8RnDFfcNmy7j6kxcNwzk",
+          "name": "ExecuteCellRange",
+          "input": {
+            "start_cell": 1,
+            "end_cell": 8,
+            "duration": 180
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Gb8RnDFfcNmy7j6kxcNwzk",
+          "content": "Executed cells 1-8\n==================================================\n\nCell 1:\n```\nimport numpy as np\nimport pandas as pd\nimport torch\nimport torch.nn as nn\nfrom torch.utils.data import TensorDataset, DataLoader\nfrom sklearn.decomposition import PCA\nfrom sklearn.preprocessing import StandardScaler\nimport tqdm\nimport warnings\nwarnings.filterwarnings('ignore')\n\nprint(f\"GPU available: {torch.cuda.is_available()}\")\nif torch.cuda.is_available():\n    print(f\"GPU: {torch.cuda.get_device_name(0)}\")\ntorch.set_default_dtype(torch.double)\n```\nOutput:\nGPU available: True\nGPU: NVIDIA H100 80GB HBM3\n\n\nCell 2:\n```\n# Data loading utilities\nDATA_PATH = '/home/data'\n\nINPUT_LABELS_FULL_SOLVENT = [\"Residence Time\", \"Temperature\", \"SOLVENT A NAME\", \"SOLVENT B NAME\", \"SolventB%\"]\nINPUT_LABELS_SINGLE_SOLVENT = [\"Residence Time\", \"Temperature\", \"SOLVENT NAME\"]\nINPUT_LABELS_NUMERIC = [\"Residence Time\", \"Temperature\"]\nTARGET_LABELS = [\"Product 2\", \"Product 3\", \"SM\"]\n\ndef load_data(name=\"full\"):\n    if name == \"full\":\n        df = pd.read_csv(f'{DATA_PATH}/catechol_full_data_yields.csv')\n        X = df[INPUT_LABELS_F\n```\n\nCell 3:\n```\n# Load all feature sets\nSPANGE_DF = load_features('spange_descriptors')\nDRFP_DF = load_features('drfps_catechol')\nFRAGPRINTS_DF = load_features('fragprints')\n\nprint(f\"Spange: {SPANGE_DF.shape}\")\nprint(f\"DRFP: {DRFP_DF.shape}\")\nprint(f\"Fragprints: {FRAGPRINTS_DF.shape}\")\n\n# Check non-zero columns\ndrfp_nonzero = (DRFP_DF != 0).any(axis=0).sum()\nfrag_nonzero = (FRAGPRINTS_DF != 0).any(axis=0).sum()\nprint(f\"\\nDRFP non-zero columns: {drfp_nonzero}\")\nprint(f\"Fragprints non-zero columns: {frag_nonzero}\n```\nOutput:\nSpange: (26, 13)\nDRFP: (24, 2048)\nFragprints: (24, 2133)\n\nDRFP non-zero columns: 165\nFragprints non-zero columns: 144\n\n\nCell 4:\n```\n# Apply PCA to reduce DRFP and Fragprints\n# Note: We only have 26 solvents, so max PCA components is 25\n\nN_COMPONENTS = 20  # Safe value below 26 solvents\n\n# DRFP PCA\ndrfp_scaler = StandardScaler()\ndrfp_scaled = drfp_scaler.fit_transform(DRFP_DF)\ndrfp_pca = PCA(n_components=N_COMPONENTS)\nDRFP_PCA = pd.DataFrame(\n    drfp_pca.fit_transform(drfp_scaled),\n    index=DRFP_DF.index,\n    columns=[f'drfp_pc{i}' for i in range(N_COMPONENTS)]\n)\nprint(f\"DRFP PCA explained variance: {drfp_pca.explained_vari\n```\nOutput:\nDRFP PCA explained variance: 0.9985\nFragprints PCA explained variance: 0.9905\n\nDRFP PCA shape: (24, 20)\nFragprints PCA shape: (24, 20)\n\n\nCell 5:\n```\n# Extended Featurizer with all feature sets\nclass ExtendedFeaturizer:\n    \"\"\"Featurizer with Spange + DRFP PCA + Fragprints PCA + Arrhenius kinetics.\"\"\"\n    def __init__(self, mixed=False, use_drfp=True, use_fragprints=True):\n        self.mixed = mixed\n        self.use_drfp = use_drfp\n        self.use_fragprints = use_fragprints\n        \n        self.spange = SPANGE_DF\n        self.drfp_pca = DRFP_PCA if use_drfp else None\n        self.frag_pca = FRAGPRINTS_PCA if use_fragprints else None\n      \n```\n\nCell 6:\n```\n# Deeper MLP architecture\nclass DeeperMLP(nn.Module):\n    def __init__(self, input_dim, hidden_dims=[256, 256, 128, 64], dropout=0.2):\n        super().__init__()\n        layers = [nn.BatchNorm1d(input_dim)]\n        prev_dim = input_dim\n        \n        for h_dim in hidden_dims:\n            layers.extend([\n                nn.Linear(prev_dim, h_dim),\n                nn.BatchNorm1d(h_dim),\n                nn.ReLU(),\n                nn.Dropout(dropout),\n            ])\n            prev_dim = h_dim\n  \n```\n\nCell 7:\n```\n# Extended Model with feature expansion\nclass ExtendedModel(nn.Module):\n    def __init__(self, data='single', n_models=5, use_drfp=True, use_fragprints=True,\n                 hidden_dims=[256, 256, 128, 64], dropout=0.2, lr=5e-4, epochs=300):\n        super().__init__()\n        self.data_type = data\n        self.n_models = n_models\n        self.hidden_dims = hidden_dims\n        self.dropout = dropout\n        self.lr = lr\n        self.epochs = epochs\n        \n        self.featurizer = ExtendedFeat\n```\n\nCell 8:\n```\n# Test on single fold\nprint(\"Testing Extended Model on single fold...\")\nX, Y = load_data(\"single_solvent\")\nsplit_gen = generate_leave_one_out_splits(X, Y)\n(train_X, train_Y), (test_X, test_Y) = next(split_gen)\nprint(f\"Train: {len(train_X)}, Test: {len(test_X)}\")\n\nmodel = ExtendedModel(data='single', n_models=2, epochs=50)  # Quick test\nprint(f\"Feature dimension: {model.featurizer.feats_dim}\")\nmodel.train_model(train_X, train_Y)\n\npreds = model.predict(test_X)\nrmse = np.sqrt(((preds.numpy() - test\n```\nOutput:\nTesting Extended Model on single fold...\nTrain: 619, Test: 37\nFeature dimension: 58\n\nSingle fold RMSE: 0.2548\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "REASONING: The model is working with 58 features now (vs 18 before). The single fold RMSE is higher but that's just one fold. Let me run the full CV."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_0171NnyDrVV9o6K3UyLjxMVV",
+          "name": "ExecuteCellRange",
+          "input": {
+            "start_cell": 9,
+            "end_cell": 9,
+            "duration": 3600
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_0171NnyDrVV9o6K3UyLjxMVV",
+          "content": "Executed cells 9-9\n==================================================\n\nCell 9:\n```\n# Full CV for single solvent task\nprint(\"\\n\" + \"=\"*50)\nprint(\"TASK 0: Single Solvent (Leave-One-Solvent-Out CV)\")\nprint(\"=\"*50)\n\nX, Y = load_data(\"single_solvent\")\nsplit_generator = generate_leave_one_out_splits(X, Y)\nall_predictions = []\nfold_rmses = []\n\nfor fold_idx, split in tqdm.tqdm(enumerate(split_generator), total=24):\n    (train_X, train_Y), (test_X, test_Y) = split\n    \n    model = ExtendedModel(data='single', n_models=5, epochs=300)\n    model.train_model(train_X, train_Y)\n    \n    pred\n```\nOutput:\n\n==================================================\nTASK 0: Single Solvent (Leave-One-Solvent-Out CV)\n==================================================\n\n\r  0%|          | 0/24 [00:00<?, ?it/s]\n\r  4%|\u258d         | 1/24 [01:01<23:25, 61.13s/it]\n\r  8%|\u258a         | 2/24 [02:02<22:23, 61.08s/it]\n\r 12%|\u2588\u258e        | 3/24 [02:59<20:49, 59.51s/it]\n\r 17%|\u2588\u258b        | 4/24 [03:58<19:39, 59.00s/it]\n\r 21%|\u2588\u2588        | 5/24 [05:01<19:10, 60.55s/it]\n\r 25%|\u2588\u2588\u258c       | 6/24 [06:04<18:28, 61.57s/it]\n\r 29%|\u2588\u2588\u2589       | 7/24 [07:08<17:36, 62.17s/it]\n\r 33%|\u2588\u2588\u2588\u258e      | 8/24 [08:12<16:43, 62.71s/it]\n\r 38%|\u2588\u2588\u2588\u258a      | 9/24 [09:14<15:37, 62.52s/it]\n\r 42%|\u2588\u2588\u2588\u2588\u258f     | 10/24 [10:15<14:31, 62.22s/it]\n\r 46%|\u2588\u2588\u2588\u2588\u258c     | 11/24 [11:17<13:24, 61.91s/it]\n\r 50%|\u2588\u2588\u2588\u2588\u2588     | 12/24 [12:18<12:22, 61.84s/it]\n\r 54%|\u2588\u2588\u2588\u2588\u2588\u258d    | 13/24 [13:19<11:16, 61.49s/it]\n\r 58%|\u2588\u2588\u2588\u2588\u2588\u258a    | 14/24 [14:20<10:14, 61.45s/it]\n\r 62%|\u2588\u2588\u2588\u2588\u2588\u2588\u258e   | 15/24 [15:22<09:13, 61.49s/it]\n\r 67%|\u2588\u2588\u2588\u2588\u2588\u2588\u258b   | 16/24 [16:22<08:09, 61.23s/it]\n\r 71%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588   | 17/24 [17:27<07:16, 62.30s/it]\n\r 75%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258c  | 18/24 [18:29<06:12, 62.02s/it]\n\r 79%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2589  | 19/24 [19:30<05:09, 61.89s/it]\n\r 83%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258e | 20/24 [20:32<04:06, 61.75s/it]\n\r 88%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258a | 21/24 [21:33<03:04, 61.56s/it]\n\r 92%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258f| 22/24 [22:34<02:03, 61.57s/it]\n\r 96%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258c| 23/24 [23:36<01:01, 61.47s/it]\n\r100%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588| 24/24 [24:37<00:00, 61.53s/it]\n\r100%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588| 24/24 [24:37<00:00, 61.57s/it]\n\nSingle Solvent CV RMSE: 0.10092 \u00b1 0.05125\n\n\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "REASONING: The feature expansion with DRFP and fragprints actually made performance worse (0.10092 vs 0.08719 baseline). This suggests the additional features are adding noise rather than signal. Let me still run the full data task to complete the experiment, but this approach doesn't seem promising."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01VftV3DN3oYmnWuMZEaxi9X",
+          "name": "ExecuteCellRange",
+          "input": {
+            "start_cell": 10,
+            "end_cell": 10,
+            "duration": 3600
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01VftV3DN3oYmnWuMZEaxi9X",
+          "content": "Executed cells 10-10\n==================================================\n\nCell 10:\n```\n# Full CV for full data task\nprint(\"\\n\" + \"=\"*50)\nprint(\"TASK 1: Full Data (Leave-One-Ramp-Out CV)\")\nprint(\"=\"*50)\n\nX, Y = load_data(\"full\")\nsplit_generator = generate_leave_one_ramp_out_splits(X, Y)\nall_predictions = []\nfold_rmses_full = []\n\nfor fold_idx, split in tqdm.tqdm(enumerate(split_generator), total=13):\n    (train_X, train_Y), (test_X, test_Y) = split\n    \n    model = ExtendedModel(data='full', n_models=5, epochs=300)\n    model.train_model(train_X, train_Y)\n    \n    predictions = model\n```\nOutput:\n\n==================================================\nTASK 1: Full Data (Leave-One-Ramp-Out CV)\n==================================================\n\n\r  0%|          | 0/13 [00:00<?, ?it/s]\n\r  8%|\u258a         | 1/13 [03:31<42:15, 211.33s/it]\n\r 15%|\u2588\u258c        | 2/13 [07:02<38:42, 211.16s/it]\n\r 23%|\u2588\u2588\u258e       | 3/13 [10:32<35:05, 210.59s/it]\n\r 31%|\u2588\u2588\u2588       | 4/13 [14:03<31:36, 210.72s/it]\n\r 38%|\u2588\u2588\u2588\u258a      | 5/13 [17:38<28:18, 212.28s/it]\n\r 46%|\u2588\u2588\u2588\u2588\u258c     | 6/13 [21:10<24:46, 212.40s/it]\n\r 54%|\u2588\u2588\u2588\u2588\u2588\u258d    | 7/13 [24:57<21:42, 217.16s/it]\n\r 62%|\u2588\u2588\u2588\u2588\u2588\u2588\u258f   | 8/13 [28:26<17:51, 214.33s/it]\n\r 69%|\u2588\u2588\u2588\u2588\u2588\u2588\u2589   | 9/13 [32:13<14:33, 218.38s/it]\n\r 77%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258b  | 10/13 [35:43<10:47, 215.85s/it]\n\r 85%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258d | 11/13 [39:30<07:18, 219.36s/it]\n\r 92%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258f| 12/13 [42:59<03:36, 216.03s/it]\n\r100%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588| 13/13 [46:46<00:00, 219.47s/it]\n\r100%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588| 13/13 [46:46<00:00, 215.90s/it]\n\nFull Data CV RMSE: 0.11443 \u00b1 0.03098\n\n\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01QScENcN1dhvBymEkEhxSAj",
+          "name": "ExecuteCellRange",
+          "input": {
+            "start_cell": 11,
+            "end_cell": 12,
+            "duration": 60
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01QScENcN1dhvBymEkEhxSAj",
+          "content": "Executed cells 11-12\n==================================================\n\nCell 11:\n```\n# Save submission\nsubmission = pd.concat([submission_single_solvent, submission_full_data]).reset_index()\nsubmission.index.name = \"id\"\nsubmission.to_csv(\"/home/code/experiments/004_feature_expansion/submission.csv\", index=True)\nsubmission.to_csv(\"/home/submission/submission.csv\", index=True)\nprint(f\"Submission saved with {len(submission)} rows\")\n```\nOutput:\nSubmission saved with 1883 rows\n\n\nCell 12:\n```\n# Final summary\nprint(\"\\n\" + \"=\"*50)\nprint(\"FINAL RESULTS - Feature Expansion + Deeper MLP\")\nprint(\"=\"*50)\nprint(f\"Single Solvent CV RMSE: {np.mean(fold_rmses):.5f} \u00b1 {np.std(fold_rmses):.5f}\")\nprint(f\"Full Data CV RMSE: {np.mean(fold_rmses_full):.5f} \u00b1 {np.std(fold_rmses_full):.5f}\")\noverall_rmse = (np.mean(fold_rmses) + np.mean(fold_rmses_full)) / 2\nprint(f\"\\nOverall CV RMSE: {overall_rmse:.5f}\")\nprint(f\"\\nComparison:\")\nprint(f\"  Baseline MLP (Spange only): 0.08819\")\nprint(f\"  Extended (Spange\n```\nOutput:\n\n==================================================\nFINAL RESULTS - Feature Expansion + Deeper MLP\n==================================================\nSingle Solvent CV RMSE: 0.10092 \u00b1 0.05125\nFull Data CV RMSE: 0.11443 \u00b1 0.03098\n\nOverall CV RMSE: 0.10767\n\nComparison:\n  Baseline MLP (Spange only): 0.08819\n  Extended (Spange+DRFP+Frag): 0.10767\n  Target:                      0.04740\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "REASONING: The feature expansion made things worse (0.10767 vs 0.08819). The DRFP and fragprints features are adding noise. Let me close this notebook and try a different approach - non-linear solvent mixing as suggested in the strategy."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_018UTevJ9bSFyietPQnfRhWr",
+          "name": "CloseNotebook",
+          "input": {}
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_018UTevJ9bSFyietPQnfRhWr",
+          "content": "Closed: /home/code/experiments/004_feature_expansion/feature_expansion.ipynb",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_012hVWVyk7qa917Q5FfsyQTu",
+          "name": "LogExperiment",
+          "input": {
+            "name": "Feature Expansion (Spange + DRFP PCA + Fragprints PCA) + Deeper MLP",
+            "model_type": "MLP",
+            "score": 0.10767,
+            "notes": "Added DRFP (20 PCA components, 99.85% variance) and Fragprints (20 PCA components, 99.05% variance) to Spange descriptors. Total 58 features vs 18 in baseline. Used deeper MLP [256, 256, 128, 64]. Result: WORSE than baseline (0.10767 vs 0.08819). The additional molecular fingerprint features added noise rather than signal. Single Solvent: 0.10092 \u00b1 0.05125, Full Data: 0.11443 \u00b1 0.03098. Conclusion: Spange descriptors alone are sufficient; DRFP/fragprints don't help for this task.",
+            "experiment_folder": "/home/code/experiments/004_feature_expansion",
+            "submission_path": "/home/submission/submission.csv"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_012hVWVyk7qa917Q5FfsyQTu",
+          "content": "Transitioning to next phase",
+          "is_error": false
         }
       ]
     }
@@ -1397,6 +1804,15 @@
       "notes": "Tried two approaches: (1) LightGBM alone with per-target optimization achieved 0.10019 overall RMSE - worse than MLP baseline. (2) Ensemble of MLP + LightGBM + XGBoost with weights 0.5/0.25/0.25 achieved 0.08989 - also slightly worse than MLP baseline (0.08819). TabPFN was attempted but requires HuggingFace authentication for the gated model. The MLP baseline remains our best model. Next: try feature expansion with DRFP/fragprints using PCA dimensionality reduction.",
       "experiment_folder": "/home/code/experiments/003_ensemble",
       "timestamp": "2026-01-14T08:33:23.275912"
+    },
+    {
+      "id": "exp_002",
+      "name": "Feature Expansion (Spange + DRFP PCA + Fragprints PCA) + Deeper MLP",
+      "model_type": "MLP",
+      "score": 0.10767,
+      "notes": "Added DRFP (20 PCA components, 99.85% variance) and Fragprints (20 PCA components, 99.05% variance) to Spange descriptors. Total 58 features vs 18 in baseline. Used deeper MLP [256, 256, 128, 64]. Result: WORSE than baseline (0.10767 vs 0.08819). The additional molecular fingerprint features added noise rather than signal. Single Solvent: 0.10092 \u00b1 0.05125, Full Data: 0.11443 \u00b1 0.03098. Conclusion: Spange descriptors alone are sufficient; DRFP/fragprints don't help for this task.",
+      "experiment_folder": "/home/code/experiments/004_feature_expansion",
+      "timestamp": "2026-01-14T09:57:12.370867"
     }
   ],
   "submissions": [],
@@ -1414,6 +1830,13 @@
       "model_name": "LightGBM Per-Target + Ensemble (MLP+LightGBM+XGBoost)",
       "experiment_id": "exp_001",
       "timestamp": "2026-01-14T08:33:23.278163"
+    },
+    {
+      "file_path": "/home/code/submission_candidates/candidate_002.csv",
+      "score": 0.10767,
+      "model_name": "Feature Expansion (Spange + DRFP PCA + Fragprints PCA) + Deeper MLP",
+      "experiment_id": "exp_002",
+      "timestamp": "2026-01-14T09:57:12.375276"
     }
   ],
   "findings": [],
@@ -1564,5 +1987,5 @@
   "last_submitted_experiment_idx": 0,
   "start_time": "2026-01-14T06:47:06.574262",
   "time_limit_minutes": 2100,
-  "_saved_at": "2026-01-14T08:39:11.085550"
+  "_saved_at": "2026-01-14T09:57:12.394937"
 }
