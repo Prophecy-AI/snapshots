@@ -1,129 +1,73 @@
 ## Current Status
-- Best CV score (LOO): 0.0623 from exp_004/005 (PerTarget HGB+ETR)
-- Best CV score (GroupKFold): 0.0844 from exp_012 (MLP+GBDT Ensemble)
+- Best CV score: 0.0623 from exp_004 (PerTarget HGB+ETR with LOO)
 - Best LB score: 0.0956 from exp_004
-- CV-LB gap (LOO): +53% → LOO CV is overly optimistic
-- CV-LB gap (GroupKFold): Expected ~12% → More realistic
+- CV-LB gap: +53% → LOO CV is optimistic, but we MUST use LOO for submission
 - Target: 0.01727 (5.5x lower than best LB)
-- Submissions remaining: 3
 
 ## Response to Evaluator
-- Technical verdict was TRUSTWORTHY. Template compliance is now fixed.
-- Evaluator's top priority: Submit exp_012 to verify CV-LB correlation, then implement Optuna. **AGREE** - this is the right sequence.
-- Key concerns raised: (1) Fixed weights vs Optuna, (2) CV still far from target, (3) Need to verify CV-LB correlation.
-- How I'm addressing: Recommending submission of exp_012 first, then Optuna optimization as the key missing piece.
+- Technical verdict was TRUSTWORTHY for exp_012
+- **CRITICAL ISSUE DISCOVERED**: exp_012 submission FAILED because GroupKFold changed the fold structure
+- The evaluation metric expects LOO fold structure (24 folds for task 0, 13 folds for task 1)
+- GroupKFold with 5 folds causes "Evaluation metric raised an unexpected error"
+- **SOLUTION**: We MUST use LOO for submission, even if CV is optimistic
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop12_analysis.ipynb` for gap analysis
-- Key patterns:
-  - LOO CV gives 53% gap to LB (overly optimistic)
-  - GroupKFold CV should be closer to LB (~12% gap expected)
-  - Top kernel uses Optuna for hyperparameter optimization (NOT TRIED YET)
-  - Per-target models (HGB for SM, ETR for Products) work well for single solvent
+- Reference notebooks: See `exploration/evolver_loop12_analysis.ipynb` for fold structure analysis
+- Key insight: The competition evaluation metric is tied to the LOO fold structure
+- The top kernel (lishellliang) uses GroupKFold but may have same submission issue
 
-## CRITICAL: Template Compliance Rules
-**MANDATORY SUBMISSION STRUCTURE:**
-- The submission must have the same last three cells as in the notebook template
-- The ONLY allowed change is the line where the model is defined
-- The line `model = MLPModel()` can be replaced with a new model definition
-- Everything else in the last three cells MUST remain exactly the same
-- GroupKFold utility functions can be overwritten BEFORE template cells (allowed)
-
-## CRITICAL: Validation Strategy
-**USE GROUPKFOLD (5-fold) NOT Leave-One-Out:**
-```python
-from sklearn.model_selection import GroupKFold
-
-def generate_leave_one_out_splits(X, Y):
-    groups = X["SOLVENT NAME"]
-    n_splits = min(5, len(groups.unique()))
-    gkf = GroupKFold(n_splits=n_splits)
-    for train_idx, test_idx in gkf.split(X, Y, groups):
-        yield ((X.iloc[train_idx], Y.iloc[train_idx]), (X.iloc[test_idx], Y.iloc[test_idx]))
-```
-This gives more realistic CV estimates that correlate better with LB.
+## CRITICAL CONSTRAINT
+**🚨 DO NOT CHANGE THE VALIDATION STRATEGY IN TEMPLATE CELLS 🚨**
+- The template expects LOO splits with specific fold counts
+- Task 0: 24 folds (one per solvent)
+- Task 1: 13 folds (one per solvent ramp)
+- Changing to GroupKFold breaks the submission format
+- If you want to use GroupKFold for internal CV estimation, do it SEPARATELY
 
 ## Recommended Approaches (Priority Order)
 
-### 1. IMMEDIATE: Verify CV-LB Correlation
-- Submit exp_012 to verify GroupKFold CV-LB correlation
-- Expected LB: ~0.09-0.10 (if GroupKFold works correctly)
-- This calibrates our CV estimates for future experiments
+### 1. IMMEDIATE: Fix exp_012 to use LOO
+- Revert to LOO validation in template cells
+- Keep the MLP + GBDT ensemble architecture
+- This should give similar LB to exp_004 (~0.0956)
 
-### 2. HIGH PRIORITY: Optuna Hyperparameter Optimization
-**This is the KEY MISSING PIECE from our experiments!**
+### 2. Optuna Hyperparameter Optimization (HIGH PRIORITY)
+- The top kernel uses Optuna to optimize hyperparameters
+- Optimize: lr (1e-4 to 1e-2), dropout (0.1-0.5), hidden_dims, xgb_depth (3-8), rf_depth (5-15), lgb_leaves (15-63), weights
+- Use a SEPARATE GroupKFold validation for Optuna (not in template cells)
+- Then use the best hyperparameters with LOO for final submission
 
-The top kernel (lishellliang) uses Optuna to optimize:
-- lr: 1e-4 to 1e-2 (log scale)
-- dropout: 0.1 to 0.5
-- hidden_dim_1: 64 to 256
-- xgb_depth: 3 to 8
-- rf_depth: 5 to 15
-- lgb_leaves: 15 to 63
-- Ensemble weights: normalized [w_mlp, w_xgb, w_rf, w_lgb]
+### 3. Per-Target Models with Better Features
+- exp_004/005 showed per-target works well (HGB for SM, ETR for Products)
+- Try combining with Optuna tuning
+- Try different feature combinations (DRFP + Spange, ACS_PCA + Spange)
 
-Implementation:
-```python
-import optuna
-
-def objective(trial):
-    lr = trial.suggest_float('lr', 1e-4, 1e-2, log=True)
-    dropout = trial.suggest_float('dropout', 0.1, 0.5)
-    hidden_dim = trial.suggest_int('hidden_dim', 64, 256)
-    xgb_depth = trial.suggest_int('xgb_depth', 3, 8)
-    rf_depth = trial.suggest_int('rf_depth', 5, 15)
-    lgb_leaves = trial.suggest_int('lgb_leaves', 15, 63)
-    
-    # Weights
-    w_mlp = trial.suggest_float('w_mlp', 0.1, 1.0)
-    w_xgb = trial.suggest_float('w_xgb', 0.1, 1.0)
-    w_rf = trial.suggest_float('w_rf', 0.1, 1.0)
-    w_lgb = trial.suggest_float('w_lgb', 0.1, 1.0)
-    total = w_mlp + w_xgb + w_rf + w_lgb
-    weights = [w_mlp/total, w_xgb/total, w_rf/total, w_lgb/total]
-    
-    # Train and evaluate with GroupKFold
-    model = EnsembleModel(hidden_dims=[hidden_dim, hidden_dim//2], dropout=dropout, weights=weights)
-    # ... train and return MAE
-    
-study = optuna.create_study(direction='minimize')
-study.optimize(objective, n_trials=50)
-```
-
-### 3. MEDIUM PRIORITY: Per-Target with Optuna
-- exp_004/005 showed per-target models work well
-- HGB for SM, ETR for Products
-- Apply Optuna to tune each target's model separately
-- This could combine the best of both approaches
-
-### 4. LOWER PRIORITY: Feature Engineering
-- Try different feature combinations with Optuna
-- DRFP + Spange, ACS_PCA + Spange
-- Let Optuna find optimal combination
-- But focus on Optuna first - features alone won't close the gap
+### 4. Feature Engineering for Unseen Solvents
+- The test set contains completely new solvents
+- Focus on features that generalize (chemical properties, not solvent-specific patterns)
+- Consider: polarity, dielectric constant, hydrogen bonding capacity
 
 ## What NOT to Try
-- **Leave-One-Out validation**: Gives overly optimistic CV (53% gap to LB)
-- **TTA (Test-Time Augmentation)**: Hurt performance in exp_004 vs exp_005
-- **More regularization without Optuna**: exp_006 showed this doesn't help
-- **Fixed ensemble weights**: Need Optuna to find optimal weights
-- **Larger models without tuning**: Our models are already larger than top kernel
+- ❌ GroupKFold in template cells (breaks submission format)
+- ❌ TTA (hurts performance - confirmed in exp_005)
+- ❌ Simple Ridge regression (CV 0.0896, worse than PerTarget)
 
 ## Validation Notes
-- Use GroupKFold (5-fold) for all experiments
-- CV should be ~0.08-0.09 (realistic estimate)
-- Expected CV-LB gap: ~10-15%
-- If CV improves but LB gets worse → OVERFITTING, stop and regularize
-
-## Key Insight from Top Kernel Analysis
-The top kernel (lishellliang) achieves good CV-LB correlation with:
-1. GroupKFold validation ✓ (we have this)
-2. Optuna hyperparameter optimization ✗ (we DON'T have this)
-
-**Optuna is the KEY MISSING PIECE.** Implement it next.
+- Use LOO for submission (REQUIRED by evaluation metric)
+- Use GroupKFold ONLY for internal hyperparameter tuning (OPTIONAL)
+- The CV-LB gap is ~50% with LOO - this is expected for unseen solvents
+- Don't chase LOO CV - focus on approaches that generalize
 
 ## Submission Strategy
-1. **Submit exp_012 NOW** - Verify CV-LB correlation (uses 1 submission)
-2. **Implement Optuna** - Find optimal hyperparameters
-3. **Submit Optuna-optimized model** - Should improve LB
-4. **Final submission** - Best model with all optimizations
+- We have 3 submissions remaining
+- Next submission should be a fixed version of exp_012 (LOO instead of GroupKFold)
+- Or try Optuna-optimized model with LOO
+
+## Key Insight
+The target (0.01727) is 5.5x lower than our best LB (0.0956). This is a HUGE gap.
+We need fundamentally better approaches, not just hyperparameter tuning.
+Consider:
+1. Better feature engineering for unseen solvents
+2. Domain-specific features (chemical properties)
+3. Different model architectures (transformers, GNNs)
+4. Transfer learning from larger chemical datasets
