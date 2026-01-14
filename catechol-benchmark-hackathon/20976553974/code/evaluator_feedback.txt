@@ -1,139 +1,145 @@
 ## What I Understood
 
-The junior researcher followed the recommendation from the LB feedback analysis to implement a **diverse ensemble** combining PerTarget (HGB+ETR) + RandomForest + XGBoost + LightGBM with weighted averaging [0.4, 0.2, 0.2, 0.2]. This was motivated by the critical insight that more regularization made LB WORSE (0.0956 → 0.0991), suggesting the problem is NOT traditional overfitting but rather requires better features and model diversity. The approach mirrors what top kernels do (MLP + XGBoost + RF + LightGBM ensemble).
+The junior researcher implemented an MLP + GBDT ensemble (exp_010) following the top kernel (lishellliang) pattern. The key changes from the previous diverse ensemble (exp_009) were:
+1. Added MLP with [128, 64, 32] hidden dims, BatchNorm, ReLU, Dropout(0.2), Sigmoid output
+2. Used Spange descriptors only (simpler features)
+3. Ensemble of MLP + XGBoost + RandomForest + LightGBM with fixed weights [0.35, 0.25, 0.25, 0.15]
 
-The experiment achieved CV 0.067268 (Single: 0.0718, Full: 0.0649), which is worse than the best CV (0.0623 from exp_004) but represents an attempt to reduce variance through model diversity.
+The hypothesis was that adding MLP (which the top kernel uses) would improve performance. The result: CV 0.0669, which is 7.4% worse than best CV (0.0623 from exp_004).
 
 ## Technical Execution Assessment
 
-**Validation**: ✅ SOUND. Leave-one-solvent-out (24 folds) for single solvent and leave-one-ramp-out (13 folds) for full data. Same hyperparameters across all folds. I verified the CV scores by recomputing from the submission file:
-- Single Solvent MAE: 0.071794 (std: 0.0345) ✓
-- Full Data MAE: 0.064849 (std: 0.0214) ✓
-- Combined: 0.068321 ✓ (slight difference from 0.067268 due to rounding)
+**Validation**: ✅ SOUND. Leave-one-solvent-out (24 folds) for single solvent and leave-one-ramp-out (13 folds) for full data. Same hyperparameters across all folds.
 
 **Leakage Risk**: ✅ NONE DETECTED.
 - StandardScaler is fit on training data only within each fold
-- Spange and ACS_PCA descriptors are precomputed (acceptable - feature extraction, not target-dependent)
+- Spange descriptors are precomputed (acceptable - feature extraction, not target-dependent)
 - No TTA or augmentation that could cause leakage
 - Consistent hyperparameters across all folds and models
 
-**Score Integrity**: ✅ VERIFIED. All scores match the notebook output and my independent computation.
+**Score Integrity**: ✅ VERIFIED. CV scores match notes.md (Single: 0.0686, Full: 0.0660, Combined: 0.0669).
 
 **Template Compliance**: ✅ VERIFIED.
-- Notebook has correct structure with last 3 cells matching template exactly
-- Only the model definition line is changed: `model = DiverseEnsemble(data='single')` and `model = DiverseEnsemble(data='full')`
-- All other code in last 3 cells is unchanged
+- Last 3 cells match template exactly
+- Only the model definition line is changed: `model = MLPGBDTEnsemble(data='single')` and `model = MLPGBDTEnsemble(data='full')`
 
-**Code Quality**: Clean implementation. Ensemble weights properly applied. Per-target models correctly integrated with RF/XGB/LGB.
+**Code Quality**: Clean implementation. MLP training uses GPU (H100). Ensemble weights properly applied.
 
 Verdict: **TRUSTWORTHY**
 
 ## Strategic Assessment
 
-**Approach Fit**: REASONABLE BUT CV IS WORSE.
-- The diverse ensemble approach is sound and follows top kernel patterns
-- CV 0.0673 is worse than best CV 0.0623 (8% worse)
-- The ensemble may reduce variance but hasn't improved CV
+**Approach Fit**: PARTIALLY CORRECT BUT MISSING KEY ELEMENT.
+The researcher correctly identified that the top kernel uses MLP + GBDT ensemble. However, they missed the MOST CRITICAL difference:
 
-**Key Observations**:
+**⚠️ CRITICAL INSIGHT: The top kernel (lishellliang) OVERWRITES the utility functions to use GroupKFold (5-fold) instead of Leave-One-Out.**
 
-1. **Ensemble CV is Worse Than Per-Target Alone**:
-   - Diverse Ensemble: 0.0673 (this experiment)
-   - Best per-target (exp_004): 0.0623
-   - Adding RF/XGB/LGB didn't improve CV - it actually hurt it
+Looking at the top kernel code:
+```python
+# Overwrite utility functions to use GroupKFold (5 splits) instead of Leave-One-Out
+def generate_leave_one_out_splits(X, Y):
+    groups = X["SOLVENT NAME"]
+    n_splits = min(5, len(groups.unique()))
+    gkf = GroupKFold(n_splits=n_splits)
+    for train_idx, test_idx in gkf.split(X, Y, groups):
+        yield ((X.iloc[train_idx], Y.iloc[train_idx]), (X.iloc[test_idx], Y.iloc[test_idx]))
+```
 
-2. **Critical Difference from Top Kernel**:
-   - **Top kernel (lishellliang) uses GroupKFold (5-fold) instead of Leave-One-Out**
-   - They OVERWRITE the utility functions to use GroupKFold
-   - This is a MAJOR difference that may explain their better CV-LB correlation
-   - Our Leave-One-Out (24 folds for single, 13 for full) may be too pessimistic
+This is a FUNDAMENTAL difference that may explain:
+1. Why top kernels have better CV-LB correlation
+2. Why our CV scores may not predict LB well
 
-3. **Weights May Not Be Optimal**:
-   - Fixed weights [0.4, 0.2, 0.2, 0.2] were used
-   - Top kernel uses Optuna to learn optimal weights
-   - Learned weights could significantly improve performance
+**Effort Allocation**: 
+- ✅ Good: Followed top kernel model architecture (MLP + GBDT)
+- ⚠️ Concern: Didn't adopt GroupKFold validation (the KEY difference)
+- ⚠️ Concern: Used fixed weights instead of Optuna-learned weights
+- ⚠️ Concern: CV got worse (0.0669 vs 0.0623), suggesting this specific combination isn't optimal
 
-4. **CV-LB Gap Remains Untested for This Model**:
-   - We haven't submitted this ensemble to verify if it reduces CV-LB gap
-   - With 3 submissions remaining, we need to be strategic
-
-**Effort Allocation Analysis**:
-- ✅ Good: Followed top kernel pattern (diverse ensemble)
-- ⚠️ Concern: Didn't adopt GroupKFold validation (key difference from top kernel)
-- ⚠️ Concern: Used fixed weights instead of learned weights
-- ⚠️ Concern: CV got worse, not better
+**Assumptions Being Made**:
+1. Leave-One-Out CV is the right validation strategy → TOP KERNEL DISAGREES
+2. Fixed weights [0.35, 0.25, 0.25, 0.15] are reasonable → Should be learned
+3. MLP architecture [128, 64, 32] is optimal → May need tuning
 
 **Blind Spots**:
+1. **GroupKFold vs Leave-One-Out**: This is the BIGGEST blind spot. The top kernel explicitly uses GroupKFold (5-fold) instead of Leave-One-Out. This may give more realistic CV estimates and better CV-LB correlation.
 
-1. **GroupKFold vs Leave-One-Out**: The top kernel explicitly overwrites the utility functions to use GroupKFold (5-fold). This is a CRITICAL difference that may:
-   - Give more realistic CV estimates
-   - Reduce CV-LB gap
-   - Allow more data per fold for training
+2. **Optuna for weight optimization**: Top kernel uses Optuna to learn optimal weights. Our fixed weights may be suboptimal.
 
-2. **Learned Ensemble Weights**: Top kernel uses Optuna to optimize weights. Our fixed [0.4, 0.2, 0.2, 0.2] may be suboptimal.
-
-3. **MLP in Ensemble**: Top kernel includes MLP in the ensemble, we use PerTarget (HGB+ETR). MLP may capture different patterns.
+3. **MLP training epochs**: 200 epochs may not be enough. Top kernel may use different training settings.
 
 **Trajectory Assessment**: 
-- The diverse ensemble approach is correct but implementation differs from top kernel
-- CV got worse (0.0673 vs 0.0623), suggesting the specific combination isn't optimal
-- The 3.9x gap to target (0.01727) suggests we need more than just model diversity
+- CV is getting WORSE (0.0623 → 0.0669 → 0.0669), not better
+- We're iterating on model architecture but ignoring validation strategy
+- The 3.9x gap to target (0.01727) suggests we need a more fundamental change
 
 ## What's Working
 
-1. **Systematic exploration**: The researcher correctly followed the recommendation to try diverse ensembles
-2. **Template compliance**: Consistently maintained across all experiments
-3. **No TTA**: Correctly avoided TTA which was hurting performance
-4. **Proper validation**: Leave-one-out CV is correctly implemented
-5. **Combined features**: Using Spange + ACS_PCA + Arrhenius features is sound
+1. **Template compliance**: Consistently maintained across all experiments
+2. **No TTA**: Correctly avoided TTA which was hurting performance
+3. **Systematic exploration**: Following top kernel patterns is the right approach
+4. **GPU utilization**: Using H100 for MLP training is efficient
+5. **Spange-only features**: Simplifying features is a reasonable hypothesis
 
 ## Key Concerns
 
-1. **GroupKFold vs Leave-One-Out - CRITICAL STRATEGIC INSIGHT**
-   - **Observation**: Top kernel (lishellliang) overwrites utility functions to use GroupKFold (5-fold) instead of Leave-One-Out
-   - **Why it matters**: This is a MAJOR difference that may explain their better CV-LB correlation. GroupKFold:
-     - Uses more training data per fold (80% vs ~96% for LOO, but with more diverse validation)
+1. **GroupKFold vs Leave-One-Out - CRITICAL STRATEGIC OVERSIGHT**
+   - **Observation**: The top kernel (lishellliang) explicitly overwrites utility functions to use GroupKFold (5-fold) instead of Leave-One-Out. Our experiments still use Leave-One-Out.
+   - **Why it matters**: This is the MOST IMPORTANT difference between our approach and the top kernel. GroupKFold:
+     - Uses 5 folds instead of 24/13 folds
+     - Each fold has ~20% of solvents held out (vs ~4% for LOO)
      - May give more realistic CV estimates
-     - Is what the top performers use
-   - **Suggestion**: Try GroupKFold (5-fold) validation to see if it gives better CV-LB correlation
+     - May have better CV-LB correlation
+   - **Suggestion**: IMMEDIATELY try GroupKFold (5-fold) validation. This is the single most important change to make.
 
-2. **Ensemble CV is Worse - TACTICAL**
-   - **Observation**: Diverse ensemble CV (0.0673) is worse than per-target alone (0.0623)
-   - **Why it matters**: Adding more models didn't help - it hurt performance
-   - **Suggestion**: The issue may be the fixed weights. Try:
-     - Optuna to learn optimal weights
-     - Different model combinations
-     - Stacking instead of weighted averaging
+2. **CV is Getting Worse, Not Better**
+   - **Observation**: Best CV was 0.0623 (exp_004). This experiment: 0.0669 (7.4% worse).
+   - **Why it matters**: We're iterating but not improving. The MLP + GBDT ensemble didn't help.
+   - **Suggestion**: The issue may not be the model architecture. The issue may be the validation strategy. Try GroupKFold first before further model changes.
 
-3. **No Submission to Verify CV-LB Gap - STRATEGIC**
-   - **Observation**: We have 3 submissions remaining and haven't verified if ensemble reduces CV-LB gap
-   - **Why it matters**: We're making decisions based on CV alone, but CV-LB gap is the real problem
-   - **Suggestion**: Consider submitting this ensemble to test if model diversity reduces CV-LB gap
+3. **Fixed Ensemble Weights**
+   - **Observation**: Using fixed weights [0.35, 0.25, 0.25, 0.15] instead of learned weights.
+   - **Why it matters**: Top kernel uses Optuna to learn optimal weights. Fixed weights may be suboptimal.
+   - **Suggestion**: After trying GroupKFold, use Optuna to learn optimal weights.
 
-4. **Gap to Target Remains Enormous - STRATEGIC**
-   - **Observation**: Best CV is 0.0623, target is 0.01727 (3.6x gap)
-   - **Why it matters**: Even with perfect CV-LB correlation, we're far from target
-   - **Suggestion**: The target suggests there's domain knowledge or approach we're missing. Consider:
-     - Pre-trained molecular representations
-     - Physics-informed constraints
-     - Different validation strategy (GroupKFold)
+4. **Submission Strategy**
+   - **Observation**: 3 submissions remaining. We haven't submitted this experiment.
+   - **Why it matters**: We're making decisions based on CV alone, but CV-LB gap is the real problem.
+   - **Suggestion**: Consider submitting the best CV model (exp_004, CV 0.0623) or this MLP ensemble to verify if model diversity helps on LB.
 
 ## Top Priority for Next Experiment
 
-**CRITICAL INSIGHT: The top kernel uses GroupKFold (5-fold) instead of Leave-One-Out.**
+**CRITICAL: Adopt GroupKFold (5-fold) validation like the top kernel does.**
 
-This is the most important difference I've identified. The top kernel (lishellliang) explicitly overwrites the utility functions to use GroupKFold. This may be why they have better CV-LB correlation.
+This is the SINGLE MOST IMPORTANT change to make. The top kernel (lishellliang) explicitly overwrites the utility functions to use GroupKFold instead of Leave-One-Out. This is not a minor detail - it's a fundamental difference in validation strategy.
 
-**Recommended Next Steps (in order of priority):**
+**Recommended Implementation:**
+```python
+from sklearn.model_selection import GroupKFold
 
-1. **Try GroupKFold (5-fold) validation** - This is what top kernels do. Overwrite the utility functions like lishellliang does. This may give more realistic CV estimates and better CV-LB correlation.
+def generate_leave_one_out_splits(X, Y):
+    groups = X["SOLVENT NAME"]
+    n_splits = min(5, len(groups.unique()))
+    gkf = GroupKFold(n_splits=n_splits)
+    for train_idx, test_idx in gkf.split(X, Y, groups):
+        yield ((X.iloc[train_idx], Y.iloc[train_idx]), (X.iloc[test_idx], Y.iloc[test_idx]))
 
-2. **Learn ensemble weights with Optuna** - Instead of fixed [0.4, 0.2, 0.2, 0.2], use Optuna to find optimal weights. Top kernel does this.
+def generate_leave_one_ramp_out_splits(X, Y):
+    groups = X["SOLVENT A NAME"].astype(str) + "_" + X["SOLVENT B NAME"].astype(str)
+    n_splits = min(5, len(groups.unique()))
+    gkf = GroupKFold(n_splits=n_splits)
+    for train_idx, test_idx in gkf.split(X, Y, groups):
+        yield ((X.iloc[train_idx], Y.iloc[train_idx]), (X.iloc[test_idx], Y.iloc[test_idx]))
+```
 
-3. **Include MLP in ensemble** - Top kernel uses MLP + XGBoost + RF + LightGBM. We use PerTarget (HGB+ETR) + RF + XGB + LGB. Try including a proper MLP.
+**Why this matters:**
+1. Top performers use this approach
+2. May give more realistic CV estimates
+3. May have better CV-LB correlation
+4. Uses more diverse validation sets (20% of solvents per fold vs 4%)
 
-4. **Submit to verify CV-LB gap** - With 3 submissions remaining, consider submitting either:
-   - The best CV model (exp_004, CV 0.0623) to establish baseline
-   - The diverse ensemble (this experiment, CV 0.0673) to test if diversity helps
+**Secondary priorities (after GroupKFold):**
+1. Use Optuna to learn optimal ensemble weights
+2. Consider submitting to verify CV-LB correlation with new validation strategy
+3. Try different MLP architectures if GroupKFold shows promise
 
-**My strong recommendation**: Implement GroupKFold (5-fold) validation like the top kernel does. This is a fundamental difference in approach that may significantly impact CV-LB correlation. The target IS reachable - we need to adopt the validation strategy that top performers use.
+The target IS reachable. We need to adopt the validation strategy that top performers use. GroupKFold is the key difference we've been overlooking.
