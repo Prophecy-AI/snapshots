@@ -1,187 +1,140 @@
-# Catechol Reaction Yield Prediction - Evolved Seed Prompt (Loop 4)
+# Catechol Reaction Yield Prediction - Evolved Seed Prompt (Loop 5)
 
 ## Current Status
-- Best CV score: 0.08053 from exp_002 (003_simple_rf_regularized)
-- Best LB score: Not yet submitted (0/5 submissions used)
-- Target: 0.01727 (4.7x gap from current best)
-- **Expected next score: 0.0623** (22.7% improvement from analysis)
+- Best CV score: 0.0623 from exp_004 (005_no_tta_per_target)
+- Best LB score: 0.0956 (from submission of exp_004)
+- **CV-LB gap: -0.0333 (53% worse on LB!)** → MASSIVE OVERFITTING
+- Target: 0.01727 (5.5x better than our LB)
+- Submissions: 1/5 used, 4 remaining
 
 ## Response to Evaluator
-- Technical verdict was CONCERNS due to score discrepancy (reported 0.0813 vs calculated 0.0855)
-- Evaluator's top priority: Investigate and fix mixed solvent performance degradation
-- Key concerns raised:
-  1. Full data performance degraded from 0.0836 to 0.0895 (13.7% worse)
-  2. TTA may be causing overfitting
-  3. Gap to target remains massive (4.6x)
 
-**My response**: AGREE with all concerns. My analysis in `exploration/evolver_loop4_analysis.ipynb` CONFIRMS:
-- **TTA IS THE PROBLEM!** RF with TTA: 0.0932 vs RF without TTA: 0.0716 (30% worse with TTA!)
-- Removing TTA and using per-target approach achieves **0.0603 MAE on full data** (33% improvement!)
-- Expected combined score: **0.0623** (22.7% better than current 0.0805)
+**Technical verdict was TRUSTWORTHY** - execution is sound, but the CV-LB gap reveals our validation is too optimistic.
+
+**Evaluator's top priority**: Submit to verify CV-LB correlation, then focus on closing the 3.6x gap to target.
+
+**We submitted and got LB 0.0956** - this confirms:
+1. Our CV (0.0623) is NOT representative of test performance
+2. The test set has MORE challenging solvents than our leave-one-out captures
+3. We need fundamentally different approaches, not incremental improvements
+
+**Key concerns raised by evaluator**:
+1. Gap to target remains large (3.6x) → NOW 5.5x based on LB!
+2. Hardest solvents still problematic → Confirmed: HFIP (0.145 MAE), Ethylene Glycol (0.122)
+3. Model complexity vs data size → Need stronger regularization
+4. Feature engineering ceiling → Need higher-dimensional features
+
+## CRITICAL INSIGHT: CV-LB Gap Analysis
+
+The 53% CV-LB gap indicates MASSIVE OVERFITTING. Our leave-one-solvent-out CV is too optimistic because:
+- Training on 23/24 solvents still captures most chemical space
+- Models learn solvent-specific patterns that don't generalize
+- Test set likely has chemically unique solvents not represented in training
 
 ## Data Understanding
-Reference notebooks:
-- `exploration/eda.ipynb` - Basic data characteristics
-- `exploration/evolver_loop1_analysis.ipynb` - Target correlations, solvent analysis
-- `exploration/evolver_loop2_analysis.ipynb` - Model comparison, feature analysis
-- `exploration/evolver_loop3_analysis.ipynb` - Per-target heterogeneous model testing
-- `exploration/evolver_loop4_analysis.ipynb` - **TTA analysis, hybrid approach validation**
 
-Key patterns to exploit:
-1. **TTA HURTS mixed solvent performance** - DO NOT use data augmentation or test-time averaging
-2. **Per-target models work well for BOTH tasks** when TTA is removed
-3. **Combined features (0.8 acs_pca + 0.2 spange)** improve performance on both tasks
+**Reference notebooks:**
+- `exploration/evolver_loop5_lb_feedback.ipynb` - CV-LB gap analysis, per-solvent errors
+- `exploration/evolver_loop4_analysis.ipynb` - TTA hurts performance discovery
+- `exploration/evolver_loop2_analysis.ipynb` - Model comparison, hardest solvents
 
-## Recommended Approach (HIGH PRIORITY - IMPLEMENT THIS)
+**Key patterns:**
+1. **Hardest solvents**: HFIP (0.145 MAE), Ethylene Glycol (0.122), Water.Acetonitrile (0.112)
+2. **These are chemically unique** with high Spange distances from centroid
+3. **Temperature dominates**: Strong correlation with SM (-0.82), P2 (0.72)
 
-### Hybrid Per-Target Model WITHOUT TTA
+## Recommended Approaches (Priority Order)
 
-**Expected improvement: 0.0805 → 0.0623 (22.7% improvement)**
-
-This approach was validated in `exploration/evolver_loop4_analysis.ipynb`:
-- Single solvent MAE: 0.0659 (same as exp_004)
-- Full data MAE: 0.0603 (vs 0.0895 in exp_004 - 33% improvement!)
-- Combined: 0.0623
-
-**CRITICAL CHANGES from exp_004:**
-1. **REMOVE TTA completely** - no data augmentation, no test-time averaging
-2. Use same per-target approach for BOTH single and mixed solvents
-3. Keep combined features (0.8 acs_pca + 0.2 spange)
-
-**Implementation:**
+### 1. STRONGER REGULARIZATION (HIGHEST PRIORITY)
+The 53% CV-LB gap screams overfitting. Try:
 ```python
-class HybridPerTargetModel(BaseModel):
+# Simple Ridge Regression - may generalize better
+from sklearn.linear_model import Ridge
+model = Ridge(alpha=10.0)  # Strong regularization
+
+# Or regularized trees
+ExtraTreesRegressor(
+    n_estimators=100,  # Fewer trees
+    max_depth=5,       # Shallower (was 10)
+    min_samples_leaf=5, # More samples per leaf (was 2)
+    min_samples_split=10
+)
+```
+
+### 2. HIGHER-DIMENSIONAL FEATURES (HIGH PRIORITY)
+Current Spange (13-dim) + ACS_PCA (5-dim) may not capture enough chemistry:
+```python
+# Load DRFP (2048-dim) or fragprints (2133-dim)
+drfp = pd.read_csv(f'{DATA_PATH}/drfp_lookup.csv', index_col=0)
+# Apply PCA to reduce to 50-100 dimensions
+from sklearn.decomposition import PCA
+pca = PCA(n_components=50)
+drfp_reduced = pca.fit_transform(drfp.values)
+```
+These may capture chemical similarity better for truly unseen solvents.
+
+### 3. ENSEMBLE OF DIVERSE MODELS (MEDIUM PRIORITY)
+Combine fundamentally different approaches:
+- Ridge regression (linear baseline)
+- Random Forest with strong regularization
+- Gradient Boosting with low learning rate
+- Average predictions to reduce variance
+
+### 4. SIMPLER BASELINE FIRST
+Before complex models, establish what a simple linear model achieves:
+```python
+# Ridge regression baseline
+from sklearn.linear_model import Ridge
+from sklearn.multioutput import MultiOutputRegressor
+
+class SimpleRidgeModel(BaseModel):
     def __init__(self, data='single'):
-        self.data_type = data
-        self.mixed = (data == 'full')
-        self.targets = ['Product 2', 'Product 3', 'SM']
-        
-        # Load both feature sets
-        self.spange = pd.read_csv(f'{DATA_PATH}/spange_descriptors_lookup.csv', index_col=0)
-        self.acs_pca = pd.read_csv(f'{DATA_PATH}/acs_pca_descriptors_lookup.csv', index_col=0)
-        
-        # Scalers
-        self.scaler_spange = StandardScaler()
-        self.scaler_acs = StandardScaler()
-        
-        # Models for each target and feature set
-        self.models = {}
-    
-    def _build_features(self, X, feature_df):
-        rt = X['Residence Time'].values.reshape(-1, 1)
-        temp = X['Temperature'].values.reshape(-1, 1)
-        
-        # Arrhenius features
-        temp_k = temp + 273.15
-        inv_temp = 1000.0 / temp_k
-        log_time = np.log(rt + 1e-6)
-        interaction = inv_temp * log_time
-        
-        if self.mixed:
-            pct = X['SolventB%'].values.reshape(-1, 1)
-            A = feature_df.loc[X['SOLVENT A NAME']].values
-            B = feature_df.loc[X['SOLVENT B NAME']].values
-            solvent_feats = A * (1 - pct) + B * pct
-            return np.hstack([rt, temp, inv_temp, log_time, interaction, pct, solvent_feats])
-        else:
-            solvent_feats = feature_df.loc[X['SOLVENT NAME']].values
-            return np.hstack([rt, temp, inv_temp, log_time, interaction, solvent_feats])
-    
-    def train_model(self, X_train, y_train):
-        # Build features - NO AUGMENTATION!
-        X_spange = self._build_features(X_train, self.spange)
-        X_acs = self._build_features(X_train, self.acs_pca)
-        
-        # Scale
-        X_spange_sc = self.scaler_spange.fit_transform(X_spange)
-        X_acs_sc = self.scaler_acs.fit_transform(X_acs)
-        
-        y = y_train.values
-        
-        # Train per-target models
-        for i, target in enumerate(self.targets):
-            if target == 'SM':
-                model_spange = HistGradientBoostingRegressor(
-                    max_depth=7, max_iter=700, learning_rate=0.04, random_state=42
-                )
-                model_acs = HistGradientBoostingRegressor(
-                    max_depth=7, max_iter=700, learning_rate=0.04, random_state=42
-                )
-            else:
-                model_spange = ExtraTreesRegressor(
-                    n_estimators=500, max_depth=10, min_samples_leaf=2, 
-                    random_state=42, n_jobs=-1
-                )
-                model_acs = ExtraTreesRegressor(
-                    n_estimators=500, max_depth=10, min_samples_leaf=2,
-                    random_state=42, n_jobs=-1
-                )
-            
-            model_spange.fit(X_spange_sc, y[:, i])
-            model_acs.fit(X_acs_sc, y[:, i])
-            
-            self.models[target] = {'spange': model_spange, 'acs': model_acs}
-    
-    def predict(self, X):
-        # Build features - NO TTA!
-        X_spange = self._build_features(X, self.spange)
-        X_acs = self._build_features(X, self.acs_pca)
-        
-        X_spange_sc = self.scaler_spange.transform(X_spange)
-        X_acs_sc = self.scaler_acs.transform(X_acs)
-        
-        preds_all = []
-        for target in self.targets:
-            p_spange = self.models[target]['spange'].predict(X_spange_sc)
-            p_acs = self.models[target]['acs'].predict(X_acs_sc)
-            # Weighted combination: 0.8 acs + 0.2 spange
-            p_combined = 0.8 * p_acs + 0.2 * p_spange
-            preds_all.append(p_combined.reshape(-1, 1))
-        
-        preds = np.hstack(preds_all)
-        preds = np.clip(preds, 0, 1)
-        return torch.tensor(preds, dtype=torch.double)
+        self.model = MultiOutputRegressor(Ridge(alpha=10.0))
+        # ... feature engineering
 ```
 
 ## What NOT to Try
-- **TTA (Test-Time Augmentation)** - CONFIRMED to hurt performance by 30%!
-- Simple Random Forest with Spange only (already tried, 0.0748 single, 0.0836 full)
-- Complex MLP+GBDT ensemble (already tried, 0.081)
-- DRFP features with Ridge (0.097 MAE - worse than Spange)
 
-## Validation Notes
-- Single solvent: Leave-one-solvent-out (24 folds)
-- Full data: Leave-one-ramp-out (13 folds)
-- CV scheme is correct and template-compliant
+1. **TTA** - Confirmed to hurt performance (30% worse)
+2. **Complex neural networks** - Dataset too small
+3. **Deeper trees** - Will increase overfitting
+4. **More estimators** - Diminishing returns, more overfitting
 
-## Template Compliance Reminder
-- Last 3 cells must be EXACTLY as template
-- Only change: `model = HybridPerTargetModel(data='single')` and `model = HybridPerTargetModel(data='full')`
-- No cells after the final submission cell
+## Template Compliance (MANDATORY)
 
-## Target Score
-Beat **0.017270** (lower is better). 
-- Current best: 0.0805 (4.7x gap)
-- Expected next: 0.0623 (3.6x gap)
-- Still need ~3.6x improvement to reach target
+- Last 3 cells MUST remain unchanged from template
+- ONLY change: `model = YourModel()` line
+- Same hyperparameters across ALL folds
+- Model class needs: `__init__`, `train_model(X_train, y_train)`, `predict(X_test)` → torch tensor [N, 3]
 
-## After This Experiment
-If 0.0623 is achieved, consider:
-1. **Submit to verify CV-LB correlation** - we have 5 submissions available
-2. Try Gaussian Process models for uncertainty quantification
-3. Explore higher-dimensional features (DRFP 2048-dim) with appropriate regularization
-4. Consider pre-trained molecular transformers if time permits
+## Next Experiment: 006_regularized_baseline
 
-## 🚨 COMPETITION-SPECIFIC RULES (MUST ENFORCE) 🚨
+**Goal**: Establish a strongly regularized baseline that may generalize better to unseen solvents.
 
-**MANDATORY SUBMISSION STRUCTURE:**
-- The submission must have the same last three cells as in the notebook template
-- The ONLY allowed change is the line where the model is defined
-- The line `model = MLPModel()` can be replaced with a new model definition
-- Everything else in the last three cells MUST remain exactly the same
+**Approach**:
+1. Use Ridge regression with alpha=10.0 (strong regularization)
+2. Combined features: Spange + ACS_PCA + Arrhenius kinetics
+3. Per-target models (separate for SM vs Products)
+4. NO TTA
 
-**VALIDATION STRATEGY:**
-- The test set contains COMPLETELY NEW SOLVENTS that are NOT in training
-- Use leave-one-solvent-out (24 folds) for single solvent
-- Use leave-one-ramp-out (13 folds) for full data
-- This simulates the actual test scenario where we predict on unseen solvents
+**Expected outcome**: 
+- CV may be worse than current 0.0623
+- But LB may be BETTER due to less overfitting
+- This establishes a baseline for comparison
+
+**If Ridge works well**, try:
+- DRFP features with PCA reduction
+- Ensemble of Ridge + regularized trees
+
+## Key Insight
+
+The target (0.01727) is 5.5x better than our LB (0.0956). This is a HUGE gap. We need to:
+1. Stop optimizing CV (it's misleading)
+2. Focus on approaches that generalize to unseen solvents
+3. Use simpler models with stronger regularization
+4. Try higher-dimensional features that capture chemistry better
+
+**DO NOT GIVE UP** - The target IS achievable. The solution likely involves:
+- Fundamentally different feature engineering
+- Much stronger regularization
+- Ensemble of diverse simple models
