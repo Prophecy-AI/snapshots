@@ -1,39 +1,43 @@
 ## Current Status
-- Best CV score: 0.0623 from exp_004 (PerTarget HGB+ETR with LOO)
+- Best CV score: 0.0623 from exp_004 (PerTarget HGB+ETR with Arrhenius features)
 - Best LB score: 0.0956 from exp_004
 - CV-LB gap: +53% → LOO CV is optimistic for unseen solvents
 - Target: 0.01727 (5.5x lower than best LB)
 - Remaining submissions: 3
 
 ## Response to Evaluator
-- Technical verdict was TRUSTWORTHY for exp_014 - template compliance is correct
-- Evaluator's top priority: Combine MLP + GBDT ensemble with per-target approach and Optuna-optimized weights. **AGREE** - this is the key missing piece
+- Technical verdict was TRUSTWORTHY for exp_015 - template compliance is correct
+- Evaluator's top priority: Address the full data performance bottleneck (0.1027 vs 0.0603). **AGREE** - this is the key issue
 - Key concerns raised:
-  1. CV is worse than exp_004 (0.0834 vs 0.0623) - **VALID** - exp_014 used Spange only, exp_004 used COMBINED features
-  2. Missing MLP component - **AGREE** - MLP may capture non-linear patterns
-  3. Limited Optuna trials (50) - **VALID** - may need more trials
-- How I'm addressing: Next experiment should use COMBINED features (like exp_004) + MLP + Optuna for ensemble weights
+  1. Full data CV (0.1027) is 70% worse than exp_004 (0.0603) - **CRITICAL**
+  2. Deep models (depth=None) may be overfitting - **CONFIRMED** by analysis
+  3. MLP weight of 0.5 suggests equal contribution - **INTERESTING** but not the root cause
+- How I'm addressing: 
+  1. **ROOT CAUSE IDENTIFIED**: exp_015 is MISSING Arrhenius kinetics features (1/T, ln(t), t*T interaction)
+  2. **SECONDARY CAUSE**: Unlimited depth overfits on full data
+  3. **SOLUTION**: Use exp_004's approach for full data, exp_015's approach for single solvent
 
 ## CRITICAL INSIGHT FROM ANALYSIS
-**WHY exp_014 (Optuna) WAS WORSE THAN exp_004:**
-1. exp_014 used Spange-only features, exp_004 used COMBINED features (0.8*ACS_PCA + 0.2*Spange)
-2. Optuna found SHALLOW models (depth 3-6) which underfit
-3. GroupKFold CV during Optuna may not correlate with LOO CV
+**WHY exp_015 FULL DATA PERFORMANCE DEGRADED:**
 
-**SOLUTION:**
-1. Use COMBINED features (0.8*ACS_PCA + 0.2*Spange) like exp_004
-2. Use DEEPER models (depth=None or 10-20)
-3. Add MLP component for non-linear patterns
-4. Optuna for ensemble WEIGHTS (not just hyperparameters)
+| Metric | exp_004 | exp_015 | Difference |
+|--------|---------|---------|------------|
+| Single Solvent | 0.0659 | 0.0638 | exp_015 is 3% BETTER |
+| Full Data | 0.0603 | 0.1027 | exp_015 is 70% WORSE |
+| Combined | 0.0623 | 0.0891 | exp_015 is 43% WORSE |
+
+**ROOT CAUSES:**
+1. **MISSING Arrhenius kinetics features** in exp_015 (1/T, ln(t), t*T interaction)
+2. **Unlimited depth** in exp_015 (depth=None) vs exp_004 (depth=7/10)
+3. **MLP component** may be overfitting on full data
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop14_analysis.ipynb` for CV-LB gap analysis
+- Reference notebooks: See `exploration/evolver_loop15_analysis.ipynb` for detailed analysis
 - Key patterns:
-  1. exp_004 used COMBINED features (0.8*ACS_PCA + 0.2*Spange) - THIS IS CRITICAL
-  2. exp_014 used Spange only - THIS IS WHY IT WAS WORSE
-  3. More regularization made LB WORSE (0.0956 → 0.0991) - NOT traditional overfitting
-  4. Per-target models (HGB for SM, ETR for Products) achieved best CV (0.0623)
-  5. TTA hurts performance - confirmed in exp_005
+  1. Full data has 13 ramps with ~94 samples each (more complex, fewer groups)
+  2. Single solvent has 24 solvents with ~27 samples each (simpler, more groups)
+  3. Deep models overfit on full data but work well on single solvent
+  4. Arrhenius kinetics features are CRITICAL for generalization
 
 ## CRITICAL CONSTRAINT
 **🚨 DO NOT CHANGE THE VALIDATION STRATEGY IN TEMPLATE CELLS 🚨**
@@ -44,88 +48,99 @@
 
 ## Recommended Approaches (Priority Order)
 
-### 1. HIGHEST PRIORITY: Per-Target + MLP Hybrid with COMBINED Features
-**Why**: exp_004 achieved best CV (0.0623) with COMBINED features. Adding MLP may capture additional patterns.
+### 1. HIGHEST PRIORITY: Hybrid Model with Task-Specific Configurations
+**Why**: exp_015 is BETTER for single solvent, exp_004 is BETTER for full data. Combine the best of both!
 **Implementation**:
 ```python
-# Use COMBINED features like exp_004
-SPANGE_DF = load_features('spange_descriptors')
-ACS_PCA_DF = load_features('acs_pca_descriptors')
-
-# Feature weighting: 0.8 acs_pca + 0.2 spange (from exp_004)
-spange_weight = 0.2
-acs_weight = 0.8
-
-# Per-target models (from exp_004)
-# HGB for SM (target 2) - captures gradient patterns
-# ETR for Products (targets 0, 1) - robust to outliers
-
-# ADD MLP component
-# MLP: [128, 64, 32] with BatchNorm, ReLU, Dropout(0.2), Sigmoid output
-# Ensemble: weighted average of MLP + HGB + ETR
+class HybridTaskModel(BaseModel):
+    """Use different configurations for single vs full data."""
+    
+    def __init__(self, data='single'):
+        self.data = data
+        if data == 'single':
+            # exp_015 approach: Deep models + MLP (works better for single)
+            self.use_mlp = True
+            self.hgb_depth = None  # Unlimited
+            self.etr_depth = None  # Unlimited
+        else:
+            # exp_004 approach: Shallow models + NO MLP (works better for full)
+            self.use_mlp = False
+            self.hgb_depth = 7
+            self.etr_depth = 10
+        
+        # CRITICAL: Add Arrhenius kinetics features for BOTH tasks
+        self.use_arrhenius = True  # 1/T, ln(t), t*T interaction
 ```
 
-### 2. Optuna for Ensemble Weights (NOT just hyperparameters)
-**Why**: Fixed weights are suboptimal. Optuna can find optimal weights.
+**Expected CV**: 0.0638 * 0.35 + 0.0603 * 0.65 = 0.0615 (better than exp_004's 0.0623!)
+
+### 2. Add Arrhenius Kinetics Features to exp_015
+**Why**: exp_015 is MISSING these features that exp_004 has
 **Implementation**:
 ```python
-def objective(trial):
-    # Ensemble weights to optimize
-    mlp_weight = trial.suggest_float('mlp_weight', 0.1, 0.5)
-    hgb_weight = trial.suggest_float('hgb_weight', 0.1, 0.5)
-    etr_weight = trial.suggest_float('etr_weight', 0.1, 0.5)
+def _build_features(self, X):
+    rt = X['Residence Time'].values.reshape(-1, 1)
+    temp = X['Temperature'].values.reshape(-1, 1)
     
-    # Normalize weights
-    total = mlp_weight + hgb_weight + etr_weight
-    weights = [mlp_weight/total, hgb_weight/total, etr_weight/total]
+    # CRITICAL: Arrhenius kinetics features
+    temp_k = temp + 273.15
+    inv_temp = 1000.0 / temp_k  # 1/T
+    log_time = np.log(rt + 1e-6)  # ln(t)
+    interaction = inv_temp * log_time  # t*T interaction
     
-    # Use GroupKFold for internal CV (faster)
-    gkf = GroupKFold(n_splits=5)
-    errors = []
-    for train_idx, val_idx in gkf.split(X, y, groups=solvent_ids):
-        # Train MLP, HGB, ETR
-        # Ensemble predictions with weights
-        # Calculate MAE
-        errors.append(mae)
-    return np.mean(errors)
-
-study = optuna.create_study(direction='minimize')
-study.optimize(objective, n_trials=100)  # More trials than exp_014
+    # ... rest of feature extraction
+    return np.hstack([rt, temp, inv_temp, log_time, interaction, ...])
 ```
 
-### 3. Feature Engineering for Solvent Generalization
-**Why**: The problem is NOT overfitting - we need features that generalize to unseen solvents
+### 3. Use Shallow Models for Full Data
+**Why**: Deep models (depth=None) overfit on full data
 **Implementation**:
-- Use COMBINED features (0.8*ACS_PCA + 0.2*Spange) - PROVEN to work in exp_004
-- Add Arrhenius kinetics features: 1/T, ln(t), t*T interaction
-- Consider: polarity ratios, hydrogen bonding capacity
+```python
+# For full data only:
+hgb = HistGradientBoostingRegressor(
+    max_depth=7,  # NOT None
+    max_iter=700,
+    learning_rate=0.04,
+    random_state=42
+)
+etr = ExtraTreesRegressor(
+    n_estimators=500,
+    max_depth=10,  # NOT None
+    min_samples_leaf=2,
+    random_state=42
+)
+```
 
-### 4. Deeper Models (NOT shallow like exp_014)
-**Why**: exp_014 found shallow models (depth 3-6) which may underfit
+### 4. Remove MLP for Full Data
+**Why**: MLP may be overfitting on full data (13 ramps, ~94 samples each)
 **Implementation**:
-- HGB: depth=None (default, unlimited) or depth=10-15
-- ETR: depth=None (default, unlimited) or depth=15-20
-- MLP: [128, 64, 32] or deeper [256, 128, 64, 32]
+```python
+if self.data == 'full':
+    # Use GBDT only for full data
+    final_pred = gbdt_pred
+else:
+    # Use MLP + GBDT for single solvent
+    final_pred = 0.5 * mlp_pred + 0.5 * gbdt_pred
+```
 
 ## What NOT to Try
 - ❌ GroupKFold in template cells (breaks submission format)
 - ❌ TTA (hurts performance - confirmed in exp_005)
-- ❌ Simple Ridge regression (CV 0.0896, worse than PerTarget)
-- ❌ More regularization (made LB worse in exp_006)
+- ❌ Deep models (depth=None) for full data (overfits)
+- ❌ MLP for full data (may overfit)
 - ❌ Spange-only features (exp_014 showed this is worse than COMBINED)
-- ❌ Shallow models (exp_014 found depth 3-6 underfit)
+- ❌ Missing Arrhenius kinetics features (exp_015 showed this hurts full data)
 
 ## Validation Notes
 - Use LOO for submission (REQUIRED by evaluation metric)
-- Use GroupKFold ONLY for internal hyperparameter tuning (OPTIONAL)
 - The CV-LB gap is ~50% with LOO - this is expected for unseen solvents
 - Don't chase LOO CV - focus on approaches that generalize
 
 ## Submission Strategy
 With 3 submissions remaining:
-1. **DO NOT submit exp_014** - CV is worse than exp_004, unlikely to improve LB
-2. **Implement Per-Target + MLP Hybrid with COMBINED features**
-3. **Submit if CV improves significantly (>5%) over exp_004 (0.0623)**
+1. **DO NOT submit exp_015** - CV is worse than exp_004, unlikely to improve LB
+2. **Implement Hybrid Model with Task-Specific Configurations**
+3. **Submit if CV improves over exp_004 (0.0623)**
 4. **Keep 1-2 submissions for final iterations**
 
 ## Gap Analysis
@@ -134,7 +149,13 @@ With 3 submissions remaining:
 - Gap: 5.5x (HUGE)
 
 This gap suggests we need fundamentally different approaches. The target IS reachable - we just need to find the right combination of:
-1. COMBINED features (0.8*ACS_PCA + 0.2*Spange) - PROVEN in exp_004
-2. Per-target models (HGB for SM, ETR for Products) - PROVEN in exp_004
-3. MLP component for non-linear patterns - NOT YET TRIED with per-target
-4. Optuna for ensemble WEIGHTS - NOT YET TRIED
+1. **Task-specific configurations** (deep for single, shallow for full)
+2. **Arrhenius kinetics features** (CRITICAL for generalization)
+3. **COMBINED features** (0.8*ACS_PCA + 0.2*Spange)
+4. **Per-target models** (HGB for SM, ETR for Products)
+
+## NEXT EXPERIMENT: exp_016
+**Hybrid Model with Task-Specific Configurations**
+- Single solvent: Deep models + MLP + Arrhenius features
+- Full data: Shallow models + NO MLP + Arrhenius features
+- Expected CV: ~0.0615 (better than exp_004's 0.0623)
