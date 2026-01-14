@@ -1,89 +1,87 @@
 ## Current Status
-- Best CV score: 0.0087 from exp_024 (ACS PCA Fixed Compliant)
-- Best LB score: 0.0893 from exp_024 (NEW BEST!)
+- Best CV score: 0.008689 from exp_024 (ACS PCA Fixed Compliant)
+- Best LB score: 0.0893 from exp_024
 - Target: 0.01727 (lower is better)
 - Gap to target: 5.17x (LB 0.0893 vs target 0.01727)
-- CV-LB relationship: LB = 4.19*CV + 0.0537 (R²=0.955, updated with 9 data points)
-- Intercept 95% CI: [0.0455, 0.0618] - still above target even at lower bound
+- CV-LB relationship: LB = 4.19*CV + 0.0537 (R²=0.955)
 - Submissions remaining: 4
 
 ## Response to Evaluator
 
-**Technical verdict**: TRUSTWORTHY - The evaluator confirmed all fixes were correctly applied.
+**Technical verdict**: TRUSTWORTHY - The per-target experiment was correctly implemented.
 
-**Evaluator's top priority**: Submit exp_024. DONE - achieved LB 0.0893 (best yet!)
+**Evaluator's top priority**: Try loss-weighted joint model with SM emphasis. AGREED.
 
 **Key concerns raised**:
-1. **Per-target models unexplored**: Valid - competition explicitly allows different hyperparameters per target
-2. **1% CV gap from exp_022**: Confirmed within normal variance - LB improved as expected
+1. **Per-target models failed**: SM MSE 0.014034 is 2x worse than Products. The larger [64,32] architecture for SM OVERFITS.
+2. **Multi-task regularization is valuable**: The joint model provides implicit regularization that helps SM prediction.
+3. **SM is the bottleneck**: Improving SM specifically could yield significant gains.
 
-**My synthesis**: The submission validated that ACS PCA features help both CV and LB. The CV-LB relationship remains consistent (slope ~4.2, intercept ~0.054). The gap to target (5.17x) is large, but we have 4 submissions remaining and several unexplored approaches.
-
-## Critical Analysis: The Gap Problem
-
-The updated CV-LB linear fit shows:
-- LB = 4.19*CV + 0.0537
-- Even with CV=0, predicted LB = 0.0537 > target 0.01727
-- The intercept 95% CI is [0.0455, 0.0618] - entirely above target
-
-**BUT THIS DOESN'T MEAN THE TARGET IS UNREACHABLE:**
-
-1. **Linear fit is based on only 9 data points** from similar approaches (all MLP/LGBM ensembles)
-2. **A fundamentally different approach could have a different CV-LB relationship**
-3. **The GNN benchmark achieved 0.0039** - proving much better scores are possible
-4. **We haven't tried all tabular approaches** - per-target models, stacking, etc.
+**My synthesis**: The evaluator correctly identified that per-target models hurt performance because they lose multi-task regularization. The solution is NOT separate models, but rather:
+1. Keep joint model architecture
+2. Weight SM loss higher to focus optimization on the hardest target
+3. Add ensemble diversity (XGBoost, RandomForest) for variance reduction
 
 ## Data Understanding
 
 Reference notebooks:
 - `experiments/024_acs_pca_fixed/acs_pca_fixed.ipynb`: Current best model (CV 0.0087, LB 0.0893)
-- `exploration/evolver_loop25_lb_feedback.ipynb`: CV-LB analysis
+- `experiments/025_per_target/per_target_ensemble.ipynb`: Per-target failure analysis
+- `exploration/evolver_loop26_analysis.ipynb`: Analysis of per-target failure
 
 Key findings:
-1. **ACS PCA features**: 5 additional features improved both CV (3.5%) and LB (2.2%)
-2. **Feature composition**: Spange (13) + DRFP (122) + Arrhenius (5) + ACS PCA (5) = 145 features
-3. **Improvement trajectory**: CV improved 21.6%, LB improved 9.1% from baseline
-4. **Target characteristics**: SM (mean 0.52) vs Products (mean 0.13) are very different
+1. **Per-target MSE breakdown (exp_025)**:
+   - Product 2 MSE: 0.005917 (IMPROVED with separate model)
+   - Product 3 MSE: 0.007797 (IMPROVED with separate model)
+   - SM MSE: 0.014034 (MUCH WORSE - overfitting!)
+2. **Multi-task learning benefit**: Joint training provides regularization that helps SM
+3. **SM characteristics**: mean 0.52, std 0.36 (highest variance target)
+4. **Products characteristics**: mean ~0.13, std ~0.14, correlation 0.923
 
 ## Recommended Approaches
 
-**PRIORITY 1: Per-Target Models (HIGH IMPACT)**
+**PRIORITY 1: Loss-Weighted Joint Model (HIGH IMPACT)**
 
-The competition explicitly allows "different hyper-parameters for different objectives". This is unexplored!
+The per-target experiment showed that SM benefits from multi-task regularization. Instead of separate models, use weighted loss:
 
-Target characteristics:
-- SM: mean 0.52, std 0.36 (starting material remaining - higher values)
-- Product 2: mean 0.13, std 0.14 (yield - lower values)
-- Product 3: mean 0.13, std 0.14 (yield - lower values)
-- Product 2 and Product 3 correlation: 0.923 (very high!)
-
-Implementation approach:
 ```python
-class PerTargetEnsemble:
-    def __init__(self, data='single'):
-        # Separate model for SM (different characteristics)
-        self.sm_model = MLPEnsemble(hidden_dims=[64, 32], n_models=5, data=data)
-        # Shared model for Products (highly correlated)
-        self.product_model = MLPEnsemble(hidden_dims=[32, 16], n_models=5, data=data)
+class WeightedMSELoss(nn.Module):
+    def __init__(self, weights=[1.0, 1.0, 2.0]):  # [P2, P3, SM]
+        super().__init__()
+        self.weights = torch.tensor(weights)
     
-    def train_model(self, X_train, y_train):
-        # Train SM model on SM target only
-        self.sm_model.train_model(X_train, y_train[['SM']])
-        # Train Product model on both products
-        self.product_model.train_model(X_train, y_train[['Product 2', 'Product 3']])
-    
-    def predict(self, X_test):
-        sm_pred = self.sm_model.predict(X_test)
-        product_pred = self.product_model.predict(X_test)
-        return torch.cat([product_pred, sm_pred], dim=1)  # [P2, P3, SM]
+    def forward(self, pred, target):
+        mse = (pred - target) ** 2
+        weighted_mse = mse * self.weights.to(pred.device)
+        return weighted_mse.mean()
 ```
 
-**PRIORITY 2: 4-Model Ensemble (MEDIUM IMPACT)**
+This preserves multi-task regularization while focusing optimization on SM.
 
-Current ensemble: MLP + LightGBM (2 models)
-Proposed: MLP + LightGBM + XGBoost + RandomForest (4 models)
+**PRIORITY 2: Uncertainty-Weighted Loss (HIGH IMPACT)**
 
-More model diversity typically helps reduce variance and improve generalization.
+Research (Kendall et al. CVPR 2018) shows that learning task-specific uncertainty weights automatically balances multi-task losses:
+
+```python
+class UncertaintyWeightedLoss(nn.Module):
+    def __init__(self, n_tasks=3):
+        super().__init__()
+        # log(sigma^2) for numerical stability
+        self.log_vars = nn.Parameter(torch.zeros(n_tasks))
+    
+    def forward(self, pred, target):
+        mse = (pred - target) ** 2
+        # L = 1/(2*sigma^2) * MSE + log(sigma)
+        precision = torch.exp(-self.log_vars)
+        loss = precision * mse + self.log_vars
+        return loss.mean()
+```
+
+This automatically learns optimal weights based on task uncertainty.
+
+**PRIORITY 3: 4-Model Ensemble (MEDIUM IMPACT)**
+
+Add XGBoost and RandomForest for ensemble diversity:
 
 ```python
 class FourModelEnsemble:
@@ -92,10 +90,12 @@ class FourModelEnsemble:
         self.lgbm = LGBMWrapper(data=data)
         self.xgb = XGBWrapper(data=data)  # NEW
         self.rf = RFWrapper(data=data)    # NEW
-        # Weights: MLP 0.4, XGB 0.2, RF 0.2, LGBM 0.2
+        # Weights: MLP 0.4, LGBM 0.2, XGB 0.2, RF 0.2
 ```
 
-**PRIORITY 3: Stacking Meta-Learner (MEDIUM IMPACT)**
+Research shows tree-based models (XGBoost, RF) have different inductive biases than neural networks, providing valuable ensemble diversity.
+
+**PRIORITY 4: Stacking Meta-Learner (MEDIUM IMPACT)**
 
 Instead of fixed weights, learn optimal combination from OOF predictions:
 
@@ -113,27 +113,27 @@ meta = Ridge(alpha=1.0)
 meta.fit(X_meta, y_train)
 ```
 
-**PRIORITY 4: Non-linear Mixture Encoding (LOW-MEDIUM IMPACT)**
+**PRIORITY 5: Consistency Regularization (LOW-MEDIUM IMPACT)**
 
-Current: Linear interpolation `A*(1-pct) + B*pct`
-Proposed: Add interaction term `A*B*pct*(1-pct)`
+Add constraint that SM + P2 + P3 ≈ 1 (mass balance):
 
-This captures non-linear solvent interactions that linear mixing misses.
+```python
+def consistency_loss(pred):
+    # pred: [batch, 3] = [P2, P3, SM]
+    total = pred.sum(dim=1)
+    return ((total - 1.0) ** 2).mean()
 
-**PRIORITY 5: Larger MLP Ensemble (LOW IMPACT)**
-
-Current: 5 MLPs
-Proposed: 10-15 MLPs for variance reduction
-
-Previous experiments showed only 0.7% improvement from 5→15 models, but combined with other changes might help.
+# Combined loss
+loss = mse_loss + 0.1 * consistency_loss(pred)
+```
 
 ## What NOT to Try
 
-1. **Attention mechanisms** - EXHAUSTED. exp_021 showed 159% worse.
-2. **Fragprints instead of DRFP** - EXHAUSTED. exp_020 showed 8.28% worse.
-3. **Deep residual networks** - EXHAUSTED. exp_004 showed 5x worse.
-4. **MSELoss without scheduler** - CONFIRMED WORSE. exp_023 showed 4.2% degradation.
-5. **Single-layer networks** - EXHAUSTED. [16] is too simple.
+1. **Per-target models with separate architectures** - EXHAUSTED. exp_025 showed 4.36% worse.
+2. **Larger SM architecture [64,32]** - EXHAUSTED. Overfits without multi-task regularization.
+3. **Attention mechanisms** - EXHAUSTED. exp_021 showed 159% worse.
+4. **Fragprints instead of DRFP** - EXHAUSTED. exp_020 showed 8.28% worse.
+5. **Deep residual networks** - EXHAUSTED. exp_004 showed 5x worse.
 6. **Very large ensembles alone** - Only 0.7% improvement, not worth the time.
 
 ## Validation Notes
@@ -150,32 +150,36 @@ The competition requires EXACT template structure:
 - Last 3 cells must match template exactly
 - Only allowed change: `model = MLPModel()` line can be replaced with new model definition
 - Same hyperparameters across all folds (unless explainable rationale)
-- Per-target models ARE allowed: "using a different model for alcohols vs esters is allowed"
+- Loss weighting IS allowed: "using different hyper-parameters for different objectives is allowed"
 
-## Key Insight
+## Key Insight from exp_025
 
-The target (0.01727) is 5.17x better than our best LB (0.0893). The linear CV-LB relationship suggests this is very challenging, BUT:
+The per-target experiment revealed a crucial insight: **multi-task learning provides implicit regularization that helps the hardest target (SM)**. Separating targets removes this benefit and causes SM to overfit.
 
-1. **The linear fit is based on only 9 data points** from similar approaches
-2. **Per-target models are explicitly allowed** and unexplored
-3. **The GNN benchmark achieved 0.0039** - proving much better scores are possible
-4. **We have 4 submissions remaining** to test new approaches
-
-**DO NOT GIVE UP. The target IS reachable. Try per-target models next.**
+The solution is NOT to separate models, but to:
+1. Keep joint model (preserves multi-task regularization)
+2. Weight SM loss higher (focuses optimization on hardest target)
+3. Add ensemble diversity (reduces variance)
 
 ## Immediate Action Plan
 
-1. **exp_025: Per-Target Models** - Separate models for SM vs Products
-   - SM model: larger architecture (64, 32) for higher-variance target
-   - Product model: shared model for highly correlated P2/P3
-   - Expected: Different CV-LB relationship due to fundamentally different approach
+1. **exp_026: Loss-Weighted Joint Model**
+   - Keep joint [32,16] MLP + LightGBM ensemble
+   - Weight SM loss 2x higher: `loss = MSE_P2 + MSE_P3 + 2*MSE_SM`
+   - Expected: Better SM prediction while preserving multi-task regularization
 
-2. **exp_026: 4-Model Ensemble** - Add XGBoost and RandomForest
-   - More diversity in ensemble
-   - May reduce variance and improve generalization
+2. **exp_027: Uncertainty-Weighted Loss**
+   - Learn optimal task weights automatically
+   - Based on Kendall et al. CVPR 2018
+   - Expected: Automatic balancing of task difficulties
 
-3. **exp_027: Stacking Meta-Learner** - Learn optimal combination weights
-   - Use Ridge regression on OOF predictions
-   - May find better weights than fixed 0.6/0.4
+3. **exp_028: 4-Model Ensemble**
+   - Add XGBoost and RandomForest
+   - More diversity for variance reduction
+   - Expected: Lower variance, better generalization
 
 4. **Submit best candidate** - Validate new approach's CV-LB relationship
+
+## THE TARGET IS REACHABLE
+
+The per-target experiment was informative - it showed that multi-task learning is valuable. Use this insight to guide the next experiment. The target IS reachable with the right approach.
