@@ -1,95 +1,124 @@
 ## Current Status
-- Best CV score: 0.0623 from exp_004 (005_no_tta_per_target)
-- Best LB score: 0.0956 from exp_004
-- CV-LB gap: +53% → LOO validation is optimistic, but relative ranking preserved
-- Target: 0.01727 (still 5.5x away from best LB)
+- Best CV score: 0.0623 from exp_004/exp_017 (HGB+ETR Per-Target)
+- Best LB score: 0.0956 from exp_004/exp_017
+- CV-LB gap: +53% (consistent across all models)
+- Target: 0.01727 (5.5x away from best LB)
+- Submissions remaining: 2
 
 ## Response to Evaluator
-- Technical verdict was TRUSTWORTHY. Results can be trusted.
-- Evaluator's top priority: **Replicate exp_004's EXACT dual-model ensemble architecture for full data.** AGREED - this is the critical fix.
-- Key concern: exp_016 used FEATURE combination instead of PREDICTION combination. This is why full data CV was 0.0928 vs exp_004's 0.0603.
-- The evaluator correctly identified that exp_004 trains SEPARATE models on spange and acs_pca features, then combines PREDICTIONS (0.8*acs_pred + 0.2*spange_pred). This is fundamentally different from combining features first.
+- Technical verdict was TRUSTWORTHY. exp_017 successfully replicated exp_004's architecture.
+- Evaluator's top priority: **DO NOT submit exp_017** (identical to exp_004). Focus on approaches that reduce CV-LB gap.
+- Key concern: We've replicated but NOT improved. The 53% CV-LB gap is the fundamental challenge.
+- Evaluator correctly identified that incremental CV improvements won't close the 5.5x gap to target.
+
+## CRITICAL INSIGHT FROM RESEARCH
+**Paper arxiv:2512.19530** shows that a GNN-based approach achieves **MSE 0.0039** (~MAE 0.062) on the Catechol benchmark - this is **25x better than tabular ensembles** (MSE 0.099).
+
+Key components of the winning approach:
+1. **Graph Attention Networks (GATs)** for molecular structure
+2. **Differential Reaction Fingerprints (DRFP)** - we have these in `/home/data/drfps_catechol_lookup.csv` (2048 dims)
+3. **Learned mixture-aware solvent encodings** for continuous solvent space
+
+This suggests the target (0.01727) IS reachable with the right approach.
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop16_analysis.ipynb` for architectural analysis
+- Reference notebooks: See `exploration/evolver_loop17_lb_feedback.ipynb` for LB feedback analysis
 - Key patterns:
-  - **PREDICTION combination > FEATURE combination**: exp_004 (0.0623) vs exp_016 (0.0830)
-  - **Full data is the bottleneck**: exp_004 full=0.0603, exp_016 full=0.0928 (54% worse)
-  - **Single solvent is already good**: exp_016 single=0.0647 (close to exp_004's 0.0659)
-  - **CV-LB gap is ~50%**: Both submissions show similar gap, relative ranking preserved
+  - **CV-LB gap is 53%** for ALL models (exp_004, exp_006, exp_017)
+  - **More regularization made LB WORSE** (exp_006: 0.0991 vs exp_004: 0.0956)
+  - **This is NOT traditional overfitting** - the test set has chemically different solvents
+  - **DRFP features (2048 dims) are available** but not fully utilized
 
 ## Recommended Approaches
 
-### Priority 1: REPLICATE exp_004's EXACT Architecture (CRITICAL)
-The evaluator identified the KEY architectural difference. exp_016 failed because it combined features instead of predictions.
+### Priority 1: DRFP-Based Model with PCA Reduction (IMMEDIATE)
+The DRFP features (2048 dims) capture reaction-level information that may generalize better to unseen solvents.
 
-**EXACT exp_004 architecture to replicate:**
+**Implementation:**
 ```python
-# For each target (SM, Product 2, Product 3):
-# 1. Train model on spange features
-model_spange = HGB/ETR()
-model_spange.fit(X_spange_scaled, y_target)
+# Load DRFP features
+drfp = pd.read_csv('/home/data/drfps_catechol_lookup.csv', index_col=0)  # (24, 2048)
 
-# 2. Train model on acs_pca features  
-model_acs = HGB/ETR()
-model_acs.fit(X_acs_scaled, y_target)
+# Apply PCA to reduce dimensionality
+from sklearn.decomposition import PCA
+pca = PCA(n_components=50)  # or use explained variance threshold
+drfp_pca = pca.fit_transform(drfp)
 
-# 3. Combine PREDICTIONS (NOT features!)
-pred = 0.8 * model_acs.predict(X_test_acs) + 0.2 * model_spange.predict(X_test_spange)
+# Use DRFP-PCA as additional features alongside Spange/ACS_PCA
+# Train separate models on each feature set and combine predictions
 ```
 
-**Hyperparameters from exp_004:**
-- HGB for SM: max_depth=7, max_iter=700, learning_rate=0.04
-- ETR for Products: n_estimators=500, max_depth=10, min_samples_leaf=2
-- Feature weights: 0.8 * acs_pred + 0.2 * spange_pred
-
 **Expected result:**
-- Full data CV should match exp_004's 0.0603
-- Combined CV should be ~0.0618 (0.0647 * 0.35 + 0.0603 * 0.65)
+- DRFP captures chemical reaction patterns that may generalize better
+- Combined with existing features, could reduce CV-LB gap
 
-### Priority 2: Consider MLP for Single Solvent (Optional Enhancement)
-exp_015 showed MLP helps single solvent (0.0638 vs 0.0659). Could try:
-- Single solvent: exp_015 approach (deep + MLP + COMBINED features)
-- Full data: exp_004 approach (PREDICTION combination)
-- Expected: 0.0638 * 0.35 + 0.0603 * 0.65 = 0.0615
+### Priority 2: Ensemble with DRFP + Spange + ACS_PCA (PREDICTION COMBINATION)
+Build on exp_004's successful architecture but add DRFP as a third feature set:
 
-### Priority 3: Ensemble Diversity (After Fixing Architecture)
-Once we recover exp_004's performance, consider:
-- Stacking with meta-learner
-- Adding GP predictions as additional features
-- Different ensemble weights learned via validation
+```python
+# Train 3 separate model sets:
+# 1. Models on Spange features
+# 2. Models on ACS_PCA features  
+# 3. Models on DRFP-PCA features
+
+# Combine predictions:
+pred = 0.4 * drfp_pred + 0.4 * acs_pred + 0.2 * spange_pred
+```
+
+### Priority 3: Physics-Informed Feature Engineering
+Add features that capture solvent-solute interactions:
+- **Polarity index** from Spange descriptors (dielectric constant, ET(30))
+- **Hydrogen bonding capacity** (alpha, beta from Spange)
+- **Solvent-temperature interaction**: polarity * temperature
+- **Mixture effects**: weighted average of solvent properties
+
+### Priority 4: Stacking Ensemble with Meta-Learner
+Instead of fixed weights, learn optimal combination:
+```python
+# Base models: HGB, ETR, RF, XGB, LGB
+# Meta-learner: Ridge regression on OOF predictions
+# This can learn which models work best for which solvents
+```
 
 ## What NOT to Try
-- ❌ FEATURE combination (0.8*acs + 0.2*spange) - proven worse than PREDICTION combination
-- ❌ GroupKFold - causes submission format errors (exp_011 failed)
-- ❌ TTA (Test-Time Augmentation) - hurts mixed solvent performance (exp_004 analysis)
-- ❌ Optuna hyperparameter search - found shallow models that underfit (exp_014)
-- ❌ Very deep models for full data - overfits (exp_015 full=0.1027)
+- ❌ **DO NOT submit exp_017** - identical to exp_004 (LB 0.0956)
+- ❌ **GroupKFold** - causes submission format errors (exp_011/012 failed)
+- ❌ **TTA (Test-Time Augmentation)** - hurts mixed solvent performance
+- ❌ **Optuna hyperparameter search** - found shallow models that underfit (exp_014)
+- ❌ **Feature combination** - use PREDICTION combination instead (exp_016 lesson)
+- ❌ **Very deep models** - overfit on full data (exp_015)
 
 ## Validation Notes
 - Use LOO validation (24 folds for single solvent, 13 folds for full data)
-- CV-LB gap is ~50% but relative ranking is preserved
-- If CV improves to ~0.0615, submit to verify LB improvement
+- CV-LB gap is ~53% but relative ranking is preserved
 - Template compliance: Last 3 cells must match exactly, only model definition line can change
+- Include 'row' column in submission
 
-## CRITICAL IMPLEMENTATION DETAILS
-The key difference between exp_004 and exp_016 is:
+## STRATEGIC GUIDANCE
+With 2 submissions remaining:
 
-**exp_004 (CORRECT - CV 0.0623):**
+1. **Next experiment (exp_018)**: Try DRFP-based ensemble with prediction combination
+   - Add DRFP-PCA as third feature set
+   - Use exp_004's architecture (separate models per feature set)
+   - Expected CV: ~0.06 (similar to exp_004)
+   - Key question: Does DRFP reduce CV-LB gap?
+
+2. **If exp_018 improves LB**: Submit and continue with variations
+3. **If exp_018 doesn't improve**: Consider GNN approach (high risk, high reward)
+
+## TEMPLATE COMPLIANCE REMINDER
 ```python
-# Train separate models on each feature set
-model_spange.fit(X_spange_scaled, y_target)
-model_acs.fit(X_acs_scaled, y_target)
-# Combine predictions
-pred = 0.8 * model_acs.predict(X_test_acs) + 0.2 * model_spange.predict(X_test_spange)
+# Last 3 cells MUST be:
+# Cell -3: Single solvent LOO with model = YourModel(data='single')
+# Cell -2: Full data LOO with model = YourModel(data='full')
+# Cell -1: Combine and save submission.csv
+
+# ONLY the model definition line can change!
 ```
 
-**exp_016 (WRONG - CV 0.0830):**
-```python
-# Combine features first
-combined = np.concatenate([0.8*acs, 0.2*spange])
-# Train single model
-model.fit(combined, y_target)
-```
+## KEY INSIGHT
+The target (0.01727) is reachable. The paper evidence shows GNN approaches can achieve MSE 0.0039 on this exact dataset. Our current approach (tabular ensembles) has a ceiling around MSE 0.099. To reach the target, we need either:
+1. Better features that capture chemical generalization (DRFP, physics-informed)
+2. Fundamentally different architecture (GNN, transformer)
 
-The fix is straightforward: train SEPARATE models on each feature set and combine PREDICTIONS.
+The 53% CV-LB gap suggests our models are learning solvent-specific patterns that don't generalize. We need to focus on features that capture universal chemical properties.
