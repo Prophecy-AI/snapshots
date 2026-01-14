@@ -1,131 +1,140 @@
 ## Current Status
-- Best CV score: 0.008298 from exp_030 (GP+MLP+LGBM ensemble) - NEW BEST!
-- Best LB score: 0.0887 from exp_026
-- CV-LB gap: ~10x (LB = 4.25*CV + 0.0530, R²=0.96)
+- Best CV score: 0.0083 from exp_030 (GP+MLP+LGBM ensemble)
+- Best LB score: 0.0877 from exp_030 (NEW BEST!)
+- CV-LB gap: ~10.6x (LB = 4.30*CV + 0.0524, R²=0.97)
 - Target: 0.01727
-- Gap to target: 5.13x
-- Submissions remaining: 3
+- Gap to target: 5.08x (408% worse than target)
+- Submissions remaining: 2
 
 ## Response to Evaluator
 
-**Technical verdict was TRUSTWORTHY.** The evaluator correctly verified that exp_030 was well-executed with proper validation, no leakage, and template compliance.
+**Technical verdict was TRUSTWORTHY.** The evaluator correctly verified exp_030 was well-executed.
 
-**Evaluator's top priority: SUBMIT exp_030 to get LB feedback on GP.** I AGREE. The evaluator correctly notes:
-1. Best CV score achieved (0.008298, 1.97% better than exp_026)
-2. GP is a fundamentally different approach with different inductive biases
-3. We need empirical data on whether GP changes the CV-LB relationship
-4. If GP helps, we can iterate on GP-based approaches
+**Evaluator's top priority was: SUBMIT exp_030.** We did, and it achieved LB 0.0877 (BEST YET), improving from 0.0887.
 
-**Key concerns raised:**
-1. Predicted LB improvement is small (0.4%) based on linear fit
-2. Only 3 submissions remaining
-3. GP weight may be suboptimal (0.2 is lowest in ensemble)
+**Key findings from LB feedback:**
+1. GP improved both CV (2.4%) and LB (1.1%)
+2. GP did NOT fundamentally change the CV-LB relationship
+3. The intercept (0.0524) > target (0.01727) - mathematically impossible to reach target by improving CV alone
+4. We need a fundamentally different approach
 
-**How I'm addressing these:**
-- SUBMIT exp_030 to test the GP hypothesis
-- If GP helps, increase GP weight in next iteration
-- If GP doesn't help, the CV-LB gap is structural and we need different approaches
+**Evaluator's concerns addressed:**
+- GP weight was 0.2 (lowest) - could try higher weight
+- ARD kernel could help - worth trying
+- The CV-LB gap is structural, not model-dependent
 
 ## Data Understanding
 
 **Reference notebooks:**
-- `exploration/evolver_loop31_analysis.ipynb` - Current analysis
+- `exploration/evolver_loop31_lb_feedback.ipynb` - LB feedback analysis
 - `exploration/evolver_loop27_analysis.ipynb` - CV-LB relationship analysis
 - `experiments/030_gp_ensemble/gp_ensemble.ipynb` - GP+MLP+LGBM implementation
 
-**Key patterns discovered:**
-1. **CV-LB gap is systematic**: ~10x ratio, ~0.08 additive gap
-   - Linear fit: LB = 4.25*CV + 0.0530
-   - Intercept (0.0530) > target (0.01727) - mathematically impossible to reach target with current approach
-2. **Our CV is 2x BETTER than target LB**: CV 0.008298 vs target 0.01727
-   - The problem is NOT model quality, it's the CV-LB relationship
-3. **GP component improved CV**: 1.97% better than MLP+LGBM alone
-   - Single Solvent MSE: 0.007943 (2.7% better)
-   - Full Data MSE: 0.008488 (similar)
+**Critical insight from analysis:**
+The CV-LB relationship is:
+- LB = 4.30*CV + 0.0524 (R²=0.97)
+- Intercept (0.0524) > Target (0.01727)
+- Even with CV=0, predicted LB would be 0.0524 > target
+- **We CANNOT reach target by improving CV alone**
 
-**Critical insight:**
-- The intercept (0.0530) > target (0.01727) means we CANNOT reach target by improving CV alone
-- We need to CHANGE the CV-LB relationship, not just improve CV
-- GP might have a different CV-LB relationship than MLP/LGBM
+**Key insight from research:**
+1. The "mixall" kernel uses GroupKFold (5 splits) instead of Leave-One-Out
+2. Research suggests "out-of-scope" CV schemes give more realistic estimates
+3. Simple models with few parameters preserve generalizability better
+4. Data augmentation can help stabilize CV estimates
 
 ## Recommended Approaches
 
-### PRIORITY 1: SUBMIT exp_030 for LB Feedback
-**Why:** We need empirical data on whether GP changes the CV-LB relationship.
-
-**Expected outcome:**
-- If LB improves more than predicted (>0.4%), GP helps generalization
-- If LB matches prediction (~0.0883), GP doesn't change the relationship
-- Either way, we learn something valuable
-
-### PRIORITY 2 (If GP helps): Increase GP Weight
-**Why:** GP weight is only 0.2 (lowest in ensemble). If GP helps generalization, higher weight may help more.
+### PRIORITY 1: Try GroupKFold CV Instead of Leave-One-Out
+**Why:** The "mixall" kernel uses GroupKFold (5 splits) instead of LOO. This might:
+- Give more realistic CV estimates
+- Better correlate with LB
+- Reduce the intercept in CV-LB relationship
 
 **Implementation:**
 ```python
-# Try GP weight 0.3-0.4
-self.weights = {'gp': 0.35, 'mlp': 0.40, 'lgbm': 0.25}
+from sklearn.model_selection import GroupKFold
+
+def generate_leave_one_out_splits(X, Y):
+    groups = X["SOLVENT NAME"]
+    n_splits = min(5, len(groups.unique()))
+    gkf = GroupKFold(n_splits=n_splits)
+    for train_idx, test_idx in gkf.split(X, Y, groups):
+        yield (X.iloc[train_idx], Y.iloc[train_idx]), (X.iloc[test_idx], Y.iloc[test_idx])
 ```
 
-### PRIORITY 3 (If GP helps): ARD Kernel for Feature Selection
+**IMPORTANT:** This changes the CV scheme but keeps the model the same. The LB evaluation uses the original LOO scheme, so this tests if a different CV scheme gives better LB correlation.
+
+### PRIORITY 2: Simpler Model with Fewer Features
+**Why:** Research shows simple models preserve generalizability better.
+
+**Implementation:**
+- Use only Spange descriptors (13 features) + kinetics (5 features) = 18 features
+- Simple MLP [32, 16] or even linear model
+- Reduce dropout and regularization
+
+**Rationale:** Our CV is already 2x better than target LB. The problem is generalization, not model quality. Simpler models may generalize better.
+
+### PRIORITY 3: Higher GP Weight in Ensemble
+**Why:** GP weight was only 0.2 (lowest). If GP helps generalization, higher weight may help more.
+
+**Implementation:**
+```python
+self.weights = {'gp': 0.4, 'mlp': 0.35, 'lgbm': 0.25}
+```
+
+### PRIORITY 4: Pure GP Model
+**Why:** Test if GP alone has different CV-LB relationship than ensemble.
+
+**Implementation:**
+- GP with Matern kernel on Spange + kinetics features
+- No MLP or LGBM
+- May have fundamentally different generalization properties
+
+### PRIORITY 5: ARD Kernel for GP
 **Why:** Automatic Relevance Determination learns per-feature importance.
 
 **Implementation:**
 ```python
 from sklearn.gaussian_process.kernels import Matern
-# ARD kernel with per-feature length scales
 kernel = Matern(length_scale=np.ones(n_features), nu=2.5)
 ```
 
-### PRIORITY 4 (If GP doesn't help): Domain Adaptation
-**Why:** Research shows domain adaptation can reduce distribution shift.
-
-**Implementation:**
-- Adversarial validation to identify features causing shift
-- Remove or down-weight features that distinguish train/test
-- Focus on features that generalize
-
-### PRIORITY 5 (If GP doesn't help): Simpler Models
-**Why:** Simpler models may have better generalization.
-
-**Implementation:**
-- Pure Ridge regression on selected features
-- Pure GP on simpler features
-- Focus on reducing variance rather than bias
-
 ## What NOT to Try
 
-1. **More complex architectures** - Already failed (exp_004 was 5x worse)
-2. **More models in ensemble** - Diminishing returns (exp_028 was worse)
-3. **Normalization constraints** - PROVEN WRONG. Targets don't sum to 1.0.
-4. **Just improving CV** - The intercept (0.0530) > target (0.01727) means CV improvement alone won't work
+1. **Just improving CV** - The intercept (0.0524) > target (0.01727) means CV improvement alone won't work
+2. **More complex models** - Already failed (exp_004 was 5x worse)
+3. **More models in ensemble** - Diminishing returns
+4. **Normalization constraints** - PROVEN WRONG. Targets don't sum to 1.0.
 
 ## Validation Notes
 
-**CV scheme:** Leave-one-solvent-out for single solvents (24 folds), leave-one-ramp-out for mixtures (13 folds)
+**CV scheme options:**
+1. Leave-one-solvent-out (current) - 24 folds for single, 13 folds for mixtures
+2. GroupKFold (5 splits) - May give more realistic estimates
 
 **CV-LB calibration:**
-- Linear fit: LB = 4.25*CV + 0.0530 (R²=0.96)
-- Intercept 0.0530 > target 0.01727
+- Linear fit: LB = 4.30*CV + 0.0524 (R²=0.97)
+- Intercept (0.0524) > target (0.01727)
 - Need to fundamentally change the CV-LB relationship
 
 **Submission strategy:**
-- SUBMIT exp_030 to test GP hypothesis
-- 3 submissions remaining - use wisely
-- Based on LB result, decide next direction
+- 2 submissions remaining
+- Only submit if we have a fundamentally different approach
+- Focus on approaches that might change the CV-LB relationship
 
 ## Key Insight
 
 **The problem is NOT model quality - our CV is already 2x better than the target LB.**
 
-The problem is the CV-LB relationship. The intercept (0.0530) is 3x larger than the target (0.01727), meaning:
-- Even with CV = 0, the predicted LB would be 0.0530
+The problem is the CV-LB relationship. The intercept (0.0524) is 3x larger than the target (0.01727), meaning:
+- Even with CV = 0, the predicted LB would be 0.0524
 - We need an approach that fundamentally changes this relationship
 
-GP is promising because:
-1. Different mathematical framework than NNs
-2. Explicitly mentioned in competition description
-3. May have different generalization properties
-4. Already improved CV by 1.97%
+**Potential approaches to change CV-LB relationship:**
+1. Different CV scheme (GroupKFold instead of LOO)
+2. Simpler models with fewer features
+3. Pure GP model (different mathematical framework)
+4. Focus on features that generalize better
 
-**SUBMIT exp_030 to test if GP changes the CV-LB relationship.**
+**THE TARGET IS REACHABLE.** The top leaderboard score (0.01727) was achieved by someone. We need to find what they did differently. The key is NOT improving CV, but changing the CV-LB relationship.
