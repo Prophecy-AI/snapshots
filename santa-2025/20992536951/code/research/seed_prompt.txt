@@ -1,97 +1,46 @@
-# Santa 2025 - Christmas Tree Packing Optimization
-
 ## Current Status
-- Best CV score: 87.36 from exp_002 (003_local_search_optimization)
-- Best LB score: 88.33 from exp_001 (002_grid_placement)
-- **CRITICAL**: exp_002 FAILED on LB due to "Overlapping trees in group 004"
-- CV-LB gap: N/A (submission failed)
-- Target: 68.95 (gap: ~19 points from working submission)
+- Best CV/LB score: 139.58 (Local evaluation)
+- Previous Experiment: `baseline_bp_sample_submission` (BP only)
+- Status: `tree_packer.exe` failed to run due to missing input. `bp.exe` succeeded.
 
 ## Response to Evaluator
-- Technical verdict was TRUSTWORTHY for local validation, but **Kaggle's validation is stricter**
-- Evaluator's top priority was simulated annealing with aggressive optimization
-- **Key issue discovered**: Our overlap threshold (1e-15) is too lenient. Kaggle detected overlaps of 3.47e-13 in group 004
-- Root cause: Rotation tightening creates fractional coordinates that lead to tiny overlaps
-
-## Critical Bug Fix Required
-**The submission failed because our overlap detection is too lenient.**
-
-Analysis from `exploration/evolver_loop3_analysis.ipynb`:
-- Group 004 trees (0,2) and (1,3) have overlap area = 3.47e-13
-- Our threshold was 1e-15 (347x smaller than actual overlap)
-- The grid placement (exp_001) works because it uses clean integer-like coordinates
-
-**Solution Options:**
-1. **ZERO tolerance**: Change overlap check from `area > 1e-15` to `area > 0`
-2. **Fallback strategy**: If optimization creates overlaps, fall back to grid placement
-3. **Skip rotation tightening for small N**: Small N groups are more sensitive to precision issues
+- **Technical Verdict:** CONCERNS (Main optimizer failed).
+- **Response:** Agreed. The failure was due to `tree_packer` expecting an existing `submission.csv` which wasn't present at start.
+- **Action:** I will ensure `submission.csv` (populated with the 139.58 result) is available before running `tree_packer`.
+- **Resource Usage:** Evaluator noted 4 threads vs 26 available.
+- **Action:** I will set `OMP_NUM_THREADS` to 26 (or `os.cpu_count()`) to maximize parallelism.
 
 ## Data Understanding
-- Reference notebooks: `exploration/eda.ipynb`, `exploration/evolver_loop3_analysis.ipynb`
-- Tree shape: 15-vertex polygon, 0.7 base width, 1.0 total height
-- Grid placement achieves 88.33 (working baseline)
-- Local search + rotation tightening achieves 87.36 but creates tiny overlaps
+- Reference: `exploration/evolver_loop1_analysis.ipynb` confirms the submission format and visualizes current packings.
+- Insight: The current packings are "loose" (BP only removes trees but doesn't aggressively compact the remaining ones). `tree_packer`'s SA + Compaction is critical.
 
-## Recommended Approaches (Priority Order)
+## Recommended Approaches
+Priority-ordered list:
 
-### 1. Fix Overlap Validation (CRITICAL - Must Do First)
-Use proper polygon intersection checking - if polygons intersect and don't just touch, it's an overlap:
-```python
-def has_overlap_strict(trees):
-    """ZERO tolerance overlap check."""
-    for i in range(len(trees)):
-        for j in range(i+1, len(trees)):
-            if poly_i.intersects(poly_j) and not poly_i.touches(poly_j):
-                return True  # ANY non-touching intersection is overlap
-    return False
-```
+1.  **Fix & Unleash Tree Packer (High Priority)**
+    - **Why:** The main engine (`tree_packer.cpp`) hasn't run yet. It contains the Simulated Annealing and Compaction logic necessary for tight packing.
+    - **Implementation:**
+        - Input: Use the `submission.csv` from the previous experiment (score 139.58).
+        - Config: `OMP_NUM_THREADS=26`.
+        - Parameters: Increase `-n` (steps) to 20000 and `-r` (restarts) to 8 or 16 to utilize the extra compute time.
+        - Command: `./tree_packer.exe -n 20000 -r 16` (assuming it reads `submission.csv` by default).
 
-### 2. Conservative Optimization Strategy
-- Start from grid placement (known to work)
-- Apply local search with STRICT overlap checking
-- If any optimization creates overlap, REVERT to previous state
-- Only accept moves that pass ZERO-tolerance overlap check
+2.  **Iterative Refinement Loop**
+    - **Why:** BP and SA are complementary. BP jumps to a good subspace (by removing a tree from N+1), and SA refines it.
+    - **Implementation:** Run a loop: `Tree Packer` -> `BP` -> `Tree Packer` -> `BP`.
+    - **Logic:**
+        - Run `tree_packer` (improves current N).
+        - Run `bp` (uses improved N to improve N-1).
+        - Repeat.
 
-### 3. Simulated Annealing with Strict Validation
-- Implement SA as evaluator suggested
-- BUT use ZERO-tolerance overlap checking
-- Parameters: 5000 iterations, T_start=1.0, T_end=0.00001, cooling=0.9995
-- Prioritize small N (more iterations for N ≤ 20)
-
-### 4. C++ Optimizer (High Leverage)
-The jonathanchan kernel has working C++ code with:
-- Proper polygon intersection checking
-- OpenMP parallelization
-- SA + local search + fractional translation
-- This could reach target in one experiment
-
-### 5. Ensemble Approach
-Top solutions collect best configurations from multiple sources:
-- Public kernels/datasets
-- Multiple optimization runs
-- Select best per N
+3.  **Parameter Tuning**
+    - **Why:** With more threads, we can afford more restarts (`-r`) or deeper search (`-n`).
+    - **Implementation:** If the first run is fast, double `n` or `r` in subsequent iterations.
 
 ## What NOT to Try
-- Using lenient overlap thresholds (1e-15 or similar) - PROVEN TO FAIL
-- Rotation tightening without strict validation - creates precision issues
-- Any optimization that doesn't validate with ZERO tolerance
+- **Python-based Optimization:** Too slow. Stick to the C++ binaries.
+- **Complex Ensembling:** Not yet. We need a strong single-model baseline first.
 
 ## Validation Notes
-- **CRITICAL**: Use ZERO tolerance for overlaps (area > 0 means overlap)
-- Test submission locally before submitting
-- If in doubt, fall back to grid placement for that N
-- Grid placement (88.33) is a WORKING baseline - don't break it
-
-## Expected Outcome
-With proper overlap validation:
-- Should achieve ~87-88 score (similar to current but valid)
-- With SA + aggressive optimization: potentially 80-85
-- With C++ optimizer: potentially 70-75 (close to target)
-
-## Key Insight
-The gap to target (68.95) is ~19 points. This requires:
-1. First: Fix the validation bug (get a working submission)
-2. Then: Apply more aggressive optimization (SA, C++)
-3. Finally: Ensemble best configurations
-
-Don't sacrifice correctness for score improvement. A working 88.33 is better than a failing 87.36.
+- **Metric:** Minimize $\sum (s_n^2 / n)$.
+- **Check:** Ensure `tree_packer` output is valid (no overlaps). The C++ code should handle this, but a quick Python check after execution is wise.
