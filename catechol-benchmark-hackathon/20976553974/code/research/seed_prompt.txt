@@ -1,125 +1,177 @@
-# Catechol Reaction Yield Prediction - Evolved Seed Prompt (Loop 1)
+# Catechol Reaction Yield Prediction - Evolved Seed Prompt (Loop 2)
 
 ## Current Status
-- Best CV score: 0.081393 from exp_000 (baseline ensemble)
+- Best CV score: 0.081044 from exp_001 (template-compliant ensemble)
 - Best LB score: Not yet submitted (0/5 submissions used)
 - Target: 0.017270 (4.7x improvement needed)
+- CV-LB gap: Unknown (no submissions yet)
 
 ## Response to Evaluator
-- Technical verdict was CONCERNS due to template non-compliance. **CRITICAL: Must fix template structure.**
-- Evaluator's top priority: Fix template compliance, then try Gaussian Process models.
-- Key concerns raised: (1) Template non-compliance, (2) Large gap to target (4.7x), (3) Missing error analysis, (4) Linear mixture assumption.
-- Addressing: Template compliance is mandatory. Error analysis done in Loop 1 - identified high-variance solvents. Will try fundamentally different approaches.
+- Technical verdict was CONCERNS due to template compliance (cells after "final" cell).
+- Evaluator's top priority: Fix template compliance, then try per-target models or GP.
+- Key concerns raised: (1) Template still has extra cells, (2) Stagnating performance (0.081393 → 0.081044), (3) Need fundamentally different approach.
+- **My response**: Template compliance is now fixed. The evaluator is correct that we're stagnating. However, my analysis reveals a CRITICAL insight: **Simple Random Forest (0.0742) outperforms our complex ensemble (0.081)**. This means we're OVERFITTING. The path forward is SIMPLER models with STRONGER regularization, not more complexity.
+
+## CRITICAL DISCOVERY FROM LOOP 2 ANALYSIS
+
+**Our complex MLP+GBDT ensemble is WORSE than a simple Random Forest!**
+
+| Model | Leave-One-Solvent-Out MAE |
+|-------|---------------------------|
+| Random Forest (max_depth=10) | 0.0742 |
+| Gaussian Process (Matern) | 0.0797 |
+| Simple Ensemble (Ridge+RF) | 0.0810 |
+| **Our MLP+GBDT Ensemble** | **0.0810** |
+| Ridge Regression | 0.0980 |
+
+**Implication**: Our ensemble is overfitting to training solvents. Simpler models generalize better to unseen solvents.
 
 ## Data Understanding
-**Reference notebooks:** See `exploration/eda.ipynb` and `exploration/evolver_loop1_analysis.ipynb`
+**Reference notebooks:** See `exploration/eda.ipynb`, `exploration/evolver_loop1_analysis.ipynb`, `exploration/evolver_loop2_analysis.ipynb`
 
-Key findings from analysis:
-1. **Strong target correlations**: SM negatively correlated with P2 (-0.89) and P3 (-0.77). P2 and P3 highly correlated (0.92). Multi-task learning could exploit this.
-2. **High-variance solvents** (hardest to predict): IPA, Decanol, Ethylene Glycol, Water.Acetonitrile, Ethanol
-3. **Unusual solvents** (outliers in feature space): Water, Hexafluoropropan-2-ol, Cyclohexane
-4. **Temperature dominates**: Temp corr with SM=-0.82, P2=0.72, P3=0.57. Time correlations weaker (~0.2-0.3)
+Key findings from Loop 2 analysis:
+1. **Hardest solvents to predict** (leave-one-out MAE):
+   - Cyclohexane: 0.40 (extreme outlier in feature space)
+   - 1,1,1,3,3,3-Hexafluoropropan-2-ol: 0.19
+   - 2,2,2-Trifluoroethanol: 0.16
+   - These are chemically unique with no similar neighbors
 
-## CRITICAL: Template Compliance
-**The last 3 cells MUST match the template exactly. Only change the model definition line.**
+2. **Feature-target correlations**:
+   - Temperature dominates: SM=-0.82, P2=0.72, P3=0.57
+   - Spange features: ET(30), SA, alpha have ~0.4 correlation with targets
+   - Arrhenius features (inv_temp, log_time) are well-motivated
 
-```python
-# Cell -3: Single solvent task
-model = YourModel(data='single')  # ONLY THIS LINE CAN CHANGE
+3. **Available high-dim features**:
+   - DRFP: 2048 dimensions (all 24 solvents)
+   - Fragprints: 2133 dimensions (all 24 solvents)
+   - These may capture chemical similarity better than Spange (13-dim)
 
-# Cell -2: Full data task  
-model = YourModel(data='full')  # ONLY THIS LINE CAN CHANGE
-
-# Cell -1: Save submission (DO NOT CHANGE)
-```
+## CRITICAL: Template Compliance (FIXED)
+The last 3 cells MUST be the ACTUAL last 3 cells. No logging/analysis after them.
 
 ## Recommended Approaches (Priority Order)
 
-### 1. Per-Target Models with Different Algorithms (HIGH PRIORITY)
-From kernel `dabansherwani_catechol-strategy-to-get-0-11161`:
-- Use **different models for different targets**:
-  - SM: HistGradientBoostingRegressor (max_depth=7, max_iter=700, lr=0.04)
-  - Product 2, Product 3: ExtraTreesRegressor (n_estimators=900, min_samples_leaf=2)
-- Ensemble with multiple feature sets (acs_pca + spange)
-- Weights: 0.65 * acs_pca + 0.35 * spange
+### 1. SIMPLER MODELS WITH STRONGER REGULARIZATION (HIGHEST PRIORITY)
+Based on our analysis, simpler models generalize better:
 
 ```python
-class PerTargetEnsembleModel:
-    def __init__(self):
-        self.targets = ["Product 2", "Product 3", "SM"]
-        self.models = {}
-        for t in self.targets:
-            if t == "SM":
-                self.models[t] = [
-                    BetterCatecholModel("acs_pca_descriptors", "hgb"),
-                    BetterCatecholModel("spange_descriptors", "hgb"),
-                ]
-            else:
-                self.models[t] = [
-                    BetterCatecholModel("acs_pca_descriptors", "etr"),
-                    BetterCatecholModel("spange_descriptors", "etr"),
-                ]
+class SimpleRegularizedModel(BaseModel):
+    def __init__(self, data='single'):
+        self.data_type = data
+        self.featurizer = EnhancedFeaturizer(mixed=(data=='full'))
+        # Use Random Forest with strong regularization
+        self.model = RandomForestRegressor(
+            n_estimators=200,
+            max_depth=8,  # Limit depth to prevent overfitting
+            min_samples_leaf=5,  # Require more samples per leaf
+            max_features='sqrt',  # Limit features per split
+            random_state=42
+        )
+        self.scaler = StandardScaler()
 ```
 
-### 2. Enhanced Feature Engineering (HIGH PRIORITY)
-Current baseline uses Arrhenius features. Add more:
-- **Polynomial features**: rt², temp², rt*temp
-- **Log features**: log(rt), log(temp-273.15)
-- **Interaction with solvent properties**: temp * dielectric_constant, rt * alpha
+### 2. GAUSSIAN PROCESS MODELS (HIGH PRIORITY)
+GPs are excellent for small datasets and provide uncertainty:
 
-From kernel `paritoshtripathi5_alchemy-baseline`:
 ```python
-def _numeric_block(X):
-    rt, temp = X['Residence Time'], X['Temperature']
-    feats = [rt, temp, rt**2, temp**2, np.log1p(rt), np.log1p(temp), rt * temp]
-    return np.concatenate(feats, axis=1)
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import Matern, WhiteKernel
+
+class GPModel(BaseModel):
+    def __init__(self, data='single'):
+        self.data_type = data
+        self.featurizer = EnhancedFeaturizer(mixed=(data=='full'))
+        self.gp_models = []  # One per target
+        self.scaler = StandardScaler()
+    
+    def train_model(self, X_train, y_train):
+        X_feat = self.featurizer.featurize(X_train)
+        X_scaled = self.scaler.fit_transform(X_feat.numpy())
+        y = y_train.values
+        
+        for t in range(3):
+            kernel = Matern(length_scale=1.0, nu=2.5) + WhiteKernel(noise_level=0.1)
+            gp = GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=3)
+            gp.fit(X_scaled, y[:, t])
+            self.gp_models.append(gp)
 ```
 
-### 3. Higher-Dimensional Features (MEDIUM PRIORITY)
-Try DRFP (2048-dim) or fragprints (2133-dim) instead of Spange (13-dim):
-- May capture more chemical information
-- Need dimensionality reduction or regularization to avoid overfitting
+### 3. HIGH-DIMENSIONAL FEATURES WITH STRONG REGULARIZATION (MEDIUM PRIORITY)
+DRFP (2048-dim) may capture chemical similarity better, but needs regularization:
 
-### 4. Gaussian Process Models (MEDIUM PRIORITY)
-From web research, GPs are excellent for small chemical datasets:
-- Use GPyTorch or sklearn's GaussianProcessRegressor
-- Consider Tanimoto kernel for molecular similarity
-- Provides uncertainty estimates
+```python
+class DRFPModel(BaseModel):
+    def __init__(self, data='single'):
+        self.drfp = load_features('drfps_catechol')
+        # Use Ridge with strong regularization for high-dim features
+        self.model = Ridge(alpha=10.0)  # Strong L2 penalty
+```
 
-### 5. Multi-Task Learning (LOWER PRIORITY)
-Exploit target correlations:
-- Predict SM first, then use SM prediction as feature for P2/P3
-- Or use shared representation learning
+### 4. ENSEMBLE OF SIMPLE MODELS (MEDIUM PRIORITY)
+Instead of complex models, ensemble simple ones:
 
-## What NOT to Try
-- Simple hyperparameter tuning of current ensemble (won't close 4.7x gap)
-- Normalizing targets to sum to 1 (they naturally don't)
-- Complex neural architectures without proper regularization
+```python
+class SimpleEnsemble(BaseModel):
+    def __init__(self, data='single'):
+        self.models = [
+            Ridge(alpha=1.0),
+            RandomForestRegressor(n_estimators=100, max_depth=5, min_samples_leaf=5),
+            GradientBoostingRegressor(n_estimators=100, max_depth=3, learning_rate=0.05)
+        ]
+        self.weights = [0.3, 0.4, 0.3]  # RF gets highest weight
+```
+
+### 5. PER-TARGET MODELS (LOWER PRIORITY)
+Different models for SM vs Products:
+- SM: More regularized (higher variance in data)
+- Products: Can use slightly more complex models
+
+## What NOT to Try (Exhausted or Counterproductive)
+- ❌ Complex MLP+GBDT ensembles (proven to overfit)
+- ❌ Deep neural networks without strong regularization
+- ❌ Hyperparameter tuning of current approach (stagnating)
+- ❌ Normalizing targets to sum to 1 (they naturally don't)
+- ❌ Per-target models from dabansherwani kernel (achieved 0.11161, worse than baseline)
 
 ## Validation Notes
 - Single solvent: Leave-one-solvent-out (24 folds) - correct
 - Full data: Leave-one-ramp-out (13 folds) - correct
-- No CV-LB gap data yet (no submissions)
+- **CRITICAL**: Our CV is trustworthy but we need LB feedback to calibrate
 
 ## Implementation Checklist
-1. ✅ Ensure template compliance (last 3 cells unchanged except model line)
+1. ✅ Template compliance (last 3 cells are ACTUAL last cells)
 2. ✅ Use correct validation splits
 3. ✅ Same hyperparameters across all folds
 4. ✅ Return torch tensor [N, 3] from predict()
 5. ✅ Clip predictions to [0, 1]
+6. ⚠️ Focus on SIMPLER models with STRONGER regularization
 
-## Reference Kernels
-- `dabansherwani_catechol-strategy-to-get-0-11161`: Per-target ensemble (Score: 0.11161)
-- `paritoshtripathi5_alchemy-baseline`: Enhanced numeric features
-- `tobimichigan_catechol-pipeline-with-lightgbm`: LightGBM pipeline
-- `sanidhyavijay24_arrhenius-kinetics-tta-0-09831`: Arrhenius + TTA (Score: 0.09831)
-- `lishellliang_mixall-runtime-is-only-2m-15s-but-good-cv-lb`: Ensemble approach
+## Next Experiment Priorities (in order)
 
-## Next Experiment Priorities
-1. **Experiment 002**: Per-target ensemble with HGB for SM, ETR for products (from dabansherwani kernel)
-2. **Experiment 003**: Enhanced feature engineering with polynomial/log features
-3. **Experiment 004**: Try DRFP or fragprints features
-4. **Experiment 005**: Gaussian Process model
+### Experiment 003: Simple Random Forest with Strong Regularization
+- Use RF with max_depth=8, min_samples_leaf=5
+- Expected CV: ~0.074 (based on analysis)
+- Rationale: Simple RF outperformed our complex ensemble
+
+### Experiment 004: Gaussian Process with Matern Kernel
+- Use GP with Matern(nu=2.5) kernel
+- Expected CV: ~0.080 (based on analysis)
+- Rationale: GPs are excellent for small datasets, provide uncertainty
+
+### Experiment 005: DRFP Features with Ridge Regression
+- Use 2048-dim DRFP features with strong L2 regularization
+- Rationale: Higher-dim features may capture chemical similarity better
+
+### Experiment 006: Simple Ensemble (Ridge + RF + GB)
+- Combine simple models with equal weights
+- Rationale: Diversity without complexity
+
+## SUBMIT STRATEGY
+- Submit after Experiment 003 to get LB feedback
+- This will help calibrate CV-LB gap
+- We have 5 submissions remaining
 
 ## Target Score
-Beat **0.017270** (lower is better). Current gap is 4.7x - need fundamentally different approaches, not incremental improvements.
+Beat **0.017270** (lower is better). Current gap is 4.7x.
+
+**Key insight**: The path forward is SIMPLICITY, not COMPLEXITY. Our analysis shows simpler models generalize better to unseen solvents.
