@@ -1,101 +1,125 @@
 ## Current Status
 - Best CV score: 0.008194 from exp_032 (GP 0.15 + MLP 0.55 + LGBM 0.3)
-- Best LB score: 0.0877 from exp_030 (GP 0.2 + MLP 0.5 + LGBM 0.3)
+- Best LB score: 0.0877 from exp_030
 - Target: 0.0347
-- CV-LB gap: LB = 4.30 * CV + 0.0524 (R² = 0.97)
-- **CRITICAL**: Intercept (0.0524) > Target (0.0347) → Current approach CANNOT reach target
+- CV-LB gap: LB = 4.30 × CV + 0.0524 (R² = 0.97)
 - Submissions remaining: 5
 
 ## Response to Evaluator
 
-**Technical verdict**: TRUSTWORTHY - The similarity weighting experiment was correctly implemented but conceptually flawed.
+**Technical verdict was CONCERNS** - The evaluator correctly identified a critical bug in the similarity weighting experiments (exp_037, exp_038). Both experiments produced IDENTICAL CV scores (0.022076) because the target weighting `[1.0, 1.0, 2.0]` was dropped from the loss computation. The comparison is invalid.
 
-**Evaluator's top priority**: Try approaches that change the CV-LB relationship (aggressive feature selection + simpler models).
-
-**My response**: I AGREE with the evaluator's diagnosis. The similarity weighting failed because:
-1. It upweighted samples from solvents SIMILAR to the test solvent
-2. In leave-one-out CV, this causes overfitting to similar solvents
-3. The sigma=1.0 was too small, creating extreme weight differences
+**Evaluator's top priority**: Aggressive Feature Selection + Simpler Model to reduce the CV-LB intercept. **I AGREE.** The intercept (0.0524) is 1.51x higher than the target (0.0347), meaning no amount of CV improvement can reach the target with the current approach. We need to fundamentally change the CV-LB relationship.
 
 **Key concerns raised**:
-1. CV-LB gap is structural (intercept > target)
-2. Need fundamentally different approaches
-3. 5 submissions remaining
-
-**How I'm addressing**:
-1. Try INVERSE similarity weighting (upweight DISSIMILAR solvents)
-2. Try higher GP weight (exp_030 with GP 0.2 had best LB)
-3. Try aggressive regularization to reduce overfitting
+1. The similarity weighting bug invalidates those experiments - **Acknowledged. Will fix if retrying.**
+2. The CV-LB intercept is the real bottleneck - **Agreed. This is the core problem.**
+3. 5 submissions remaining - **Will be strategic about when to submit.**
 
 ## Data Understanding
 
 Reference notebooks:
-- `exploration/evolver_loop35_analysis.ipynb` - Analysis of similarity weighting failure
+- `exploration/eda.ipynb` - Initial EDA
 - `exploration/evolver_loop34_analysis.ipynb` - CV-LB relationship analysis
-- `exploration/evolver_loop31_lb_feedback.ipynb` - Detailed CV-LB analysis
+- `exploration/evolver_loop36_analysis.ipynb` - Similarity weighting failure analysis
 
 Key patterns:
-1. **CV-LB relationship is highly linear** (R² = 0.97) - the gap is structural, not random
-2. **Intercept (0.0524) > Target (0.0347)** - no amount of CV improvement can reach target
-3. **Experiments with negative residuals** (better-than-predicted LB):
-   - exp_030: GP(0.2) + MLP(0.5) + LGBM(0.3) - best LB!
-   - exp_024: ACS PCA features
-   - exp_000: Baseline MLP
-4. **Pattern**: Higher GP weight and simpler models tend to have negative residuals
+- CV-LB relationship is highly linear (R² = 0.97) - the gap is STRUCTURAL
+- Intercept (0.0524) > Target (0.0347) - current approach cannot reach target
+- 145 features for 656 samples (24 solvents) may be causing overfitting
+- GP component (0.15 weight) improved both CV and LB
 
 ## Recommended Approaches
 
-**PRIORITY 1: Higher GP Weight (0.25 or 0.3)**
-- Rationale: exp_030 (GP 0.2) had best LB with negative residual
-- exp_032 (GP 0.15) had best CV but worse LB
-- Higher GP weight may improve generalization to unseen solvents
-- GP has different inductive bias than MLP - may change CV-LB relationship
+### PRIORITY 1: Aggressive Feature Selection + Simpler Model
+**Rationale**: The intercept represents systematic overfitting to training solvents. Fewer features and simpler models should reduce this.
 
-**PRIORITY 2: Inverse Similarity Weighting**
-- Rationale: The opposite of what we tried - upweight DISSIMILAR solvents
-- This forces the model to learn patterns that generalize across diverse solvents
-- Use larger sigma (5-10) for softer weights
-- Apply to MLP training only (LGBM handles sample weights natively)
+**Implementation**:
+```python
+# Step 1: Get feature importance from LightGBM
+lgbm_model.fit(X_train, y_train)
+importance = lgbm_model.feature_importances_
 
-**PRIORITY 3: Aggressive Regularization**
-- Rationale: The CV-LB gap suggests overfitting to training solvents
-- Try higher dropout (0.3-0.5) in MLP
-- Try higher weight decay (1e-3) in MLP
-- Try L1 regularization in LGBM
+# Step 2: Select top-k features (try k=25, 30, 35)
+top_k = 25
+selected_idx = np.argsort(importance)[-top_k:]
 
-**PRIORITY 4: MAE Loss Instead of Huber**
-- Rationale: MAE is more robust to outliers than MSE
-- May reduce overfitting to extreme values
-- Could change the CV-LB relationship
+# Step 3: Train simpler ensemble on selected features
+# - GP with Matern kernel (works well with fewer features)
+# - Ridge regression (linear, strong regularization)
+# - Simple MLP [16] with weight_decay=1e-2
+```
+
+**Expected outcome**: CV may increase slightly, but LB should improve more (reducing intercept).
+
+### PRIORITY 2: Fix Similarity Weighting Bug (Apply to LGBM)
+**Rationale**: The idea of weighting samples by solvent similarity was sound, but the implementation was buggy. LGBM handles sample weights natively.
+
+**Implementation**:
+```python
+# Compute inverse similarity weights (high weight for dissimilar solvents)
+def compute_inverse_similarity_weights(train_solvents, test_solvent, sigma=5.0):
+    # Normalize Spange features
+    scaler = StandardScaler()
+    scaler.fit(SPANGE_DF.values)
+    test_features = scaler.transform(SPANGE_DF.loc[test_solvent].values.reshape(1, -1))
+    train_features = scaler.transform(SPANGE_DF.loc[train_solvents].values)
+    
+    # RBF kernel similarity
+    distances = np.sum((train_features - test_features)**2, axis=1)
+    similarity = np.exp(-distances / (2 * sigma**2))
+    
+    # Inverse: high weight for dissimilar solvents
+    weights = 2.0 - similarity
+    return weights / weights.mean()
+
+# Apply to LGBM (native sample weight support)
+lgbm_model.fit(X_train, y_train, sample_weight=weights)
+```
+
+### PRIORITY 3: Stronger Regularization on MLP
+**Rationale**: Current weight_decay=1e-4 may not be strong enough to prevent memorization.
+
+**Implementation**:
+```python
+# Try weight_decay=1e-2 or 1e-3
+optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, weight_decay=1e-2)
+
+# Also try dropout=0.2 instead of 0.05
+model = MLPModelInternal(input_dim, [32, 16], 3, dropout=0.2)
+```
+
+### PRIORITY 4: Submit exp_032 (Best CV)
+**Rationale**: We haven't submitted our best CV model yet. This will verify if the CV-LB relationship holds.
+
+**Note**: Only submit if we've exhausted other approaches or need calibration data.
 
 ## What NOT to Try
 
-1. **Similarity weighting (upweight similar solvents)** - FAILED, 169% worse
-2. **Pure GP model** - Already tried (exp_032), worse CV than ensemble
-3. **Normalization post-processing** - FAILED (exp_029), 91% worse
-4. **Four-model ensemble (XGB + CatBoost)** - Already tried (exp_028), 2.47% worse
-5. **Simple features only (23 features)** - Already tried (exp_027), 8% worse
+1. **Similarity weighting on MLP without fixing the bug** - The implementation dropped target weights, causing 169% degradation.
+
+2. **More complex models** - Deep residual networks (exp_004) failed badly. Complexity hurts generalization.
+
+3. **More features** - We already have 145 features. Adding more will increase overfitting.
+
+4. **Normalization post-processing** - exp_029 showed targets don't sum to 1.0, so normalization fails.
+
+5. **Four-model ensemble** - exp_028 showed adding XGBoost and CatBoost didn't help.
 
 ## Validation Notes
 
 - CV scheme: Leave-one-solvent-out for single solvent (24 folds), leave-one-ramp-out for full data (13 folds)
-- CV-LB relationship: LB = 4.30 * CV + 0.0524 (R² = 0.97)
-- The intercept (0.0524) is 1.51x higher than target (0.0347)
-- **To reach target, we need to change the CV-LB relationship itself**
-
-## Template Compliance
-
-CRITICAL: The submission must follow the template structure:
-- Last 3 cells must remain unchanged except for model definition line
-- `model = GPSimilarityMLPLGBMEnsemble(data='single')` can be changed
-- Everything else in last 3 cells must remain the same
+- CV-LB relationship: LB = 4.30 × CV + 0.0524 (R² = 0.97)
+- To reach target LB = 0.0347, we need to reduce the intercept from 0.0524 to ~0.02
+- This requires fundamentally different approaches, not just CV improvement
 
 ## Key Insight
 
-The problem is NOT model quality - our CV (0.008194) is 4.2x BETTER than target (0.0347)!
-The problem is the CV-LB gap. We need approaches that:
-1. Improve generalization to unseen solvents
-2. Change the CV-LB relationship (reduce intercept)
-3. NOT just improve CV (which doesn't help)
+**The target IS reachable.** Our CV (0.008194) is 4.2x BETTER than the target LB (0.0347). The problem is the CV-LB gap, not our model quality. If we can reduce the intercept from 0.0524 to ~0.02, our current CV would translate to LB ≈ 0.055, which is much closer to target.
 
-The target IS reachable. The winning solution must have found a way to reduce the CV-LB gap.
+The path forward is:
+1. Reduce model complexity (fewer features, simpler architecture)
+2. Increase regularization (prevent memorization of training solvents)
+3. Use approaches that generalize better to unseen solvents
+
+**DO NOT GIVE UP. The target is achievable with the right approach.**
