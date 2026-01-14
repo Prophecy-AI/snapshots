@@ -1,150 +1,136 @@
-# Catechol Reaction Yield Prediction - Evolved Seed Prompt (Loop 8)
+# Catechol Reaction Yield Prediction - Seed Prompt (Loop 8)
 
 ## Current Status
-- **Best CV score**: 0.0623 from exp_004 (Per-target HGB+ETR NO TTA)
+- **Best CV score**: 0.0623 from exp_004 (PerTarget HGB+ETR NO TTA)
 - **Best LB score**: 0.0956 from exp_004
-- **CV-LB gap**: +53% (LB is 53% worse than CV)
-- **Target**: 0.01727 (5.5x better than our best LB)
-- **Submissions used**: 1/5 (4 remaining)
+- **CV-LB gap**: +53% (0.0333 absolute) → LARGE gap indicates test set has chemically unique solvents
+- **Target**: 0.01727 (5.5x better than best LB)
+- **Submissions**: 2/5 used, 3 remaining
 
 ## Response to Evaluator
 
-**Technical verdict**: TRUSTWORTHY. The evaluator confirmed exp_007 (GP) has sound validation, no leakage, and verified scores.
+**Technical verdict was TRUSTWORTHY.** The evaluator correctly verified the GP experiment.
 
-**Evaluator's top priority**: "SUBMIT exp_006 (intermediate regularization, CV 0.0689) to test the regularization hypothesis."
-- **I AGREE** - We need LB feedback to calibrate our strategy
-- **Reasoning**: With 4 submissions remaining, we can afford to test this hypothesis
-- **Action**: Submit exp_006 to verify if regularization reduces CV-LB gap
+**Evaluator's top priority**: Submit exp_006 to test regularization hypothesis.
+- **DONE**: We submitted exp_006 and got LB 0.0991 (WORSE than exp_004's 0.0956)
+- **CRITICAL INSIGHT**: More regularization made LB WORSE! This means:
+  1. The problem is NOT traditional overfitting
+  2. We need BETTER features that generalize to new solvents
+  3. Simpler models lose signal without reducing the gap
 
-**Key concerns raised**:
-1. **GP Underperforms on CV**: GP CV (0.0721) is 16% worse than best tree-based CV (0.0623) - ACKNOWLEDGED
-2. **Submission Strategy Critical**: We need LB feedback to guide strategy - AGREED
-3. **Gap to Target is Enormous**: 3.6x gap from best CV to target - ACKNOWLEDGED
+**Key concerns raised by evaluator**:
+1. GP underperforms on CV - CONFIRMED (0.0721 vs 0.0623)
+2. Kernel choice for GP - Valid concern, but GP alone won't beat target
+3. Gap to target remains enormous - TRUE, need fundamentally different approach
 
-**My synthesis**: 
-- Submit exp_006 to test regularization hypothesis
-- If LB improves proportionally, continue with regularization + ensemble
-- If LB doesn't improve, pivot to fundamentally different approaches
+**My synthesis**: The regularization experiment was valuable - it DISPROVED the overfitting hypothesis. We now know we need BETTER features and model diversity, not simpler models.
 
 ## Data Understanding
 
 **Reference notebooks:**
-- `exploration/evolver_loop8_analysis.ipynb` - Strategic assessment and kernel analysis
-- `exploration/evolver_loop7_analysis.ipynb` - GP feasibility test
+- `exploration/eda.ipynb` - Basic data characteristics
 - `exploration/evolver_loop5_lb_feedback.ipynb` - CV-LB gap analysis
+- `exploration/evolver_loop6_analysis.ipynb` - GroupKFold vs LOO, feature analysis
+- `exploration/evolver_loop7_analysis.ipynb` - GP analysis, hardest solvents
+- `exploration/evolver_loop8_lb_feedback.ipynb` - Regularization disproved overfitting hypothesis
 
 **Key patterns to exploit:**
-1. **Top kernels use ensemble of MLP+XGB+RF+LGB** with learned weights
-2. **GroupKFold (5-fold)** gives more realistic CV than Leave-One-Out
-3. **TTA HURTS mixed solvents**: DO NOT use TTA
-4. **Per-target models work**: Different models for SM vs Products
+1. **Per-target models work** - HGB for SM, ETR for Products (exp_004 best CV)
+2. **TTA hurts performance** - Removing TTA improved full data MAE by 33%
+3. **Combined features best** - DRFP-PCA(15) + Spange + ACS_PCA
+4. **Hardest solvents**: HFIP, Cyclohexane, Water - chemically unique
 
 ## Recommended Approaches
 
-### Priority 1: SUBMIT exp_006 (IMMEDIATE)
-**Why**: We need LB feedback to calibrate our strategy. exp_006 has intermediate regularization (CV 0.0689).
-
-**Expected outcome**: 
-- If LB improves proportionally (e.g., LB ~0.09), regularization helps
-- If LB doesn't improve (e.g., LB ~0.10), we need different approaches
-
-### Priority 2: Diverse Ensemble (GP + ETR + MLP)
-**Why**: Top kernels use ensemble of diverse model families. We have GP (0.0721), ETR (0.0623), and can add MLP.
+### Priority 1: ENSEMBLE OF DIVERSE MODEL FAMILIES (HIGH IMPACT)
+**Why**: Top kernels (lishellliang) use MLP + XGBoost + RF + LightGBM ensemble with learned weights. We haven't tried combining fundamentally different model families.
 
 **Implementation**:
 ```python
+# Combine predictions from diverse models
 class DiverseEnsemble(BaseModel):
     def __init__(self, data='single'):
-        self.data_type = data
-        self.mixed = (data == 'full')
-        self.gp_model = GPModel(data=data)
-        self.etr_model = ETRModel(data=data)
-        self.mlp_model = MLPModel(data=data)
-        self.weights = [0.3, 0.4, 0.3]  # GP, ETR, MLP
-    
-    def train_model(self, X_train, y_train):
-        self.gp_model.train_model(X_train, y_train)
-        self.etr_model.train_model(X_train, y_train)
-        self.mlp_model.train_model(X_train, y_train)
+        self.models = [
+            PerTargetModel(data),  # Our best CV model (HGB+ETR)
+            RandomForestModel(data),  # Different model family
+            XGBModel(data),        # Gradient boosting
+            LGBModel(data),        # Another gradient boosting variant
+        ]
+        self.weights = [0.4, 0.2, 0.2, 0.2]  # Tune these
     
     def predict(self, X):
-        gp_pred = self.gp_model.predict(X)
-        etr_pred = self.etr_model.predict(X)
-        mlp_pred = self.mlp_model.predict(X)
-        
-        final = (self.weights[0] * gp_pred + 
-                 self.weights[1] * etr_pred + 
-                 self.weights[2] * mlp_pred)
-        return torch.tensor(final, dtype=torch.double)
+        preds = [m.predict(X) for m in self.models]
+        return sum(w * p for w, p in zip(self.weights, preds))
 ```
 
-### Priority 3: Stacking with Meta-Learner
-**Why**: Stacking can capture complementary information from diverse base models.
+### Priority 2: STACKING/BLENDING (MEDIUM IMPACT)
+**Why**: Use predictions from multiple models as features for a meta-learner. This can capture complementary patterns.
 
 **Implementation**:
-- Train base models (GP, ETR, MLP) on folds
-- Use base model predictions as features for meta-learner (Ridge)
-- May improve generalization to unseen solvents
+- Train base models on training data
+- Generate OOF predictions
+- Train meta-learner (Ridge/XGB) on stacked predictions
+- Final prediction = meta-learner(base_predictions)
 
-### Priority 4: MLP with Strong Regularization
-**Why**: Top kernels use MLP with BatchNorm + Dropout + LR scheduler.
+### Priority 3: FEATURE ENGINEERING FOR GENERALIZATION (MEDIUM IMPACT)
+**Why**: The test set has chemically unique solvents. We need features that capture chemical similarity better.
 
-**Implementation**:
-```python
-class RegularizedMLP(nn.Module):
-    def __init__(self, input_dim, output_dim=3):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.BatchNorm1d(input_dim),
-            nn.Linear(input_dim, 128),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(128, 64),
-            nn.BatchNorm1d(64),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(64, output_dim),
-            nn.Sigmoid()
-        )
-    
-    def forward(self, x):
-        return self.net(x)
-```
+**Ideas**:
+- Interaction features: temp * solvent_polarity, time * solvent_viscosity
+- Arrhenius kinetics: 1/T, ln(t), exp(-Ea/RT)
+- Chemical distance features: distance to nearest training solvent
 
 ## What NOT to Try
 
-1. **TTA for mixed solvents** - Confirmed to hurt performance
-2. **Deep trees (depth > 10)** - Overfits to training solvents
-3. **GP alone** - CV 0.0721 is worse than ETR 0.0623
-4. **Complex ensembles without diversity** - Need fundamentally different models
+1. **More regularization** - DISPROVED by exp_006 (made LB worse)
+2. **Simpler models** - Ridge (exp_005) had worst CV (0.0896)
+3. **GP alone** - CV worse than tree-based (0.0721 vs 0.0623)
+4. **TTA** - Hurts performance on mixed solvents
 
 ## Validation Notes
 
 - **CV scheme**: Leave-one-solvent-out for single, leave-one-ramp-out for full
-- **CV-LB gap**: 53% - CV is too optimistic
-- **Hardest solvents**: HFIP (0.174 MAE), Cyclohexane (0.154), Acetonitrile.Acetic Acid (0.117)
+- **CV-LB gap**: ~50% (0.0623 → 0.0956) - test set has unique solvents
+- **Calibration**: CV improvements may not translate to LB improvements
+- **Strategy**: Focus on model diversity and feature generalization, not CV optimization
 
-## CRITICAL CONSTRAINTS (MUST FOLLOW)
+## Competition-Specific Constraints (MUST FOLLOW)
 
-1. **Template compliance**: Last 3 cells must match template exactly
-2. **Only change model definition line**: `model = YourModel(data='single')` and `model = YourModel(data='full')`
-3. **Same hyperparameters across all folds**
-4. **No data leakage**: Scalers fit on training data only within each fold
-5. **No TTA for mixed solvents**
+**MANDATORY SUBMISSION STRUCTURE:**
+- The submission must have the same last three cells as in the notebook template
+- The ONLY allowed change is the line where the model is defined
+- The line `model = MLPModel()` can be replaced with a new model definition
+- Everything else in the last three cells MUST remain exactly the same
 
-## Experiments to Run
+**Template compliance example:**
+```python
+# Cell -3 (third from last)
+model = YourModel(data='single')  # ONLY THIS LINE CAN CHANGE
 
-**Experiment 009: Diverse Ensemble (GP + ETR + MLP)**
-- Combine GP, ExtraTrees, and MLP predictions
-- Weighted average: 0.3*GP + 0.4*ETR + 0.3*MLP
-- May reduce variance and improve generalization
+# Cell -2 (second from last)
+model = YourModel(data='full')    # ONLY THIS LINE CAN CHANGE
 
-**Experiment 010: Stacking with Meta-Learner**
-- Train base models (GP, ETR, MLP) on folds
-- Use base model predictions as features for Ridge meta-learner
-- May capture complementary information
+# Cell -1 (last cell) - DO NOT MODIFY
+submission = pd.concat([submission_single_solvent, submission_full_data])
+submission = submission.reset_index()
+submission.index.name = "id"
+submission.to_csv("submission.csv", index=True)
+```
 
-**Expected outcome**: CV ~0.06-0.07, potentially better LB due to ensemble diversity.
+## Next Experiment Recommendation
 
-The target IS reachable. Ensemble diversity and stacking may be the key to closing the CV-LB gap.
+**Experiment 009: Diverse Ensemble**
+- Combine PerTarget (best CV) + RandomForest + XGBoost + LightGBM
+- Use weighted averaging with tuned weights (start with [0.4, 0.2, 0.2, 0.2])
+- Use combined features (Spange + Arrhenius kinetics)
+- Focus on model diversity, not individual model optimization
+- Expected CV: ~0.065 (may be slightly worse than best)
+- Expected LB: Potentially better due to diversity
+
+**Rationale**: The regularization experiment showed that simpler models don't help. We need model diversity to capture different patterns. Top kernels use this approach successfully.
+
+**Alternative Experiment 010: Stacking with Meta-Learner**
+If ensemble doesn't improve LB, try stacking:
+- Base models: ETR, HGB, RF, XGB
+- Meta-learner: Ridge or simple average
+- This can capture complementary patterns from different models
