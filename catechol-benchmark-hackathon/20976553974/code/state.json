@@ -1,17 +1,17 @@
 {
-  "phase": "executor",
+  "phase": "evaluator",
   "loop_count": 14,
   "last_submission": null,
   "competition_id": "catechol-benchmark-hackathon",
   "seed_prompt": "## Current Status\n- Best CV score: 0.0623 from exp_004 (PerTarget HGB+ETR with LOO)\n- Best LB score: 0.0956 from exp_004\n- CV-LB gap: +53% \u2192 LOO CV is optimistic for unseen solvents\n- Target: 0.01727 (5.5x lower than best LB)\n- Remaining submissions: 3\n\n## Response to Evaluator\n- Technical verdict was TRUSTWORTHY for exp_013 - template compliance is correct\n- Evaluator's top priority: Implement Optuna hyperparameter optimization. **AGREE** - this is the key missing piece from top kernel\n- Key concerns raised:\n  1. CV is worse than exp_004 (0.0827 vs 0.0623) - **VALID** but MLP+GBDT may generalize better\n  2. Fixed weights [0.4,0.2,0.2,0.2] are suboptimal - **AGREE** - need Optuna\n  3. Per-target approach abandoned - **VALID** - should try hybrid\n- How I'm addressing: Next experiment should combine per-target approach with Optuna optimization\n\n## Data Understanding\n- Reference notebooks: See `exploration/evolver_loop13_analysis.ipynb` for CV-LB gap analysis\n- Key patterns:\n  1. More regularization made LB WORSE (0.0956 \u2192 0.0991) - NOT traditional overfitting\n  2. Per-target models (HGB for SM, ETR for Products) achieved best CV (0.0623)\n  3. TTA hurts performance - confirmed in exp_005\n  4. LOO validation is REQUIRED for submission (24 folds task 0, 13 folds task 1)\n\n## CRITICAL CONSTRAINT\n**\ud83d\udea8 DO NOT CHANGE THE VALIDATION STRATEGY IN TEMPLATE CELLS \ud83d\udea8**\n- The template expects LOO splits with specific fold counts\n- Task 0: 24 folds (one per solvent)\n- Task 1: 13 folds (one per solvent ramp)\n- Changing to GroupKFold breaks the submission format\n\n## Recommended Approaches (Priority Order)\n\n### 1. HIGHEST PRIORITY: Per-Target + Optuna Optimization\n**Why**: Per-target achieved best CV (0.0623), Optuna is the key missing piece from top kernel\n**Implementation**:\n- Use per-target models: HGB for SM, ExtraTrees for Products (from exp_004/005)\n- Add Optuna optimization for hyperparameters:\n  - HGB: max_depth (3-10), learning_rate (0.01-0.3), n_estimators (100-500)\n  - ETR: max_depth (5-20), n_estimators (100-500), min_samples_split (2-10)\n- Use GroupKFold (5-fold) INTERNALLY for Optuna optimization (faster)\n- Use LOO for final submission\n- Features: Spange descriptors (proven to work)\n\n### 2. Per-Target + MLP Hybrid\n**Why**: Combine best of both approaches\n**Implementation**:\n- Use MLP for some targets, per-target GBDT for others\n- Try: MLP for SM (may capture non-linear kinetics), ETR for Products\n- Or: Ensemble of per-target + MLP with learned weights\n\n### 3. Feature Engineering for Unseen Solvents\n**Why**: The problem is NOT overfitting - we need features that generalize\n**Implementation**:\n- Focus on Spange descriptors (chemical properties that generalize):\n  - dielectric constant, ET(30), alpha, beta, pi*, SA, SB, SP, SdP, N, n, f(n), delta\n- Add Arrhenius kinetics features: 1/T, ln(t), t*T interaction\n- Consider: polarity ratios, hydrogen bonding capacity\n\n## What NOT to Try\n- \u274c GroupKFold in template cells (breaks submission format)\n- \u274c TTA (hurts performance - confirmed in exp_005)\n- \u274c Simple Ridge regression (CV 0.0896, worse than PerTarget)\n- \u274c More regularization (made LB worse in exp_006)\n- \u274c Fixed ensemble weights without optimization\n\n## Validation Notes\n- Use LOO for submission (REQUIRED by evaluation metric)\n- Use GroupKFold ONLY for internal hyperparameter tuning (OPTIONAL)\n- The CV-LB gap is ~50% with LOO - this is expected for unseen solvents\n- Don't chase LOO CV - focus on approaches that generalize\n\n## Key Insight from Top Kernel\nThe top kernel (lishellliang) uses:\n1. GroupKFold (5-fold) internally - OVERWRITES utility functions\n2. MLP + XGBoost + RF + LightGBM ensemble\n3. Optuna hyperparameter optimization (commented out but available)\n4. Spange descriptors only\n5. Learned weights via Optuna\n\n## Experiment Template for Per-Target + Optuna\n```python\n# Per-Target + Optuna Optimization\nimport optuna\nfrom sklearn.model_selection import GroupKFold\nfrom sklearn.ensemble import HistGradientBoostingRegressor, ExtraTreesRegressor\n\ndef objective(trial):\n    # Hyperparameters to optimize\n    hgb_depth = trial.suggest_int('hgb_depth', 3, 10)\n    hgb_lr = trial.suggest_float('hgb_lr', 0.01, 0.3, log=True)\n    hgb_iter = trial.suggest_int('hgb_iter', 100, 500)\n    etr_depth = trial.suggest_int('etr_depth', 5, 20)\n    etr_n_estimators = trial.suggest_int('etr_n_estimators', 100, 500)\n    \n    # Use GroupKFold for internal CV (faster)\n    gkf = GroupKFold(n_splits=5)\n    errors = []\n    for train_idx, val_idx in gkf.split(X, y, groups=solvent_ids):\n        X_train, X_val = X[train_idx], X[val_idx]\n        y_train, y_val = y[train_idx], y[val_idx]\n        \n        # Train per-target model with trial hyperparameters\n        hgb = HistGradientBoostingRegressor(max_depth=hgb_depth, learning_rate=hgb_lr, max_iter=hgb_iter)\n        etr = ExtraTreesRegressor(max_depth=etr_depth, n_estimators=etr_n_estimators)\n        \n        # SM uses HGB, Products use ETR\n        hgb.fit(X_train, y_train[:, 2])  # SM\n        etr.fit(X_train, y_train[:, :2])  # Products\n        \n        preds = np.column_stack([etr.predict(X_val), hgb.predict(X_val).reshape(-1, 1)])\n        mae = np.mean(np.abs(preds - y_val))\n        errors.append(mae)\n    return np.mean(errors)\n\nstudy = optuna.create_study(direction='minimize')\nstudy.optimize(objective, n_trials=50)\nbest_params = study.best_params\n\n# Then use best_params with LOO for final submission\n```\n\n## Gap Analysis\n- Target: 0.01727\n- Best LB: 0.0956\n- Gap: 5.5x (HUGE)\n\nThis gap suggests we need fundamentally different approaches. The target IS reachable - we just need to find the right combination of:\n1. Per-target models (proven best CV)\n2. Optuna optimization (key missing piece)\n3. Features that generalize to unseen solvents",
   "evaluator_feedback": "## What I Understood\n\nThe junior researcher discovered a critical issue: exp_012's GroupKFold submission FAILED because the evaluation metric expects LOO fold structure (24 folds for task 0, 13 folds for task 1). They correctly reverted to LOO validation in exp_013 while keeping the MLP + GBDT ensemble architecture. The hypothesis was that this MLP+GBDT ensemble (matching the top kernel architecture) might generalize better to unseen solvents despite having worse LOO CV (0.0827) than the previous best (0.0623).\n\n## Technical Execution Assessment\n\n**Validation**: \u2705 SOUND. LOO validation correctly implemented with 24 folds (task 0) and 13 folds (task 1). I verified the fold structure in the submission file.\n\n**Leakage Risk**: \u2705 NONE DETECTED.\n- StandardScaler is fit on training data only within each fold\n- Spange descriptors are precomputed (acceptable)\n- No TTA or augmentation\n- Consistent hyperparameters across all folds\n\n**Score Integrity**: \u2705 VERIFIED. I reconstructed the CV calculation:\n- Single Solvent CV MAE: 0.0670 +/- 0.0337 \u2713\n- Full Data CV MAE: 0.0911 +/- 0.0281 \u2713\n- Combined CV MAE: 0.0790 (notes say 0.0827 - minor discrepancy, likely different averaging)\n\n**Template Compliance**: \u2705 CORRECT. The last 3 cells match the template exactly:\n- Third-to-last cell: `model = TopKernelEnsemble(data='single')` \u2713\n- Second-to-last cell: `model = TopKernelEnsemble(data='full')` \u2713\n- Last cell: Unchanged \u2713\n- 'row' column included in submission \u2713\n- LOO validation with correct fold counts (24/13) \u2713\n\n**Code Quality**: Good. MLP training uses GPU (H100). Ensemble weights properly applied. No silent failures.\n\nVerdict: **TRUSTWORTHY** - Results can be trusted. Template compliance is correct.\n\n## Strategic Assessment\n\n**Approach Fit**: CORRECT. The researcher correctly identified that:\n1. GroupKFold submissions FAIL due to fold structure mismatch\n2. LOO is REQUIRED for valid submissions\n3. MLP + GBDT ensemble matches top kernel architecture\n\n**Effort Allocation**: GOOD. The researcher correctly prioritized fixing the submission format issue. However, there's a critical insight being missed:\n\n**CRITICAL INSIGHT**: The top kernel (lishellliang) uses GroupKFold **internally** but the submission format still uses LOO. Looking at their code, they OVERWRITE the utility functions to use GroupKFold. This means:\n- Their **internal CV** uses GroupKFold (5 folds) for faster iteration\n- But the **submission** still produces LOO format (24/13 folds) because Kaggle's evaluation runs the notebook fresh\n\nWait - this is confusing. Let me re-examine: The top kernel overwrites `generate_leave_one_out_splits` to use GroupKFold. This means their submission.csv would have 5 folds, not 24. Yet they got a valid LB score. This suggests either:\n1. The evaluation metric is more flexible than we thought\n2. Or there's something else going on\n\n**Actually, looking more carefully**: The exp_012 submission FAILED with \"Evaluation metric raised an unexpected error\". This confirms that the evaluation metric DOES expect LOO format. So how does the top kernel work?\n\n**Possible explanation**: The top kernel may have been submitted before the evaluation metric was finalized, or there's a different version of their code that uses LOO for submission.\n\n**Assumptions Being Made**:\n1. MLP + GBDT ensemble will generalize better than per-target models \u2192 NEEDS VALIDATION\n2. Fixed weights [0.4, 0.2, 0.2, 0.2] are good \u2192 **NEEDS VALIDATION** - Top kernel uses Optuna\n3. Spange descriptors alone are sufficient \u2192 REASONABLE (top kernel uses this)\n\n**Blind Spots**:\n1. **Optuna hyperparameter optimization** - Still not implemented! The top kernel uses Optuna to optimize lr, dropout, hidden_dims, xgb_depth, rf_depth, lgb_leaves, and weights. This is the KEY MISSING PIECE.\n2. **Per-target models** - exp_004/005 achieved better CV (0.0623) with per-target models (HGB for SM, ETR for Products). The current approach abandoned this.\n3. **Feature combinations** - Previous experiments showed DRFP-PCA + Spange + ACS_PCA achieved best GroupKFold CV (0.0706).\n\n**Trajectory Assessment**: \n- CV of 0.0827 is WORSE than exp_004 (0.0623)\n- But exp_004 had 53% CV-LB gap (0.0623 \u2192 0.0956)\n- If exp_013 has smaller CV-LB gap, LB could be similar or better\n- However, we've already seen that more regularization made LB WORSE (0.0956 \u2192 0.0991)\n- The problem is NOT traditional overfitting - we need BETTER features/models that generalize to chemically unique solvents\n\n## What's Working\n\n1. **Template compliance**: Fixed from exp_012 - submission format is now correct\n2. **LOO validation**: Correctly using 24/13 fold structure required by evaluation metric\n3. **MLP + GBDT ensemble**: Architecture is sound and matches top kernel\n4. **No TTA**: Correctly avoided TTA which was hurting performance\n5. **GPU utilization**: Using H100 for MLP training is efficient\n\n## Key Concerns\n\n1. **CV is Worse Than Previous Best**\n   - **Observation**: exp_013 CV (0.0827) is 33% worse than exp_004 CV (0.0623)\n   - **Why it matters**: Even if CV-LB gap is smaller, the absolute LB score may not improve\n   - **Suggestion**: Consider combining the best elements: per-target models (from exp_004) + MLP component (from exp_013) + Optuna optimization\n\n2. **Optuna Still Not Implemented**\n   - **Observation**: Using fixed weights [0.4, 0.2, 0.2, 0.2] instead of learned weights\n   - **Why it matters**: Top kernel uses Optuna to learn optimal weights and hyperparameters. This could be leaving significant performance on the table.\n   - **Suggestion**: Implement Optuna optimization for weights and hyperparameters. Use GroupKFold internally for faster iteration, but keep LOO for final submission.\n\n3. **Abandoned Per-Target Approach**\n   - **Observation**: exp_004/005 used per-target models (HGB for SM, ETR for Products) which achieved better CV\n   - **Why it matters**: Different targets may benefit from different model architectures\n   - **Suggestion**: Try combining per-target approach with MLP: use MLP for some targets, GBDT for others\n\n4. **Limited Submissions Remaining**\n   - **Observation**: 3 submissions remaining, 2 already used\n   - **Why it matters**: Need to be strategic about which experiments to submit\n   - **Suggestion**: Before submitting, run internal GroupKFold CV to estimate which approach is most promising\n\n## Top Priority for Next Experiment\n\n**Implement Optuna hyperparameter optimization with GroupKFold internal CV, then submit the best configuration using LOO format.**\n\nThe target (0.01727) IS reachable. Here's the recommended approach:\n\n1. **Use GroupKFold (5-fold) for internal CV** - This gives faster iteration and more realistic estimates\n2. **Implement Optuna optimization** - Optimize: lr (1e-4 to 1e-2), dropout (0.1-0.5), hidden_dims, xgb_depth (3-8), rf_depth (5-15), lgb_leaves (15-63), and ensemble weights\n3. **Try per-target + MLP hybrid** - Use MLP for some targets, per-target GBDT for others\n4. **Keep LOO for final submission** - The evaluation metric requires LOO format\n\n**Key insight**: The current approach is using fixed hyperparameters that may be far from optimal. Optuna optimization could significantly improve performance. The top kernel's success likely comes from learned hyperparameters, not just the architecture.\n\n**Submission strategy**: With 3 submissions remaining, consider:\n1. Submit exp_013 to verify CV-LB correlation for MLP+GBDT ensemble\n2. Implement Optuna, run internal GroupKFold CV to find best config\n3. Submit Optuna-optimized model\n4. Keep 1 submission for final iteration\n\nThe gap to target (0.01727) is large (4.8x), but the target IS reachable. The key is finding the right combination of:\n- Model architecture (MLP + GBDT ensemble vs per-target)\n- Hyperparameters (Optuna-optimized)\n- Features (Spange vs combined features)\n",
   "latest_experiment": {
-    "id": "exp_012",
-    "name": "exp_013: LOO Ensemble (Fixed Fold Structure)",
-    "model_type": "MLP + XGBoost + RF + LightGBM Ensemble with LOO",
-    "score": 0.0827,
-    "notes": "CRITICAL FIX: Reverted to LOO validation (24 folds task 0, 13 folds task 1). exp_012 FAILED because GroupKFold changed fold structure. Results: Single CV 0.0670, Full CV 0.0911, Combined 0.0827. This is worse than exp_004 (0.0623) but MLP+GBDT ensemble may generalize better. Model: MLP [128,64,32] NO Sigmoid + XGB + RF + LGB with weights [0.4,0.2,0.2,0.2]. Template compliant with correct fold counts.",
-    "timestamp": "2026-01-14T04:01:33.274479"
+    "id": "exp_013",
+    "name": "exp_014: Per-Target + Optuna Optimization",
+    "model_type": "Optuna-optimized HGB + ExtraTrees (Per-Target)",
+    "score": 0.0834,
+    "notes": "Per-target models with Optuna hyperparameter optimization (50 trials). HGB for SM, ETR for Products. Best params: HGB depth=3-4, lr=0.09-0.20; ETR depth=6-20, n_estimators=188-494. GroupKFold CV during Optuna: 0.078 (single), 0.084 (full). Final LOO CV: 0.0834 (worse than exp_004's 0.0623). Key insight: Optuna found shallow HGB works best. The Optuna-found params may generalize better despite worse LOO CV.",
+    "timestamp": "2026-01-14T04:12:37.138721"
   },
   "competitive_intel": "## Available Competitive Intelligence\n\n- Competition description: `../research/description.md`\n- 5 top kernel notebooks in `../research/kernels/`",
   "target_score": 0.01727,
@@ -1289,6 +1289,355 @@
           "tool_use_id": "toolu_01VkCLagNR69UhdM16esVtoT",
           "content": "Transitioning to next phase",
           "is_error": false
+        },
+        {
+          "type": "text",
+          "text": "\ud83d\udd04 **EVALUATION COMPLETE - RESUMING**\n\n## Evaluator Feedback\n## What I Understood\n\nThe junior researcher discovered a critical issue: exp_012's GroupKFold submission FAILED because the evaluation metric expects LOO fold structure (24 folds for task 0, 13 folds for task 1). They correctly reverted to LOO validation in exp_013 while keeping the MLP + GBDT ensemble architecture. The hypothesis was that this MLP+GBDT ensemble (matching the top kernel architecture) might generalize better to unseen solvents despite having worse LOO CV (0.0827) than the previous best (0.0623).\n\n## Technical Execution Assessment\n\n**Validation**: \u2705 SOUND. LOO validation correctly implemented with 24 folds (task 0) and 13 folds (task 1). I verified the fold structure in the submission file.\n\n**Leakage Risk**: \u2705 NONE DETECTED.\n- StandardScaler is fit on training data only within each fold\n- Spange descriptors are precomputed (acceptable)\n- No TTA or augmentation\n- Consistent hyperparameters across all folds\n\n**Score Integrity**: \u2705 VERIFIED. I reconstructed the CV calculation:\n- Single Solvent CV MAE: 0.0670 +/- 0.0337 \u2713\n- Full Data CV MAE: 0.0911 +/- 0.0281 \u2713\n- Combined CV MAE: 0.0790 (notes say 0.0827 - minor discrepancy, likely different averaging)\n\n**Template Compliance**: \u2705 CORRECT. The last 3 cells match the template exactly:\n- Third-to-last cell: `model = TopKernelEnsemble(data='single')` \u2713\n- Second-to-last cell: `model = TopKernelEnsemble(data='full')` \u2713\n- Last cell: Unchanged \u2713\n- 'row' column included in submission \u2713\n- LOO validation with correct fold counts (24/13) \u2713\n\n**Code Quality**: Good. MLP training uses GPU (H100). Ensemble weights properly applied. No silent failures.\n\nVerdict: **TRUSTWORTHY** - Results can be trusted. Template compliance is correct.\n\n## Strategic Assessment\n\n**Approach Fit**: CORRECT. The researcher correctly identified that:\n1. GroupKFold submissions FAIL due to fold structure mismatch\n2. LOO is REQUIRED for valid submissions\n3. MLP + GBDT ensemble matches top kernel architecture\n\n**Effort Allocation**: GOOD. The researcher correctly prioritized fixing the submission format issue. However, there's a critical insight being missed:\n\n**CRITICAL INSIGHT**: The top kernel (lishellliang) uses GroupKFold **internally** but the submission format still uses LOO. Looking at their code, they OVERWRITE the utility functions to use GroupKFold. This means:\n- Their **internal CV** uses GroupKFold (5 folds) for faster iteration\n- But the **submission** still produces LOO format (24/13 folds) because Kaggle's evaluation runs the notebook fresh\n\nWait - this is confusing. Let me re-examine: The top kernel overwrites `generate_leave_one_out_splits` to use GroupKFold. This means their submission.csv would have 5 folds, not 24. Yet they got a valid LB score. This suggests either:\n1. The evaluation metric is more flexible than we thought\n2. Or there's something else going on\n\n**Actually, looking more carefully**: The exp_012 submission FAILED with \"Evaluation metric raised an unexpected error\". This confirms that the evaluation metric DOES expect LOO format. So how does the top kernel work?\n\n**Possible explanation**: The top kernel may have been submitted before the evaluation metric was finalized, or there's a different version of their code that uses LOO for submission.\n\n**Assumptions Being Made**:\n1. MLP + GBDT ensemble will generalize better than per-target models \u2192 NEEDS VALIDATION\n2. Fixed weights [0.4, 0.2, 0.2, 0.2] are good \u2192 **NEEDS VALIDATION** - Top kernel uses Optuna\n3. Spange descriptors alone are sufficient \u2192 REASONABLE (top kernel uses this)\n\n**Blind Spots**:\n1. **Optuna hyperparameter optimization** - Still not implemented! The top kernel uses Optuna to optimize lr, dropout, hidden_dims, xgb_depth, rf_depth, lgb_leaves, and weights. This is the KEY MISSING PIECE.\n2. **Per-target models** - exp_004/005 achieved better CV (0.0623) with per-target models (HGB for SM, ETR for Products). The current approach abandoned this.\n3. **Feature combinations** - Previous experiments showed DRFP-PCA + Spange + ACS_PCA achieved best GroupKFold CV (0.0706).\n\n**Trajectory Assessment**: \n- CV of 0.0827 is WORSE than exp_004 (0.0623)\n- But exp_004 had 53% CV-LB gap (0.0623 \u2192 0.0956)\n- If exp_013 has smaller CV-LB gap, LB could be similar or better\n- However, we've already seen that more regularization made LB WORSE (0.0956 \u2192 0.0991)\n- The problem is NOT traditional overfitting - we need BETTER features/models that generalize to chemically unique solvents\n\n## What's Working\n\n1. **Template compliance**: Fixed from exp_012 - submission format is now correct\n2. **LOO validation**: Correctly using 24/13 fold structure required by evaluation metric\n3. **MLP + GBDT ensemble**: Architecture is sound and matches top kernel\n4. **No TTA**: Correctly avoided TTA which was hurting performance\n5. **GPU utilization**: Using H100 for MLP training is efficient\n\n## Key Concerns\n\n1. **CV is Worse Than Previous Best**\n   - **Observation**: exp_013 CV (0.0827) is 33% worse than exp_004 CV (0.0623)\n   - **Why it matters**: Even if CV-LB gap is smaller, the absolute LB score may not improve\n   - **Suggestion**: Consider combining the best elements: per-target models (from exp_004) + MLP component (from exp_013) + Optuna optimization\n\n2. **Optuna Still Not Implemented**\n   - **Observation**: Using fixed weights [0.4, 0.2, 0.2, 0.2] instead of learned weights\n   - **Why it matters**: Top kernel uses Optuna to learn optimal weights and hyperparameters. This could be leaving significant performance on the table.\n   - **Suggestion**: Implement Optuna optimization for weights and hyperparameters. Use GroupKFold internally for faster iteration, but keep LOO for final submission.\n\n3. **Abandoned Per-Target Approach**\n   - **Observation**: exp_004/005 used per-target models (HGB for SM, ETR for Products) which achieved better CV\n   - **Why it matters**: Different targets may benefit from different model architectures\n   - **Suggestion**: Try combining per-target approach with MLP: use MLP for some targets, GBDT for others\n\n4. **Limited Submissions Remaining**\n   - **Observation**: 3 submissions remaining, 2 already used\n   - **Why it matters**: Need to be strategic about which experiments to submit\n   - **Suggestion**: Before submitting, run internal GroupKFold CV to estimate which approach is most promising\n\n## Top Priority for Next Experiment\n\n**Implement Optuna hyperparameter optimization with GroupKFold internal CV, then submit the best configuration using LOO format.**\n\nThe target (0.01727) IS reachable. Here's the recommended approach:\n\n1. **Use GroupKFold (5-fold) for internal CV** - This gives faster iteration and more realistic estimates\n2. **Implement Optuna optimization** - Optimize: lr (1e-4 to 1e-2), dropout (0.1-0.5), hidden_dims, xgb_depth (3-8), rf_depth (5-15), lgb_leaves (15-63), and ensemble weights\n3. **Try per-target + MLP hybrid** - Use MLP for some targets, per-target GBDT for others\n4. **Keep LOO for final submission** - The evaluation metric requires LOO format\n\n**Key insight**: The current approach is using fixed hyperparameters that may be far from optimal. Optuna optimization could significantly improve performance. The top kernel's success likely comes from learned hyperparameters, not just the architecture.\n\n**Submission strategy**: With 3 submissions remaining, consider:\n1. Submit exp_013 to verify CV-LB correlation for MLP+GBDT ensemble\n2. Implement Optuna, run internal GroupKFold CV to find best config\n3. Submit Optuna-optimized model\n4. Keep 1 submission for final iteration\n\nThe gap to target (0.01727) is large (4.8x), but the target IS reachable. The key is finding the right combination of:\n- Model architecture (MLP + GBDT ensemble vs per-target)\n- Hyperparameters (Optuna-optimized)\n- Features (Spange vs combined features)\n\n\n## Updated Strategy\n## Current Status\n- Best CV score: 0.0623 from exp_004 (PerTarget HGB+ETR with LOO)\n- Best LB score: 0.0956 from exp_004\n- CV-LB gap: +53% \u2192 LOO CV is optimistic for unseen solvents\n- Target: 0.01727 (5.5x lower than best LB)\n- Remaining submissions: 3\n\n## Response to Evaluator\n- Technical verdict was TRUSTWORTHY for exp_013 - template compliance is correct\n- Evaluator's top priority: Implement Optuna hyperparameter optimization. **AGREE** - this is the key missing piece from top kernel\n- Key concerns raised:\n  1. CV is worse than exp_004 (0.0827 vs 0.0623) - **VALID** but MLP+GBDT may generalize better\n  2. Fixed weights [0.4,0.2,0.2,0.2] are suboptimal - **AGREE** - need Optuna\n  3. Per-target approach abandoned - **VALID** - should try hybrid\n- How I'm addressing: Next experiment should combine per-target approach with Optuna optimization\n\n## Data Understanding\n- Reference notebooks: See `exploration/evolver_loop13_analysis.ipynb` for CV-LB gap analysis\n- Key patterns:\n  1. More regularization made LB WORSE (0.0956 \u2192 0.0991) - NOT traditional overfitting\n  2. Per-target models (HGB for SM, ETR for Products) achieved best CV (0.0623)\n  3. TTA hurts performance - confirmed in exp_005\n  4. LOO validation is REQUIRED for submission (24 folds task 0, 13 folds task 1)\n\n## CRITICAL CONSTRAINT\n**\ud83d\udea8 DO NOT CHANGE THE VALIDATION STRATEGY IN TEMPLATE CELLS \ud83d\udea8**\n- The template expects LOO splits with specific fold counts\n- Task 0: 24 folds (one per solvent)\n- Task 1: 13 folds (one per solvent ramp)\n- Changing to GroupKFold breaks the submission format\n\n## Recommended Approaches (Priority Order)\n\n### 1. HIGHEST PRIORITY: Per-Target + Optuna Optimization\n**Why**: Per-target achieved best CV (0.0623), Optuna is the key missing piece from top kernel\n**Implementation**:\n- Use per-target models: HGB for SM, ExtraTrees for Products (from exp_004/005)\n- Add Optuna optimization for hyperparameters:\n  - HGB: max_depth (3-10), learning_rate (0.01-0.3), n_estimators (100-500)\n  - ETR: max_depth (5-20), n_estimators (100-500), min_samples_split (2-10)\n- Use GroupKFold (5-fold) INTERNALLY for Optuna optimization (faster)\n- Use LOO for final submission\n- Features: Spange descriptors (proven to work)\n\n### 2. Per-Target + MLP Hybrid\n**Why**: Combine best of both approaches\n**Implementation**:\n- Use MLP for some targets, per-target GBDT for others\n- Try: MLP for SM (may capture non-linear kinetics), ETR for Products\n- Or: Ensemble of per-target + MLP with learned weights\n\n### 3. Feature Engineering for Unseen Solvents\n**Why**: The problem is NOT overfitting - we need features that generalize\n**Implementation**:\n- Focus on Spange descriptors (chemical properties that generalize):\n  - dielectric constant, ET(30), alpha, beta, pi*, SA, SB, SP, SdP, N, n, f(n), delta\n- Add Arrhenius kinetics features: 1/T, ln(t), t*T interaction\n- Consider: polarity ratios, hydrogen bonding capacity\n\n## What NOT to Try\n- \u274c GroupKFold in template cells (breaks submission format)\n- \u274c TTA (hurts performance - confirmed in exp_005)\n- \u274c Simple Ridge regression (CV 0.0896, worse than PerTarget)\n- \u274c More regularization (made LB worse in exp_006)\n- \u274c Fixed ensemble weights without optimization\n\n## Validation Notes\n- Use LOO for submission (REQUIRED by evaluation metric)\n- Use GroupKFold ONLY for internal hyperparameter tuning (OPTIONAL)\n- The CV-LB gap is ~50% with LOO - this is expected for unseen solvents\n- Don't chase LOO CV - focus on approaches that generalize\n\n## Key Insight from Top Kernel\nThe top kernel (lishellliang) uses:\n1. GroupKFold (5-fold) internally - OVERWRITES utility functions\n2. MLP + XGBoost + RF + LightGBM ensemble\n3. Optuna hyperparameter optimization (commented out but available)\n4. Spange descriptors only\n5. Learned weights via Optuna\n\n## Experiment Template for Per-Target + Optuna\n```python\n# Per-Target + Optuna Optimization\nimport optuna\nfrom sklearn.model_selection import GroupKFold\nfrom sklearn.ensemble import HistGradientBoostingRegressor, ExtraTreesRegressor\n\ndef objective(trial):\n    # Hyperparameters to optimize\n    hgb_depth = trial.suggest_int('hgb_depth', 3, 10)\n    hgb_lr = trial.suggest_float('hgb_lr', 0.01, 0.3, log=True)\n    hgb_iter = trial.suggest_int('hgb_iter', 100, 500)\n    etr_depth = trial.suggest_int('etr_depth', 5, 20)\n    etr_n_estimators = trial.suggest_int('etr_n_estimators', 100, 500)\n    \n    # Use GroupKFold for internal CV (faster)\n    gkf = GroupKFold(n_splits=5)\n    errors = []\n    for train_idx, val_idx in gkf.split(X, y, groups=solvent_ids):\n        X_train, X_val = X[train_idx], X[val_idx]\n        y_train, y_val = y[train_idx], y[val_idx]\n        \n        # Train per-target model with trial hyperparameters\n        hgb = HistGradientBoostingRegressor(max_depth=hgb_depth, learning_rate=hgb_lr, max_iter=hgb_iter)\n        etr = ExtraTreesRegressor(max_depth=etr_depth, n_estimators=etr_n_estimators)\n        \n        # SM uses HGB, Products use ETR\n        hgb.fit(X_train, y_train[:, 2])  # SM\n        etr.fit(X_train, y_train[:, :2])  # Products\n        \n        preds = np.column_stack([etr.predict(X_val), hgb.predict(X_val).reshape(-1, 1)])\n        mae = np.mean(np.abs(preds - y_val))\n        errors.append(mae)\n    return np.mean(errors)\n\nstudy = optuna.create_study(direction='minimize')\nstudy.optimize(objective, n_trials=50)\nbest_params = study.best_params\n\n# Then use best_params with LOO for final submission\n```\n\n## Gap Analysis\n- Target: 0.01727\n- Best LB: 0.0956\n- Gap: 5.5x (HUGE)\n\nThis gap suggests we need fundamentally different approaches. The target IS reachable - we just need to find the right combination of:\n1. Per-target models (proven best CV)\n2. Optuna optimization (key missing piece)\n3. Features that generalize to unseen solvents\n\nContinue experimenting based on the updated guidance above."
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": "Begin experimenting. Follow the seed prompt strategy and create your first baseline.\n\n**IMPORTANT:** Before starting, read `session_state.json` to see existing data findings and notebook references. The strategy below will mention which notebooks to reference for data understanding.\n\n\n## EXISTING DATA FINDINGS\nThe following insights have already been discovered. Reference these instead of re-doing EDA:\n\n- **exploration/evolver_loop9_analysis.ipynb**: Diverse ensemble (exp_009) CV 0.0673 is WORSE than per-target (exp_004) CV 0.0623. Adding RF/XGB/LGB to PerTarget didn't help - it hurt. The issue may be: 1) Fixed weights [0.4,0.2,0.2,0.2] are subopt...\n- **exploration/evolver_loop10_analysis.ipynb**: CRITICAL: Top kernel (lishellliang) uses GroupKFold (5-fold) instead of LOO. This gives more realistic CV estimates. LOO has 24/13 folds with 4% test data each, GroupKFold has 5 folds with 20% test da...\n- **exploration/evolver_loop10_analysis.ipynb (web search)**: BREAKTHROUGH: Paper arxiv:2512.19530 achieves MSE 0.0039 (MAE ~0.062) on Catechol benchmark using GNN with GAT + DRFP + learned mixture-aware solvent encodings. This is 25x better than tabular ensembl...\n- **exploration/evolver_loop11_analysis.ipynb**: TEMPLATE COMPLIANCE CRITICAL: The last 3 cells MUST use the exact format with 'row' column: for row_idx, row in enumerate(predictions_np): all_predictions.append({'task': X, 'fold': fold_idx, 'row': r...\n- **exploration/evolver_loop11_analysis.ipynb**: Top kernel (lishellliang) uses Optuna to optimize: lr (1e-4 to 1e-2), dropout (0.1-0.5), hidden_dims, xgb_depth (3-8), rf_depth (5-15), lgb_leaves (15-63), and ensemble weights (normalized). This is N...\n- **exploration/evolver_loop12_analysis.ipynb**: CRITICAL GAP: Optuna hyperparameter optimization has NOT been tried! Top kernel uses Optuna to optimize: lr (1e-4 to 1e-2), dropout (0.1-0.5), hidden_dims, xgb_depth (3-8), rf_depth (5-15), lgb_leaves...\n- **exploration/evolver_loop12_analysis.ipynb**: CRITICAL: exp_012 submission FAILED because GroupKFold changed the fold structure. Template expects LOO with 24 folds (task 0) and 13 folds (task 1). GroupKFold with 5 folds broke the expected format....\n- **exploration/evolver_loop12_analysis.ipynb**: CONFIRMED: Evaluation metric expects LOO fold structure (24 folds for task 0, 13 folds for task 1). GroupKFold with 5 folds causes 'Evaluation metric raised an unexpected error'. MUST use LOO for subm...\n- **exploration/evolver_loop13_analysis.ipynb**: CRITICAL CV-LB PATTERN: exp_004 (CV 0.0623) had 53% gap to LB (0.0956). exp_006 (CV 0.0688) had 44% gap to LB (0.0991). More regularization made LB WORSE. This means the problem is NOT traditional ove...\n- **exploration/evolver_loop13_analysis.ipynb**: TOP KERNEL INSIGHT: lishellliang kernel OVERWRITES generate_leave_one_out_splits to use GroupKFold(5-fold). Their submission has 5 folds, not 24. Yet they got valid LB score. This suggests evaluation ...\n\nRead `session_state.json` for the complete list and all notebook references.\n\n## SEED PROMPT STRATEGY\n## Current Status\n- Best CV score: 0.0623 from exp_004 (PerTarget HGB+ETR with LOO)\n- Best LB score: 0.0956 from exp_004\n- CV-LB gap: +53% \u2192 LOO CV is optimistic for unseen solvents\n- Target: 0.01727 (5.5x lower than best LB)\n- Remaining submissions: 3\n\n## Response to Evaluator\n- Technical verdict was TRUSTWORTHY for exp_013 - template compliance is correct\n- Evaluator's top priority: Implement Optuna hyperparameter optimization. **AGREE** - this is the key missing piece from top kernel\n- Key concerns raised:\n  1. CV is worse than exp_004 (0.0827 vs 0.0623) - **VALID** but MLP+GBDT may generalize better\n  2. Fixed weights [0.4,0.2,0.2,0.2] are suboptimal - **AGREE** - need Optuna\n  3. Per-target approach abandoned - **VALID** - should try hybrid\n- How I'm addressing: Next experiment should combine per-target approach with Optuna optimization\n\n## Data Understanding\n- Reference notebooks: See `exploration/evolver_loop13_analysis.ipynb` for CV-LB gap analysis\n- Key patterns:\n  1. More regularization made LB WORSE (0.0956 \u2192 0.0991) - NOT traditional overfitting\n  2. Per-target models (HGB for SM, ETR for Products) achieved best CV (0.0623)\n  3. TTA hurts performance - confirmed in exp_005\n  4. LOO validation is REQUIRED for submission (24 folds task 0, 13 folds task 1)\n\n## CRITICAL CONSTRAINT\n**\ud83d\udea8 DO NOT CHANGE THE VALIDATION STRATEGY IN TEMPLATE CELLS \ud83d\udea8**\n- The template expects LOO splits with specific fold counts\n- Task 0: 24 folds (one per solvent)\n- Task 1: 13 folds (one per solvent ramp)\n- Changing to GroupKFold breaks the submission format\n\n## Recommended Approaches (Priority Order)\n\n### 1. HIGHEST PRIORITY: Per-Target + Optuna Optimization\n**Why**: Per-target achieved best CV (0.0623), Optuna is the key missing piece from top kernel\n**Implementation**:\n- Use per-target models: HGB for SM, ExtraTrees for Products (from exp_004/005)\n- Add Optuna optimization for hyperparameters:\n  - HGB: max_depth (3-10), learning_rate (0.01-0.3), n_estimators (100-500)\n  - ETR: max_depth (5-20), n_estimators (100-500), min_samples_split (2-10)\n- Use GroupKFold (5-fold) INTERNALLY for Optuna optimization (faster)\n- Use LOO for final submission\n- Features: Spange descriptors (proven to work)\n\n### 2. Per-Target + MLP Hybrid\n**Why**: Combine best of both approaches\n**Implementation**:\n- Use MLP for some targets, per-target GBDT for others\n- Try: MLP for SM (may capture non-linear kinetics), ETR for Products\n- Or: Ensemble of per-target + MLP with learned weights\n\n### 3. Feature Engineering for Unseen Solvents\n**Why**: The problem is NOT overfitting - we need features that generalize\n**Implementation**:\n- Focus on Spange descriptors (chemical properties that generalize):\n  - dielectric constant, ET(30), alpha, beta, pi*, SA, SB, SP, SdP, N, n, f(n), delta\n- Add Arrhenius kinetics features: 1/T, ln(t), t*T interaction\n- Consider: polarity ratios, hydrogen bonding capacity\n\n## What NOT to Try\n- \u274c GroupKFold in template cells (breaks submission format)\n- \u274c TTA (hurts performance - confirmed in exp_005)\n- \u274c Simple Ridge regression (CV 0.0896, worse than PerTarget)\n- \u274c More regularization (made LB worse in exp_006)\n- \u274c Fixed ensemble weights without optimization\n\n## Validation Notes\n- Use LOO for submission (REQUIRED by evaluation metric)\n- Use GroupKFold ONLY for internal hyperparameter tuning (OPTIONAL)\n- The CV-LB gap is ~50% with LOO - this is expected for unseen solvents\n- Don't chase LOO CV - focus on approaches that generalize\n\n## Key Insight from Top Kernel\nThe top kernel (lishellliang) uses:\n1. GroupKFold (5-fold) internally - OVERWRITES utility functions\n2. MLP + XGBoost + RF + LightGBM ensemble\n3. Optuna hyperparameter optimization (commented out but available)\n4. Spange descriptors only\n5. Learned weights via Optuna\n\n## Experiment Template for Per-Target + Optuna\n```python\n# Per-Target + Optuna Optimization\nimport optuna\nfrom sklearn.model_selection import GroupKFold\nfrom sklearn.ensemble import HistGradientBoostingRegressor, ExtraTreesRegressor\n\ndef objective(trial):\n    # Hyperparameters to optimize\n    hgb_depth = trial.suggest_int('hgb_depth', 3, 10)\n    hgb_lr = trial.suggest_float('hgb_lr', 0.01, 0.3, log=True)\n    hgb_iter = trial.suggest_int('hgb_iter', 100, 500)\n    etr_depth = trial.suggest_int('etr_depth', 5, 20)\n    etr_n_estimators = trial.suggest_int('etr_n_estimators', 100, 500)\n    \n    # Use GroupKFold for internal CV (faster)\n    gkf = GroupKFold(n_splits=5)\n    errors = []\n    for train_idx, val_idx in gkf.split(X, y, groups=solvent_ids):\n        X_train, X_val = X[train_idx], X[val_idx]\n        y_train, y_val = y[train_idx], y[val_idx]\n        \n        # Train per-target model with trial hyperparameters\n        hgb = HistGradientBoostingRegressor(max_depth=hgb_depth, learning_rate=hgb_lr, max_iter=hgb_iter)\n        etr = ExtraTreesRegressor(max_depth=etr_depth, n_estimators=etr_n_estimators)\n        \n        # SM uses HGB, Products use ETR\n        hgb.fit(X_train, y_train[:, 2])  # SM\n        etr.fit(X_train, y_train[:, :2])  # Products\n        \n        preds = np.column_stack([etr.predict(X_val), hgb.predict(X_val).reshape(-1, 1)])\n        mae = np.mean(np.abs(preds - y_val))\n        errors.append(mae)\n    return np.mean(errors)\n\nstudy = optuna.create_study(direction='minimize')\nstudy.optimize(objective, n_trials=50)\nbest_params = study.best_params\n\n# Then use best_params with LOO for final submission\n```\n\n## Gap Analysis\n- Target: 0.01727\n- Best LB: 0.0956\n- Gap: 5.5x (HUGE)\n\nThis gap suggests we need fundamentally different approaches. The target IS reachable - we just need to find the right combination of:\n1. Per-target models (proven best CV)\n2. Optuna optimization (key missing piece)\n3. Features that generalize to unseen solvents\n\nStart with a simple baseline following this strategy. Reference the notebooks mentioned in the strategy for data understanding."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "REASONING: The evolver's top priority is clear: implement Per-Target + Optuna Optimization. This combines the best CV approach (per-target HGB+ETR from exp_004) with Optuna hyperparameter tuning (the key missing piece from top kernel). I'll use GroupKFold internally for Optuna optimization, then use LOO for final submission."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01ELwsrd3x6hR2vwWbJDBhT2",
+          "name": "Bash",
+          "input": {
+            "command": "mkdir -p /home/code/experiments/014_optuna_pertarget"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01ELwsrd3x6hR2vwWbJDBhT2",
+          "content": "(no output)",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01Lv1apYNhmyd5MigQaAcqEM",
+          "name": "CreateNotebook",
+          "input": {
+            "notebook_path": "/home/code/experiments/014_optuna_pertarget/exp_014.ipynb",
+            "cells": [
+              {
+                "cell_type": "markdown",
+                "content": "# Experiment 014: Per-Target + Optuna Optimization\n\n**Key approach:**\n1. Per-target models: HGB for SM, ExtraTrees for Products (best CV from exp_004)\n2. Optuna hyperparameter optimization (key missing piece from top kernel)\n3. GroupKFold (5-fold) INTERNALLY for Optuna (faster iteration)\n4. LOO for final submission (REQUIRED by evaluation metric)\n\n**Hyperparameters to optimize:**\n- HGB: max_depth, learning_rate, max_iter\n- ETR: max_depth, n_estimators, min_samples_split"
+              },
+              {
+                "cell_type": "code",
+                "content": "import numpy as np\nimport pandas as pd\nimport torch\nimport optuna\nfrom sklearn.preprocessing import StandardScaler\nfrom sklearn.ensemble import HistGradientBoostingRegressor, ExtraTreesRegressor\nfrom sklearn.model_selection import GroupKFold\nfrom abc import ABC\nimport tqdm\nimport warnings\nwarnings.filterwarnings('ignore')\noptuna.logging.set_verbosity(optuna.logging.WARNING)\n\nDATA_PATH = '/home/data'\ntorch.set_default_dtype(torch.double)\nprint(f\"CUDA available: {torch.cuda.is_available()}\")"
+              },
+              {
+                "cell_type": "code",
+                "content": "# --- UTILITY FUNCTIONS ---\nINPUT_LABELS_NUMERIC = [\"Residence Time\", \"Temperature\"]\nTARGET_LABELS = [\"Product 2\", \"Product 3\", \"SM\"]\n\ndef load_data(name=\"full\"):\n    assert name in [\"full\", \"single_solvent\"]\n    if name == \"full\":\n        df = pd.read_csv(f'{DATA_PATH}/catechol_full_data_yields.csv')\n        X = df[[\"Residence Time\", \"Temperature\", \"SOLVENT A NAME\", \"SOLVENT B NAME\", \"SolventB%\"]]\n    else:\n        df = pd.read_csv(f'{DATA_PATH}/catechol_single_solvent_yields.csv')\n        X = df[[\"Residence Time\", \"Temperature\", \"SOLVENT NAME\"]]\n    Y = df[TARGET_LABELS]\n    return X, Y\n\n# Load Spange descriptors\nSpange = pd.read_csv(f'{DATA_PATH}/spange_descriptors_lookup.csv')\nprint(f\"Spange: {Spange.shape}\")\nSpange_dict = {row['SOLVENT NAME']: row.drop('SOLVENT NAME').values for _, row in Spange.iterrows()}"
+              },
+              {
+                "cell_type": "code",
+                "content": "# --- LOO UTILITY FUNCTIONS (REQUIRED FOR SUBMISSION) ---\ndef generate_leave_one_out_splits(X, Y):\n    \"\"\"Leave-One-Solvent-Out for single solvent data (24 folds).\"\"\"\n    for solvent in sorted(X[\"SOLVENT NAME\"].unique()):\n        mask = X[\"SOLVENT NAME\"] != solvent\n        yield (X[mask], Y[mask]), (X[~mask], Y[~mask])\n\ndef generate_leave_one_ramp_out_splits(X, Y):\n    \"\"\"Leave-One-Ramp-Out for full data (13 folds).\"\"\"\n    ramps = X[[\"SOLVENT A NAME\", \"SOLVENT B NAME\"]].drop_duplicates()\n    for _, row in ramps.iterrows():\n        mask = ~((X[\"SOLVENT A NAME\"] == row[\"SOLVENT A NAME\"]) & \n                 (X[\"SOLVENT B NAME\"] == row[\"SOLVENT B NAME\"]))\n        yield (X[mask], Y[mask]), (X[~mask], Y[~mask])\n\nprint(\"LOO utility functions defined\")"
+              },
+              {
+                "cell_type": "code",
+                "content": "# --- BASE CLASSES ---\nclass SmilesFeaturizer(ABC):\n    def __init__(self): raise NotImplementedError\n    def featurize(self, X): raise NotImplementedError\n\nclass BaseModel(ABC):\n    def __init__(self): pass\n    def train_model(self, X_train, y_train): raise NotImplementedError\n    def predict(self): raise NotImplementedError"
+              },
+              {
+                "cell_type": "code",
+                "content": "# --- FEATURE EXTRACTION ---\ndef get_features_single(X):\n    \"\"\"Extract features for single solvent data.\"\"\"\n    features = []\n    for _, row in X.iterrows():\n        solvent = row['SOLVENT NAME']\n        spange = Spange_dict.get(solvent, np.zeros(13))\n        feat = np.concatenate([[row['Residence Time'], row['Temperature']], spange])\n        features.append(feat)\n    return np.array(features)\n\ndef get_features_full(X):\n    \"\"\"Extract features for full (mixed solvent) data.\"\"\"\n    features = []\n    for _, row in X.iterrows():\n        solvent_a = row['SOLVENT A NAME']\n        solvent_b = row['SOLVENT B NAME']\n        pct_b = row['SolventB%'] / 100.0\n        spange_a = Spange_dict.get(solvent_a, np.zeros(13))\n        spange_b = Spange_dict.get(solvent_b, np.zeros(13))\n        spange_mix = (1 - pct_b) * spange_a + pct_b * spange_b\n        feat = np.concatenate([[row['Residence Time'], row['Temperature'], pct_b], spange_mix])\n        features.append(feat)\n    return np.array(features)\n\nprint(\"Feature extraction functions defined\")"
+              },
+              {
+                "cell_type": "code",
+                "content": "# --- OPTUNA OPTIMIZATION FOR SINGLE SOLVENT DATA ---\nprint(\"Running Optuna optimization for single solvent data...\")\n\nX_single, Y_single = load_data(\"single_solvent\")\nX_feat_single = get_features_single(X_single)\ny_single = Y_single.values\ngroups_single = X_single[\"SOLVENT NAME\"].values\n\ndef objective_single(trial):\n    # HGB hyperparameters (for SM - target 2)\n    hgb_depth = trial.suggest_int('hgb_depth', 3, 10)\n    hgb_lr = trial.suggest_float('hgb_lr', 0.01, 0.3, log=True)\n    hgb_iter = trial.suggest_int('hgb_iter', 100, 500)\n    \n    # ETR hyperparameters (for Products - targets 0, 1)\n    etr_depth = trial.suggest_int('etr_depth', 5, 20)\n    etr_n_estimators = trial.suggest_int('etr_n_estimators', 100, 500)\n    etr_min_samples = trial.suggest_int('etr_min_samples', 2, 10)\n    \n    # Use GroupKFold for internal CV (faster)\n    gkf = GroupKFold(n_splits=5)\n    errors = []\n    \n    for train_idx, val_idx in gkf.split(X_feat_single, y_single, groups=groups_single):\n        X_train, X_val = X_feat_single[train_idx], X_feat_single[val_idx]\n        y_train, y_val = y_single[train_idx], y_single[val_idx]\n        \n        # Scale features\n        scaler = StandardScaler()\n        X_train_scaled = scaler.fit_transform(X_train)\n        X_val_scaled = scaler.transform(X_val)\n        \n        # Train HGB for SM (target 2)\n        hgb = HistGradientBoostingRegressor(\n            max_depth=hgb_depth, learning_rate=hgb_lr, max_iter=hgb_iter, random_state=42)\n        hgb.fit(X_train_scaled, y_train[:, 2])\n        \n        # Train ETR for Products (targets 0, 1)\n        etr = ExtraTreesRegressor(\n            max_depth=etr_depth, n_estimators=etr_n_estimators, \n            min_samples_split=etr_min_samples, random_state=42, n_jobs=-1)\n        etr.fit(X_train_scaled, y_train[:, :2])\n        \n        # Predict\n        pred_products = etr.predict(X_val_scaled)\n        pred_sm = hgb.predict(X_val_scaled).reshape(-1, 1)\n        preds = np.column_stack([pred_products, pred_sm])\n        preds = np.clip(preds, 0, 1)\n        \n        mae = np.mean(np.abs(preds - y_val))\n        errors.append(mae)\n    \n    return np.mean(errors)\n\n# Run Optuna\nstudy_single = optuna.create_study(direction='minimize')\nstudy_single.optimize(objective_single, n_trials=50, show_progress_bar=True)\n\nprint(f\"\\nBest single solvent params: {study_single.best_params}\")\nprint(f\"Best single solvent CV (GroupKFold): {study_single.best_value:.6f}\")"
+              },
+              {
+                "cell_type": "code",
+                "content": "# --- OPTUNA OPTIMIZATION FOR FULL DATA ---\nprint(\"Running Optuna optimization for full data...\")\n\nX_full, Y_full = load_data(\"full\")\nX_feat_full = get_features_full(X_full)\ny_full = Y_full.values\ngroups_full = (X_full[\"SOLVENT A NAME\"].astype(str) + \"_\" + X_full[\"SOLVENT B NAME\"].astype(str)).values\n\ndef objective_full(trial):\n    # HGB hyperparameters (for SM - target 2)\n    hgb_depth = trial.suggest_int('hgb_depth', 3, 10)\n    hgb_lr = trial.suggest_float('hgb_lr', 0.01, 0.3, log=True)\n    hgb_iter = trial.suggest_int('hgb_iter', 100, 500)\n    \n    # ETR hyperparameters (for Products - targets 0, 1)\n    etr_depth = trial.suggest_int('etr_depth', 5, 20)\n    etr_n_estimators = trial.suggest_int('etr_n_estimators', 100, 500)\n    etr_min_samples = trial.suggest_int('etr_min_samples', 2, 10)\n    \n    # Use GroupKFold for internal CV (faster)\n    gkf = GroupKFold(n_splits=5)\n    errors = []\n    \n    for train_idx, val_idx in gkf.split(X_feat_full, y_full, groups=groups_full):\n        X_train, X_val = X_feat_full[train_idx], X_feat_full[val_idx]\n        y_train, y_val = y_full[train_idx], y_full[val_idx]\n        \n        # Scale features\n        scaler = StandardScaler()\n        X_train_scaled = scaler.fit_transform(X_train)\n        X_val_scaled = scaler.transform(X_val)\n        \n        # Train HGB for SM (target 2)\n        hgb = HistGradientBoostingRegressor(\n            max_depth=hgb_depth, learning_rate=hgb_lr, max_iter=hgb_iter, random_state=42)\n        hgb.fit(X_train_scaled, y_train[:, 2])\n        \n        # Train ETR for Products (targets 0, 1)\n        etr = ExtraTreesRegressor(\n            max_depth=etr_depth, n_estimators=etr_n_estimators, \n            min_samples_split=etr_min_samples, random_state=42, n_jobs=-1)\n        etr.fit(X_train_scaled, y_train[:, :2])\n        \n        # Predict\n        pred_products = etr.predict(X_val_scaled)\n        pred_sm = hgb.predict(X_val_scaled).reshape(-1, 1)\n        preds = np.column_stack([pred_products, pred_sm])\n        preds = np.clip(preds, 0, 1)\n        \n        mae = np.mean(np.abs(preds - y_val))\n        errors.append(mae)\n    \n    return np.mean(errors)\n\n# Run Optuna\nstudy_full = optuna.create_study(direction='minimize')\nstudy_full.optimize(objective_full, n_trials=50, show_progress_bar=True)\n\nprint(f\"\\nBest full data params: {study_full.best_params}\")\nprint(f\"Best full data CV (GroupKFold): {study_full.best_value:.6f}\")"
+              },
+              {
+                "cell_type": "code",
+                "content": "# --- OPTUNA-OPTIMIZED PER-TARGET MODEL ---\nclass OptunaPerTargetModel(BaseModel):\n    \"\"\"Per-target model with Optuna-optimized hyperparameters.\n    \n    Uses:\n    - HGB for SM (target 2) - captures gradient patterns\n    - ETR for Products (targets 0, 1) - robust to outliers\n    \"\"\"\n    \n    def __init__(self, data='single', params=None):\n        super().__init__()\n        self.data = data\n        self.params = params or {}\n        self.scaler = StandardScaler()\n        self.hgb = None\n        self.etr = None\n    \n    def _get_features(self, X):\n        if self.data == 'single':\n            return get_features_single(X)\n        else:\n            return get_features_full(X)\n    \n    def train_model(self, X_train, y_train):\n        X_feat = self._get_features(X_train)\n        y_np = y_train.values\n        X_scaled = self.scaler.fit_transform(X_feat)\n        \n        # Get hyperparameters\n        hgb_depth = self.params.get('hgb_depth', 5)\n        hgb_lr = self.params.get('hgb_lr', 0.1)\n        hgb_iter = self.params.get('hgb_iter', 200)\n        etr_depth = self.params.get('etr_depth', 10)\n        etr_n_estimators = self.params.get('etr_n_estimators', 200)\n        etr_min_samples = self.params.get('etr_min_samples', 2)\n        \n        # Train HGB for SM (target 2)\n        self.hgb = HistGradientBoostingRegressor(\n            max_depth=hgb_depth, learning_rate=hgb_lr, max_iter=hgb_iter, random_state=42)\n        self.hgb.fit(X_scaled, y_np[:, 2])\n        \n        # Train ETR for Products (targets 0, 1)\n        self.etr = ExtraTreesRegressor(\n            max_depth=etr_depth, n_estimators=etr_n_estimators,\n            min_samples_split=etr_min_samples, random_state=42, n_jobs=-1)\n        self.etr.fit(X_scaled, y_np[:, :2])\n    \n    def predict(self, X_test):\n        X_feat = self._get_features(X_test)\n        X_scaled = self.scaler.transform(X_feat)\n        \n        pred_products = self.etr.predict(X_scaled)\n        pred_sm = self.hgb.predict(X_scaled).reshape(-1, 1)\n        preds = np.column_stack([pred_products, pred_sm])\n        preds = np.clip(preds, 0, 1)\n        \n        return torch.tensor(preds)\n\n# Store best params\nbest_params_single = study_single.best_params\nbest_params_full = study_full.best_params\n\nprint(f\"Best single params: {best_params_single}\")\nprint(f\"Best full params: {best_params_full}\")"
+              },
+              {
+                "cell_type": "code",
+                "content": "# --- QUICK VALIDATION TEST ---\nprint(\"Quick test of OptunaPerTargetModel with LOO...\")\nX_test, Y_test = load_data(\"single_solvent\")\n\nerrors = []\nfor i, ((train_X, train_Y), (test_X, test_Y)) in enumerate(generate_leave_one_out_splits(X_test, Y_test)):\n    if i >= 3: break\n    solvent = test_X['SOLVENT NAME'].iloc[0]\n    model = OptunaPerTargetModel(data='single', params=best_params_single)\n    model.train_model(train_X, train_Y)\n    preds = model.predict(test_X).numpy()\n    mae = np.mean(np.abs(preds - test_Y.values))\n    errors.append(mae)\n    print(f\"Fold {i} ({solvent}): MAE = {mae:.4f}\")\n\nprint(f\"\\nQuick test MAE (3 folds): {np.mean(errors):.4f}\")"
+              },
+              {
+                "cell_type": "code",
+                "content": "########### DO NOT CHANGE ANYTHING IN THIS CELL OTHER THAN THE MODEL #################\n########### THIS MUST BE THE THIRD LAST CELL IN YOUR NOTEBOOK FOR A VALID SUBMISSION #################\n\nimport tqdm\n\nX, Y = load_data(\"single_solvent\")\n\nsplit_generator = generate_leave_one_out_splits(X, Y)\nall_predictions = []\n\nfor fold_idx, split in tqdm.tqdm(enumerate(split_generator)):\n    (train_X, train_Y), (test_X, test_Y) = split\n\n    model = OptunaPerTargetModel(data='single', params=best_params_single) # CHANGE THIS LINE ONLY\n    model.train_model(train_X, train_Y)\n\n    predictions = model.predict(test_X)  # Shape: [N, 3]\n\n    # Move to CPU and convert to numpy\n    predictions_np = predictions.detach().cpu().numpy()\n\n    # Add metadata and flatten to long format\n    for row_idx, row in enumerate(predictions_np):\n        all_predictions.append({\n            \"task\": 0,\n            \"fold\": fold_idx,\n            \"row\": row_idx,\n            \"target_1\": row[0],\n            \"target_2\": row[1],\n            \"target_3\": row[2]\n        })\n\n# Save final submission\nsubmission_single_solvent = pd.DataFrame(all_predictions)\n\n########### DO NOT CHANGE ANYTHING IN THIS CELL OTHER THAN THE MODEL #################\n########### THIS MUST BE THE THIRD LAST CELL IN YOUR NOTEBOOK FOR A VALID SUBMISSION #################"
+              },
+              {
+                "cell_type": "code",
+                "content": "########### DO NOT CHANGE ANYTHING IN THIS CELL OTHER THAN THE MODEL #################\n########### THIS MUST BE THE SECOND LAST CELL IN YOUR NOTEBOOK FOR A VALID SUBMISSION #################\n\nX, Y = load_data(\"full\")\n\nsplit_generator = generate_leave_one_ramp_out_splits(X, Y)\nall_predictions = []\n\nfor fold_idx, split in tqdm.tqdm(enumerate(split_generator)):\n    (train_X, train_Y), (test_X, test_Y) = split\n\n    model = OptunaPerTargetModel(data='full', params=best_params_full) # CHANGE THIS LINE ONLY\n    model.train_model(train_X, train_Y)\n\n    predictions = model.predict(test_X)  # Shape: [N, 3]\n\n    # Move to CPU and convert to numpy\n    predictions_np = predictions.detach().cpu().numpy()\n\n    # Add metadata and flatten to long format\n    for row_idx, row in enumerate(predictions_np):\n        all_predictions.append({\n            \"task\": 1,\n            \"fold\": fold_idx,\n            \"row\": row_idx,\n            \"target_1\": row[0],\n            \"target_2\": row[1],\n            \"target_3\": row[2]\n        })\n\n# Save final submission\nsubmission_full_data = pd.DataFrame(all_predictions)\n\n########### DO NOT CHANGE ANYTHING IN THIS CELL OTHER THAN THE MODEL #################\n########### THIS MUST BE THE SECOND LAST CELL IN YOUR NOTEBOOK FOR A VALID SUBMISSION #################"
+              },
+              {
+                "cell_type": "code",
+                "content": "########### DO NOT CHANGE ANYTHING IN THIS CELL #################\n########### THIS MUST BE THE FINAL CELL IN YOUR NOTEBOOK FOR A VALID SUBMISSION #################\n\nsubmission = pd.concat([submission_single_solvent, submission_full_data])\nsubmission = submission.reset_index()\nsubmission.index.name = \"id\"\nsubmission.to_csv(\"submission.csv\", index=True)\n\n########### DO NOT CHANGE ANYTHING IN THIS CELL #################\n########### THIS MUST BE THE FINAL CELL IN YOUR NOTEBOOK FOR A VALID SUBMISSION #################"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Lv1apYNhmyd5MigQaAcqEM",
+          "content": "Created: /home/code/experiments/014_optuna_pertarget/exp_014.ipynb\n\nStrong Note: OOM is unrecoverable. Use strong models - just estimate memory first.",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01TTKhaBKatDPD6W6QKkf9dz",
+          "name": "ExecuteCellRange",
+          "input": {
+            "start_cell": 0,
+            "end_cell": 5,
+            "duration": 60
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01TTKhaBKatDPD6W6QKkf9dz",
+          "content": "Executed cells 0-5\n==================================================\n\nCell 1:\n```\nimport numpy as np\nimport pandas as pd\nimport torch\nimport optuna\nfrom sklearn.preprocessing import StandardScaler\nfrom sklearn.ensemble import HistGradientBoostingRegressor, ExtraTreesRegressor\nfrom sklearn.model_selection import GroupKFold\nfrom abc import ABC\nimport tqdm\nimport warnings\nwarnings.filterwarnings('ignore')\noptuna.logging.set_verbosity(optuna.logging.WARNING)\n\nDATA_PATH = '/home/data'\ntorch.set_default_dtype(torch.double)\nprint(f\"CUDA available: {torch.cuda.is_available()}\")\n```\nOutput:\nCUDA available: True\n\n\nCell 2:\n```\n# --- UTILITY FUNCTIONS ---\nINPUT_LABELS_NUMERIC = [\"Residence Time\", \"Temperature\"]\nTARGET_LABELS = [\"Product 2\", \"Product 3\", \"SM\"]\n\ndef load_data(name=\"full\"):\n    assert name in [\"full\", \"single_solvent\"]\n    if name == \"full\":\n        df = pd.read_csv(f'{DATA_PATH}/catechol_full_data_yields.csv')\n        X = df[[\"Residence Time\", \"Temperature\", \"SOLVENT A NAME\", \"SOLVENT B NAME\", \"SolventB%\"]]\n    else:\n        df = pd.read_csv(f'{DATA_PATH}/catechol_single_solvent_yields.csv')\n        X = \n```\nOutput:\nSpange: (26, 14)\n\n\nCell 3:\n```\n# --- LOO UTILITY FUNCTIONS (REQUIRED FOR SUBMISSION) ---\ndef generate_leave_one_out_splits(X, Y):\n    \"\"\"Leave-One-Solvent-Out for single solvent data (24 folds).\"\"\"\n    for solvent in sorted(X[\"SOLVENT NAME\"].unique()):\n        mask = X[\"SOLVENT NAME\"] != solvent\n        yield (X[mask], Y[mask]), (X[~mask], Y[~mask])\n\ndef generate_leave_one_ramp_out_splits(X, Y):\n    \"\"\"Leave-One-Ramp-Out for full data (13 folds).\"\"\"\n    ramps = X[[\"SOLVENT A NAME\", \"SOLVENT B NAME\"]].drop_duplicates()\n    for\n```\nOutput:\nLOO utility functions defined\n\n\nCell 4:\n```\n# --- BASE CLASSES ---\nclass SmilesFeaturizer(ABC):\n    def __init__(self): raise NotImplementedError\n    def featurize(self, X): raise NotImplementedError\n\nclass BaseModel(ABC):\n    def __init__(self): pass\n    def train_model(self, X_train, y_train): raise NotImplementedError\n    def predict(self): raise NotImplementedError\n```\n\nCell 5:\n```\n# --- FEATURE EXTRACTION ---\ndef get_features_single(X):\n    \"\"\"Extract features for single solvent data.\"\"\"\n    features = []\n    for _, row in X.iterrows():\n        solvent = row['SOLVENT NAME']\n        spange = Spange_dict.get(solvent, np.zeros(13))\n        feat = np.concatenate([[row['Residence Time'], row['Temperature']], spange])\n        features.append(feat)\n    return np.array(features)\n\ndef get_features_full(X):\n    \"\"\"Extract features for full (mixed solvent) data.\"\"\"\n    features = []\n```\nOutput:\nFeature extraction functions defined\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01Fhkc1fjFRF7doMNMfQcWcL",
+          "name": "ExecuteCellRange",
+          "input": {
+            "start_cell": 6,
+            "end_cell": 6,
+            "duration": 300
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Fhkc1fjFRF7doMNMfQcWcL",
+          "content": "Executed cells 6-6\n==================================================\n\nCell 6:\n```\n# --- OPTUNA OPTIMIZATION FOR SINGLE SOLVENT DATA ---\nprint(\"Running Optuna optimization for single solvent data...\")\n\nX_single, Y_single = load_data(\"single_solvent\")\nX_feat_single = get_features_single(X_single)\ny_single = Y_single.values\ngroups_single = X_single[\"SOLVENT NAME\"].values\n\ndef objective_single(trial):\n    # HGB hyperparameters (for SM - target 2)\n    hgb_depth = trial.suggest_int('hgb_depth', 3, 10)\n    hgb_lr = trial.suggest_float('hgb_lr', 0.01, 0.3, log=True)\n    hgb_iter = tr\n```\nOutput:\nRunning Optuna optimization for single solvent data...\n\n  0%|          | 0/50 [00:00<?, ?it/s]\n\nBest single solvent params: {'hgb_depth': 3, 'hgb_lr': 0.09437852301949078, 'hgb_iter': 326, 'etr_depth': 20, 'etr_n_estimators': 494, 'etr_min_samples': 8}\nBest single solvent CV (GroupKFold): 0.078348\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01NB1SrdcrcZQaQtWsvFWWWt",
+          "name": "ExecuteCellRange",
+          "input": {
+            "start_cell": 7,
+            "end_cell": 7,
+            "duration": 300
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01NB1SrdcrcZQaQtWsvFWWWt",
+          "content": "Executed cells 7-7\n==================================================\n\nCell 7:\n```\n# --- OPTUNA OPTIMIZATION FOR FULL DATA ---\nprint(\"Running Optuna optimization for full data...\")\n\nX_full, Y_full = load_data(\"full\")\nX_feat_full = get_features_full(X_full)\ny_full = Y_full.values\ngroups_full = (X_full[\"SOLVENT A NAME\"].astype(str) + \"_\" + X_full[\"SOLVENT B NAME\"].astype(str)).values\n\ndef objective_full(trial):\n    # HGB hyperparameters (for SM - target 2)\n    hgb_depth = trial.suggest_int('hgb_depth', 3, 10)\n    hgb_lr = trial.suggest_float('hgb_lr', 0.01, 0.3, log=True)\n    hg\n```\nOutput:\nRunning Optuna optimization for full data...\n\n  0%|          | 0/50 [00:00<?, ?it/s]\n\nBest full data params: {'hgb_depth': 4, 'hgb_lr': 0.19681752326845484, 'hgb_iter': 208, 'etr_depth': 6, 'etr_n_estimators': 188, 'etr_min_samples': 3}\nBest full data CV (GroupKFold): 0.083789\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01JtU7UdijyzUfUGTX2fT3ne",
+          "name": "ExecuteCellRange",
+          "input": {
+            "start_cell": 8,
+            "end_cell": 9,
+            "duration": 120
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01JtU7UdijyzUfUGTX2fT3ne",
+          "content": "Executed cells 8-9\n==================================================\n\nCell 8:\n```\n# --- OPTUNA-OPTIMIZED PER-TARGET MODEL ---\nclass OptunaPerTargetModel(BaseModel):\n    \"\"\"Per-target model with Optuna-optimized hyperparameters.\n    \n    Uses:\n    - HGB for SM (target 2) - captures gradient patterns\n    - ETR for Products (targets 0, 1) - robust to outliers\n    \"\"\"\n    \n    def __init__(self, data='single', params=None):\n        super().__init__()\n        self.data = data\n        self.params = params or {}\n        self.scaler = StandardScaler()\n        self.hgb = None\n        \n```\nOutput:\nBest single params: {'hgb_depth': 3, 'hgb_lr': 0.09437852301949078, 'hgb_iter': 326, 'etr_depth': 20, 'etr_n_estimators': 494, 'etr_min_samples': 8}\nBest full params: {'hgb_depth': 4, 'hgb_lr': 0.19681752326845484, 'hgb_iter': 208, 'etr_depth': 6, 'etr_n_estimators': 188, 'etr_min_samples': 3}\n\n\nCell 9:\n```\n# --- QUICK VALIDATION TEST ---\nprint(\"Quick test of OptunaPerTargetModel with LOO...\")\nX_test, Y_test = load_data(\"single_solvent\")\n\nerrors = []\nfor i, ((train_X, train_Y), (test_X, test_Y)) in enumerate(generate_leave_one_out_splits(X_test, Y_test)):\n    if i >= 3: break\n    solvent = test_X['SOLVENT NAME'].iloc[0]\n    model = OptunaPerTargetModel(data='single', params=best_params_single)\n    model.train_model(train_X, train_Y)\n    preds = model.predict(test_X).numpy()\n    mae = np.mean(np.abs\n```\nOutput:\nQuick test of OptunaPerTargetModel with LOO...\n\nFold 0 (1,1,1,3,3,3-Hexafluoropropan-2-ol): MAE = 0.1687\n\nFold 1 (2,2,2-Trifluoroethanol): MAE = 0.1166\n\nFold 2 (2-Methyltetrahydrofuran [2-MeTHF]): MAE = 0.0359\n\nQuick test MAE (3 folds): 0.1071\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01MrFsBXqqmpsWj3cAaZLqF2",
+          "name": "ExecuteCellRange",
+          "input": {
+            "start_cell": 10,
+            "end_cell": 12,
+            "duration": 300
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01MrFsBXqqmpsWj3cAaZLqF2",
+          "content": "Executed cells 10-12\n==================================================\n\nCell 10:\n```\n########### DO NOT CHANGE ANYTHING IN THIS CELL OTHER THAN THE MODEL #################\n########### THIS MUST BE THE THIRD LAST CELL IN YOUR NOTEBOOK FOR A VALID SUBMISSION #################\n\nimport tqdm\n\nX, Y = load_data(\"single_solvent\")\n\nsplit_generator = generate_leave_one_out_splits(X, Y)\nall_predictions = []\n\nfor fold_idx, split in tqdm.tqdm(enumerate(split_generator)):\n    (train_X, train_Y), (test_X, test_Y) = split\n\n    model = OptunaPerTargetModel(data='single', params=best_params_singl\n```\nOutput:\n\r0it [00:00, ?it/s]\n\r1it [00:00,  2.91it/s]\n\r2it [00:00,  2.86it/s]\n\r3it [00:01,  2.85it/s]\n\r4it [00:01,  2.78it/s]\n\r5it [00:01,  2.78it/s]\n\r6it [00:02,  2.84it/s]\n\r7it [00:02,  2.81it/s]\n\r8it [00:02,  2.83it/s]\n\r9it [00:03,  2.84it/s]\n\r10it [00:03,  2.86it/s]\n\r11it [00:03,  2.87it/s]\n\r12it [00:04,  2.90it/s]\n\r13it [00:04,  2.86it/s]\n\r14it [00:04,  2.87it/s]\n\r15it [00:05,  2.88it/s]\n\r16it [00:05,  2.88it/s]\n\r17it [00:05,  2.87it/s]\n\r18it [00:06,  2.84it/s]\n\r19it [00:06,  2.84it/s]\n\r20it [00:07,  2.85it/s]\n\r21it [00:07,  2.84it/s]\n\r22it [00:07,  2.84it/s]\n\r23it [00:08,  2.87it/s]\n\r24it [00:08,  2.88it/s]\n\r24it [00:08,  2.85it/s]\n\n\n\nCell 11:\n```\n########### DO NOT CHANGE ANYTHING IN THIS CELL OTHER THAN THE MODEL #################\n########### THIS MUST BE THE SECOND LAST CELL IN YOUR NOTEBOOK FOR A VALID SUBMISSION #################\n\nX, Y = load_data(\"full\")\n\nsplit_generator = generate_leave_one_ramp_out_splits(X, Y)\nall_predictions = []\n\nfor fold_idx, split in tqdm.tqdm(enumerate(split_generator)):\n    (train_X, train_Y), (test_X, test_Y) = split\n\n    model = OptunaPerTargetModel(data='full', params=best_params_full) # CHANGE THIS LINE\n```\nOutput:\n\r0it [00:00, ?it/s]\n\r1it [00:00,  4.12it/s]\n\r2it [00:00,  4.25it/s]\n\r3it [00:00,  4.17it/s]\n\r4it [00:00,  4.13it/s]\n\r5it [00:01,  4.12it/s]\n\r6it [00:01,  4.23it/s]\n\r7it [00:01,  4.16it/s]\n\r8it [00:01,  4.16it/s]\n\r9it [00:02,  4.19it/s]\n\r10it [00:02,  4.21it/s]\n\r11it [00:02,  4.30it/s]\n\r12it [00:02,  4.30it/s]\n\r13it [00:03,  4.34it/s]\n\r13it [00:03,  4.23it/s]\n\n\n\nCell 12:\n```\n########### DO NOT CHANGE ANYTHING IN THIS CELL #################\n########### THIS MUST BE THE FINAL CELL IN YOUR NOTEBOOK FOR A VALID SUBMISSION #################\n\nsubmission = pd.concat([submission_single_solvent, submission_full_data])\nsubmission = submission.reset_index()\nsubmission.index.name = \"id\"\nsubmission.to_csv(\"submission.csv\", index=True)\n\n########### DO NOT CHANGE ANYTHING IN THIS CELL #################\n########### THIS MUST BE THE FINAL CELL IN YOUR NOTEBOOK FOR A VALID SUBMISSION\n```",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01NaYAqLqQssWPHEzyt6McXz",
+          "name": "Bash",
+          "input": {
+            "command": "cd /home/code && python3 << 'EOF'\nimport numpy as np\nimport pandas as pd\n\nDATA_PATH = '/home/data'\nTARGET_LABELS = [\"Product 2\", \"Product 3\", \"SM\"]\n\ndef load_data(name=\"full\"):\n    if name == \"full\":\n        df = pd.read_csv(f'{DATA_PATH}/catechol_full_data_yields.csv')\n        X = df[[\"Residence Time\", \"Temperature\", \"SOLVENT A NAME\", \"SOLVENT B NAME\", \"SolventB%\"]]\n    else:\n        df = pd.read_csv(f'{DATA_PATH}/catechol_single_solvent_yields.csv')\n        X = df[[\"Residence Time\", \"Temperature\", \"SOLVENT NAME\"]]\n    Y = df[TARGET_LABELS]\n    return X, Y\n\ndef generate_leave_one_out_splits(X, Y):\n    for solvent in sorted(X[\"SOLVENT NAME\"].unique()):\n        mask = X[\"SOLVENT NAME\"] != solvent\n        yield (X[mask], Y[mask]), (X[~mask], Y[~mask])\n\ndef generate_leave_one_ramp_out_splits(X, Y):\n    ramps = X[[\"SOLVENT A NAME\", \"SOLVENT B NAME\"]].drop_duplicates()\n    for _, row in ramps.iterrows():\n        mask = ~((X[\"SOLVENT A NAME\"] == row[\"SOLVENT A NAME\"]) & \n                 (X[\"SOLVENT B NAME\"] == row[\"SOLVENT B NAME\"]))\n        yield (X[mask], Y[mask]), (X[~mask], Y[~mask])\n\n# Load submission\nsubmission = pd.read_csv('/home/code/submission.csv')\nsubmission_single = submission[submission['task'] == 0]\nsubmission_full = submission[submission['task'] == 1]\n\nprint(f\"Submission shape: {submission.shape}\")\nprint(f\"Single solvent folds: {submission_single['fold'].nunique()}\")\nprint(f\"Full data folds: {submission_full['fold'].nunique()}\")\n\n# Calculate single solvent CV MAE\nX_single, Y_single = load_data(\"single_solvent\")\nsingle_errors = []\nfor fold_idx, ((_, _), (test_X, test_Y)) in enumerate(generate_leave_one_out_splits(X_single, Y_single)):\n    fold_preds = submission_single[submission_single['fold'] == fold_idx]\n    pred_vals = fold_preds[['target_1', 'target_2', 'target_3']].values\n    mae = np.mean(np.abs(pred_vals - test_Y.values))\n    single_errors.append(mae)\n\nprint(f\"\\nSingle Solvent CV MAE: {np.mean(single_errors):.6f} +/- {np.std(single_errors):.6f}\")\n\n# Calculate full data CV MAE\nX_full, Y_full = load_data(\"full\")\nfull_errors = []\nfor fold_idx, ((_, _), (test_X, test_Y)) in enumerate(generate_leave_one_ramp_out_splits(X_full, Y_full)):\n    fold_preds = submission_full[submission_full['fold'] == fold_idx]\n    pred_vals = fold_preds[['target_1', 'target_2', 'target_3']].values\n    mae = np.mean(np.abs(pred_vals - test_Y.values))\n    full_errors.append(mae)\n\nprint(f\"Full Data CV MAE: {np.mean(full_errors):.6f} +/- {np.std(full_errors):.6f}\")\n\n# Combined\ntotal_single = len(submission_single)\ntotal_full = len(submission_full)\ntotal = total_single + total_full\ncombined = (np.mean(single_errors) * total_single + np.mean(full_errors) * total_full) / total\n\nprint(f\"\\n=== FINAL RESULTS (LOO with Optuna-optimized params) ===\")\nprint(f\"Single Solvent CV MAE: {np.mean(single_errors):.6f}\")\nprint(f\"Full Data CV MAE: {np.mean(full_errors):.6f}\")\nprint(f\"Combined CV MAE: {combined:.6f}\")\nprint(f\"\\n=== COMPARISON ===\")\nprint(f\"Best LOO CV (exp_004): 0.0623\")\nprint(f\"Best LB (exp_004): 0.0956\")\nprint(f\"This experiment (LOO): {combined:.6f}\")\nprint(f\"\\n=== OPTUNA RESULTS ===\")\nprint(f\"Best GroupKFold CV (single): 0.078348\")\nprint(f\"Best GroupKFold CV (full): 0.083789\")\nEOF\n"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01NaYAqLqQssWPHEzyt6McXz",
+          "content": "Submission shape: (1883, 8)\nSingle solvent folds: 24\nFull data folds: 13\n\nSingle Solvent CV MAE: 0.071862 +/- 0.033385\nFull Data CV MAE: 0.089512 +/- 0.025141\n\n=== FINAL RESULTS (LOO with Optuna-optimized params) ===\nSingle Solvent CV MAE: 0.071862\nFull Data CV MAE: 0.089512\nCombined CV MAE: 0.083363\n\n=== COMPARISON ===\nBest LOO CV (exp_004): 0.0623\nBest LB (exp_004): 0.0956\nThis experiment (LOO): 0.083363\n\n=== OPTUNA RESULTS ===\nBest GroupKFold CV (single): 0.078348\nBest GroupKFold CV (full): 0.083789\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "REASONING: The Optuna-optimized per-target model achieved LOO CV 0.0834, which is worse than exp_004's 0.0623. However, the GroupKFold CV during Optuna optimization was 0.078 (single) and 0.084 (full), which may be more realistic. Let me save this and log the experiment."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01DJHXEd88XKqd3EEsUcNpLo",
+          "name": "Bash",
+          "input": {
+            "command": "cp /home/code/submission.csv /home/submission/submission.csv && cp /home/code/submission.csv /home/code/experiments/014_optuna_pertarget/submission.csv && echo \"Submission saved\""
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01DJHXEd88XKqd3EEsUcNpLo",
+          "content": "Submission saved\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_016GB8eQuQnbbePeHd43QWsJ",
+          "name": "Bash",
+          "input": {
+            "command": "echo \"# Experiment 014: Per-Target + Optuna Optimization\n\n## Approach\n- Per-target models: HGB for SM, ExtraTrees for Products\n- Optuna hyperparameter optimization (50 trials each)\n- GroupKFold (5-fold) INTERNALLY for Optuna\n- LOO for final submission\n\n## Optuna Results\nBest single solvent params:\n- hgb_depth: 3, hgb_lr: 0.094, hgb_iter: 326\n- etr_depth: 20, etr_n_estimators: 494, etr_min_samples: 8\n- GroupKFold CV: 0.078348\n\nBest full data params:\n- hgb_depth: 4, hgb_lr: 0.197, hgb_iter: 208\n- etr_depth: 6, etr_n_estimators: 188, etr_min_samples: 3\n- GroupKFold CV: 0.083789\n\n## Final Results (LOO)\n- Single Solvent CV MAE: 0.0719 +/- 0.0334\n- Full Data CV MAE: 0.0895 +/- 0.0251\n- Combined CV MAE: 0.0834\n\n## Comparison\n- Best LOO CV (exp_004): 0.0623\n- Best LB (exp_004): 0.0956\n- This experiment (LOO): 0.0834\n\n## Analysis\n- LOO CV (0.0834) is worse than exp_004 (0.0623)\n- But GroupKFold CV during Optuna was more realistic (~0.08)\n- The Optuna-found params may generalize better to unseen solvents\n- Key insight: Optuna found shallow HGB (depth 3-4) works best\n\n## Template Compliance\n\u2705 Last 3 cells match template exactly\n\u2705 LOO validation with correct fold counts (24/13)\n\u2705 'row' column included\n\" > /home/code/experiments/014_optuna_pertarget/notes.md"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_016GB8eQuQnbbePeHd43QWsJ",
+          "content": "(no output)",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01B3ay8eVDuTxYVQw4oq6qNe",
+          "name": "LogExperiment",
+          "input": {
+            "name": "exp_014: Per-Target + Optuna Optimization",
+            "model_type": "Optuna-optimized HGB + ExtraTrees (Per-Target)",
+            "score": 0.0834,
+            "notes": "Per-target models with Optuna hyperparameter optimization (50 trials). HGB for SM, ETR for Products. Best params: HGB depth=3-4, lr=0.09-0.20; ETR depth=6-20, n_estimators=188-494. GroupKFold CV during Optuna: 0.078 (single), 0.084 (full). Final LOO CV: 0.0834 (worse than exp_004's 0.0623). Key insight: Optuna found shallow HGB works best. The Optuna-found params may generalize better despite worse LOO CV.",
+            "experiment_folder": "experiments/014_optuna_pertarget",
+            "submission_path": "/home/submission/submission.csv"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01B3ay8eVDuTxYVQw4oq6qNe",
+          "content": "Transitioning to next phase",
+          "is_error": false
         }
       ]
     }
@@ -1410,6 +1759,15 @@
       "notes": "CRITICAL FIX: Reverted to LOO validation (24 folds task 0, 13 folds task 1). exp_012 FAILED because GroupKFold changed fold structure. Results: Single CV 0.0670, Full CV 0.0911, Combined 0.0827. This is worse than exp_004 (0.0623) but MLP+GBDT ensemble may generalize better. Model: MLP [128,64,32] NO Sigmoid + XGB + RF + LGB with weights [0.4,0.2,0.2,0.2]. Template compliant with correct fold counts.",
       "experiment_folder": "experiments/013_loo_ensemble",
       "timestamp": "2026-01-14T04:01:33.274479"
+    },
+    {
+      "id": "exp_013",
+      "name": "exp_014: Per-Target + Optuna Optimization",
+      "model_type": "Optuna-optimized HGB + ExtraTrees (Per-Target)",
+      "score": 0.0834,
+      "notes": "Per-target models with Optuna hyperparameter optimization (50 trials). HGB for SM, ETR for Products. Best params: HGB depth=3-4, lr=0.09-0.20; ETR depth=6-20, n_estimators=188-494. GroupKFold CV during Optuna: 0.078 (single), 0.084 (full). Final LOO CV: 0.0834 (worse than exp_004's 0.0623). Key insight: Optuna found shallow HGB works best. The Optuna-found params may generalize better despite worse LOO CV.",
+      "experiment_folder": "experiments/014_optuna_pertarget",
+      "timestamp": "2026-01-14T04:12:37.138721"
     }
   ],
   "submissions": [
@@ -1532,6 +1890,13 @@
       "model_name": "exp_013: LOO Ensemble (Fixed Fold Structure)",
       "experiment_id": "exp_012",
       "timestamp": "2026-01-14T04:01:33.279523"
+    },
+    {
+      "file_path": "/home/code/submission_candidates/candidate_013.csv",
+      "score": 0.0834,
+      "model_name": "exp_014: Per-Target + Optuna Optimization",
+      "experiment_id": "exp_013",
+      "timestamp": "2026-01-14T04:12:37.144549"
     }
   ],
   "findings": [],
@@ -1966,5 +2331,5 @@
   "last_submitted_experiment_idx": 12,
   "start_time": "2026-01-13T23:41:38.130578",
   "time_limit_minutes": 2100,
-  "_saved_at": "2026-01-14T04:07:05.453949"
+  "_saved_at": "2026-01-14T04:12:37.287064"
 }
