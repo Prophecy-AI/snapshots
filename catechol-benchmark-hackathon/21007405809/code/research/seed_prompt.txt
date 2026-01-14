@@ -1,33 +1,86 @@
 ## Current Status
-- Best CV: 0.008465 (exp_026 - MLP+LGBM Ensemble)
-- Recent: 
-  - exp_031 (CatBoost Top 10): 0.009984 (18% worse)
-  - exp_032 (CatBoost Logit): 0.013903 (39% worse)
-- Conclusion: Logit transform failed. Top 10 features was too aggressive (underfitting).
+- Best CV: 0.008465 (exp_026 - Weighted Loss MLP+LGBM)
+- Best LB: 0.0887 (exp_026)
+- Target: 0.0347
+- CV-LB gap: ~10.5x (linear fit: LB = 4.25*CV + 0.053)
+- Submissions remaining: 5
 
 ## Response to Evaluator
-- Evaluator suggested "Top 20 features".
-- I will try **All Spange (13) + Kinetics (4) + SolventB% (1) = 18 features**.
-- This is a middle ground between the underfitting Top 10 and the potentially overfitting 145 features.
-- I will also implement **Clipping [0,1]** as requested.
+- Technical verdict was TRUSTWORTHY. The CatBoost 18 features experiment was correctly implemented.
+- Evaluator's top priority was Logit Transform. I DISAGREE - we already tried Logit transform in exp_032 and it made things 39% WORSE (CV 0.013903 vs 0.009984). The evaluator keeps suggesting this but it has been proven to fail.
+- Key concern: Adding features (18 vs 10) made CatBoost WORSE (0.010983 vs 0.009984). This confirms CatBoost is not the right model for this problem.
 
-## Recommended Approaches
-1. **CatBoost with All Spange + Kinetics (18 Features)**
-   - Features: 
-     - Kinetics: `Time`, `Temp`, `1000/T`, `1000/T*ln(t)`
-     - Spange: All 13 descriptors (linearly mixed for mixtures)
-     - Composition: `SolventB%` (0 for single, actual % for mixed)
-   - Model: CatBoostRegressor (RMSE loss, depth=6, lr=0.05, iterations=1000)
-   - Post-processing: Clip predictions to [0, 1]
-   - Validation: LOO (Single) + LORO (Full)
-   - **Important**: For single solvent data, manually add `SolventB%` column with all zeros.
+## CRITICAL INSIGHT
+The CV-LB linear fit shows:
+- LB = 4.25 * CV + 0.053
+- R² = 0.96 (very strong fit)
+- **The intercept (0.053) is HIGHER than target (0.0347)**
+
+This means even with PERFECT CV (0.0), the predicted LB would be 0.053, which is ABOVE the target. The linear relationship suggests we CANNOT hit the target by improving CV alone. We need a fundamentally different approach that changes the CV-LB relationship.
+
+## Key Observations from Kaggle Kernels
+The "mixall" kernel (8 votes, claims "good CV/LB") uses:
+1. **GroupKFold (5 splits) instead of LOO** - This is a different validation scheme
+2. **Ensemble of MLP + XGBoost + RandomForest + LightGBM**
+3. **Optuna for hyperparameter tuning**
+
+The key insight: They OVERRIDE the validation functions to use GroupKFold instead of LOO!
+
+## Hypothesis
+Our LOO validation is TOO OPTIMISTIC. It gives us CV scores that don't translate to LB. The competition evaluation might use a different validation scheme (possibly GroupKFold or similar). By using GroupKFold locally, we might get CV scores that better correlate with LB.
+
+## Recommended Approaches (Priority Order)
+
+### 1. **GroupKFold Validation Experiment** (HIGHEST PRIORITY)
+- Override `generate_leave_one_out_splits` and `generate_leave_one_ramp_out_splits` to use GroupKFold (5 splits)
+- Use the SAME model as exp_026 (MLP+LGBM ensemble with weighted loss)
+- Compare the new CV score with the old LOO CV score
+- **Hypothesis**: GroupKFold CV will be HIGHER (worse) than LOO CV, but will better correlate with LB
+
+### 2. **Simpler Model with GroupKFold**
+- If GroupKFold shows promise, try even simpler models
+- The goal is to find a model that has LOWER CV-LB gap, not necessarily lower CV
+- A model with CV 0.02 but LB 0.03 is BETTER than CV 0.008 but LB 0.09
+
+### 3. **Ensemble Diversity with GroupKFold**
+- Use the "mixall" approach: MLP + XGBoost + RandomForest + LightGBM
+- Weighted ensemble with Optuna tuning
+- GroupKFold validation
 
 ## What NOT to Try
-- Logit transform (proven to degrade performance)
-- Reducing features further (Top 10 was too few)
-- Complex Deep Learning (failed previously)
+- Logit transform (FAILED in exp_032, 39% worse)
+- CatBoost with more features (FAILED in exp_033, 30% worse)
+- Gaussian Process (FAILED in exp_030, 101% worse)
+- Post-processing normalization (FAILED in exp_029, 91% worse)
+- Per-target models (FAILED in exp_025, 7% worse)
 
 ## Validation Notes
-- Compare strictly against exp_031 (0.0099) and exp_026 (0.0084).
-- If CV < 0.0095, this is a strong candidate for ensembling.
-- **DO NOT SUBMIT** (0 submissions remaining). Focus on CV improvement.
+- Current LOO CV is ~10x optimistic compared to LB
+- GroupKFold (5 splits) might give more realistic CV estimates
+- The competition might evaluate differently than our LOO scheme
+- Focus on reducing CV-LB gap, not just improving CV
+
+## Implementation Notes
+The validation functions can be overridden like this:
+```python
+from sklearn.model_selection import GroupKFold
+
+def generate_leave_one_out_splits(X, Y):
+    groups = X["SOLVENT NAME"]
+    n_splits = min(5, len(groups.unique()))
+    gkf = GroupKFold(n_splits=n_splits)
+    for train_idx, test_idx in gkf.split(X, Y, groups):
+        yield (X.iloc[train_idx], Y.iloc[train_idx]), (X.iloc[test_idx], Y.iloc[test_idx])
+
+def generate_leave_one_ramp_out_splits(X, Y):
+    groups = X["SOLVENT A NAME"].astype(str) + "_" + X["SOLVENT B NAME"].astype(str)
+    n_splits = min(5, len(groups.unique()))
+    gkf = GroupKFold(n_splits=n_splits)
+    for train_idx, test_idx in gkf.split(X, Y, groups):
+        yield (X.iloc[train_idx], Y.iloc[train_idx]), (X.iloc[test_idx], Y.iloc[test_idx])
+```
+
+## Success Criteria
+- If GroupKFold CV is closer to LB (e.g., CV 0.05 vs LB 0.06), we have found the right validation scheme
+- Then we can optimize for GroupKFold CV, which should translate better to LB
+- Target: Find a model where GroupKFold CV < 0.04 (which should give LB < 0.05)
