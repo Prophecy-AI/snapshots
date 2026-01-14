@@ -1,0 +1,55 @@
+## What I Understood
+The researcher attempted to improve on the "Top 10 Features" CatBoost model (CV 0.009984) by adding more features (18 total: 13 Spange + 4 Kinetics + SolventB%), hypothesizing that 10 features were underfitting. They also implemented prediction clipping to [0, 1].
+
+## Technical Execution Assessment
+[TRUSTWORTHY]
+
+**Validation**: Sound. The LOO/LORO split logic is correct and consistent with previous experiments.
+**Leakage Risk**: Low. Features are standard descriptors and kinetics.
+**Score Integrity**: Verified. The notebook calculates `Overall MSE: 0.010983`.
+**Code Quality**: Good. The implementation is clean.
+
+Verdict: **TRUSTWORTHY**.
+
+## Strategic Assessment
+[NEEDS PIVOT]
+
+**Approach Fit**: The hypothesis that "more features = better" failed here. The 18-feature model (CV 0.010983) performed *worse* than the 10-feature model (CV 0.009984). This strongly suggests that the extra Spange descriptors are adding noise or that the model is overfitting to them given the small dataset size.
+**Effort Allocation**: You correctly identified that the previous model might be underfitting, but the solution (adding raw Spange descriptors) didn't work. The *real* issue likely isn't the *number* of features, but the *representation* of the target.
+**Assumptions**: You are still training on raw Yields with RMSE. As noted in the previous review, this is suboptimal for bounded [0,1] data with sigmoidal kinetics.
+**Blind Spots**:
+1.  **Target Transform**: You ignored the previous advice to use a Logit transform. This is a critical missed opportunity. The physics of reaction rates are exponential/sigmoidal, not linear.
+2.  **Feature Interactions**: CatBoost handles interactions well, but providing explicit kinetic features (`1000/T`, `ln(t)`) is good. The failure of the extra Spange features suggests they aren't predictive *in this form* or for this specific task.
+
+**Trajectory**: You are hill-climbing on feature selection but missing the structural change (Target Transform) that could unlock better performance.
+
+## What's Working
+- **Clipping**: You implemented clipping to [0, 1], which is good practice.
+- **Robust Baseline**: You have a fast, stable CatBoost pipeline.
+
+## Key Concerns
+- **Observation**: Adding features increased error (0.0099 -> 0.0109).
+- **Why it matters**: This confirms that the dataset is small enough that even 8 extra features can induce overfitting or noise.
+- **Suggestion**: Revert to the sparser feature set (Top 10 or similar) but change the *learning objective*.
+
+- **Observation**: Still using RMSE on raw yields.
+- **Why it matters**: The model has to "learn" the sigmoid shape and the [0,1] bounds. A Logit transform enforces these constraints by definition.
+- **Suggestion**: **CRITICAL**: Implement the Logit transform.
+
+## Top Priority for Next Experiment
+**Physics-Aligned CatBoost: Logit Transform**
+
+1.  **Target Transform**:
+    -   **Pre-processing**: `y_logit = log(y / (1 - y))`
+        -   *Crucial*: Clip `y` to `[0.001, 0.999]` *before* the transform to avoid infinities.
+    -   **Training**: Train CatBoost on `y_logit` with `loss_function='RMSE'`.
+    -   **Post-processing**: `y_pred = sigmoid(pred_logit)` (where `sigmoid(x) = 1 / (1 + exp(-x))`).
+    -   **Why**: This transforms the bounded, non-linear yield prediction problem into an unbounded, roughly linear regression problem (relative to Arrhenius parameters), which is much easier for trees to learn.
+
+2.  **Features**:
+    -   Revert to the **Top 10 Features** (or the specific subset that worked best in exp_031). Do not use the full Spange set if it degrades performance.
+
+3.  **Hyperparameters**:
+    -   Keep the robust settings (Depth 6, lr 0.05) but maybe increase `l2_leaf_reg` slightly (e.g., 3 to 5) to further regularize.
+
+**Hypothesis**: The Logit transform is the "missing link" that will allow the tree model to generalize better by removing the need to learn the hard [0,1] boundaries from data.
