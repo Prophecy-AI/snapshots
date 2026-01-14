@@ -1,97 +1,129 @@
 ## Current Status
-- Best CV score: 0.0623 from exp_004/016/017/018 (HGB+ETR per-target with Spange descriptors)
+- Best CV score: 0.0623 from exp_004/016/017 (HGB+ETR per-target with Spange descriptors)
 - Best LB score: 0.0956 from exp_004/016
-- CV-LB gap: +53% → Test set has fundamentally different solvents
+- CV-LB gap: +50% (consistent across ALL models)
 - Target: 0.01727 (5.5x away from best LB)
-- Submissions remaining: 2
+- Submissions remaining: 2 (CRITICAL - use wisely!)
 
 ## Response to Evaluator
-- Technical verdict was CONCERNS due to template compliance (14 cells after "FINAL CELL"). AGREED.
-- Evaluator's top priority: DO NOT SUBMIT exp_020, return to exp_004 architecture. AGREED.
+- Technical verdict was TRUSTWORTHY for exp_021. AGREED.
+- Evaluator's top priority: DO NOT SUBMIT exp_021 (CV 0.0809 is 30% worse than best). AGREED.
 - Key concerns raised:
-  1. GNN CV 0.099 is 59% worse than best (0.0623) - CONFIRMED
-  2. Basic GNN with 24 solvents has insufficient data - CONFIRMED
-  3. Template compliance violated - CONFIRMED
-- How I'm addressing: Recommending return to proven architecture with focus on generalization
+  1. Regularization made CV worse (0.0623 → 0.0809) - CONFIRMED
+  2. The CV-LB gap is NOT from overfitting - it's from test solvents being chemically different - AGREED
+  3. Need fundamentally different approach - AGREED
+- How I'm addressing: Recommending approaches that improve EXTRAPOLATION to unseen solvents
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop20_analysis.ipynb` for strategic analysis
+- Reference notebooks: See `exploration/evolver_loop21_analysis.ipynb` for strategic analysis
 - Key patterns:
-  1. CV-LB gap is CONSISTENT at ~53% across ALL models (exp_004, exp_006, exp_016)
-  2. GNN failed because 24 solvents is insufficient for learning molecular patterns
-  3. Research shows pre-trained GNNs + fine-tuning work, but basic GNN doesn't
-  4. Best approach remains HGB+ETR per-target with Spange descriptors
+  1. CV-LB gap is CONSISTENT at ~50% across ALL models - this is DATA-specific, not model-specific
+  2. To reach target LB 0.01727 with 50% gap, need CV ~0.0115 (82% improvement from 0.0623)
+  3. GroupKFold CANNOT be used - exp_011 failed due to fold structure mismatch
+  4. Stronger regularization HURT performance (exp_021 CV 0.0809 vs exp_004 CV 0.0623)
 
-## Critical Analysis: Why GNN Failed
-1. **Insufficient data**: Only 24 unique solvents - GNN needs thousands to learn patterns
-2. **No pre-training**: Paper's success was with pre-trained representations
-3. **Mixed solvent handling**: Only used Solvent A's graph, ignored Solvent B
-4. **Basic architecture**: 3-layer GCN is too simple for this task
+## Critical Analysis: Why We're Stuck
+
+### The Math Problem
+- Best CV: 0.0623
+- Best LB: 0.0956
+- Target LB: 0.01727
+- Gap to close: 0.0956 → 0.01727 = 5.5x improvement needed
+
+### What We've Tried (21 experiments)
+1. ✅ Per-target models (HGB+ETR) - Best CV 0.0623
+2. ✅ MLP + GBDT ensembles - CV 0.0669-0.0827
+3. ✅ Gaussian Process - CV 0.0721
+4. ✅ GNN (basic) - CV 0.099 (FAILED)
+5. ✅ Regularization (stronger) - CV 0.0809 (WORSE)
+6. ✅ Different feature sets (Spange, ACS_PCA, DRFP) - Spange best
+7. ✅ TTA (flip augmentation) - Hurt full data performance
+8. ❌ GroupKFold - Submission error
 
 ## Recommended Approaches
 
-### PRIORITY 1: Ensemble of Best Models for Better Generalization
-**Why:** Diversity may reduce CV-LB gap. Different models capture different patterns.
+### PRIORITY 1: Pre-trained Molecular Embeddings (HIGH RISK, HIGH REWARD)
+**Why:** The 50% CV-LB gap suggests test solvents are chemically different. Pre-trained embeddings capture chemical knowledge from millions of molecules.
 
 **Implementation:**
 ```python
-class EnsembleModel(BaseModel):
+# Option A: Use RDKit fingerprints with similarity weighting
+from rdkit import Chem
+from rdkit.Chem import AllChem, DataStructs
+
+def get_morgan_fingerprint(smiles, radius=2, nBits=2048):
+    mol = Chem.MolFromSmiles(smiles)
+    return AllChem.GetMorganFingerprintAsBitVect(mol, radius, nBits=nBits)
+
+# Option B: Use pre-computed embeddings if available
+# Check if ChemBERTa or similar embeddings are in the data
+```
+
+### PRIORITY 2: Solvent Similarity-Weighted Predictions
+**Why:** If test solvents are similar to some training solvents, weight predictions accordingly.
+
+**Implementation:**
+```python
+class SimilarityWeightedModel(BaseModel):
+    def predict(self, X):
+        # For each test sample, find most similar training solvents
+        # Weight predictions by similarity
+        similarities = compute_tanimoto_similarity(test_solvent, train_solvents)
+        weights = softmax(similarities / temperature)
+        pred = sum(w * model_pred for w, model_pred in zip(weights, per_solvent_preds))
+        return pred
+```
+
+### PRIORITY 3: Ensemble of DIVERSE Model Types
+**Why:** Different model types may capture different patterns. Diversity reduces variance.
+
+**Implementation:**
+```python
+class DiverseEnsemble(BaseModel):
     def __init__(self, data='single'):
         self.models = [
-            PerTargetModel(data),  # exp_004 architecture
-            DiverseEnsembleModel(data),  # exp_008 architecture
-            MLPGBDTEnsemble(data),  # exp_009 architecture
+            PerTargetModel(data),      # exp_004 architecture (best CV)
+            MLPModel(data),            # Neural network
+            GaussianProcessModel(data), # Uncertainty-aware
+            RandomForestModel(data),   # Tree-based
         ]
-        self.weights = [0.5, 0.25, 0.25]  # Weight best model higher
-    
-    def train_model(self, X_train, y_train):
-        for model in self.models:
-            model.train_model(X_train, y_train)
-    
-    def predict(self, X):
-        preds = [m.predict(X) for m in self.models]
-        return sum(w * p for w, p in zip(self.weights, preds))
+        self.weights = [0.4, 0.2, 0.2, 0.2]  # Weight best model higher
 ```
 
-### PRIORITY 2: Stronger Regularization on Best Architecture
-**Why:** exp_006 had smaller CV-LB gap (44% vs 53%) with more regularization.
-
-**Changes from exp_004:**
-- Reduce max_depth from 10 to 6-7
-- Increase min_samples_leaf from 2 to 5
-- Add L2 regularization to MLP components
-- Use dropout 0.3-0.4 instead of 0.2
-
-### PRIORITY 3: Feature Selection for Generalization
-**Why:** Some features may overfit to training solvents.
-
-**Approach:**
-- Use only Spange descriptors (most generalizable)
-- Remove ACS descriptors (may be solvent-specific)
-- Add only physics-based features (Arrhenius kinetics)
-- Avoid high-dimensional features (DRFP)
-
-### PRIORITY 4: Uncertainty-Weighted Predictions
-**Why:** Predictions with high uncertainty should be regularized toward mean.
+### PRIORITY 4: Uncertainty-Aware Predictions
+**Why:** High-uncertainty predictions should be regularized toward mean.
 
 **Implementation:**
 ```python
-# Use GP or ensemble variance to estimate uncertainty
-# Blend predictions toward mean for high-uncertainty samples
-pred_final = alpha * pred_model + (1 - alpha) * mean_target
-# where alpha = 1 / (1 + uncertainty)
+# Use ensemble variance as uncertainty estimate
+pred_mean = np.mean([m.predict(X) for m in models], axis=0)
+pred_std = np.std([m.predict(X) for m in models], axis=0)
+
+# Blend toward global mean for high-uncertainty samples
+alpha = 1 / (1 + pred_std * uncertainty_scale)
+pred_final = alpha * pred_mean + (1 - alpha) * global_mean
 ```
 
+### PRIORITY 5: Physics-Informed Features
+**Why:** Arrhenius kinetics features helped in top kernels. Add more physics-based features.
+
+**Additional features to try:**
+- Hildebrand solubility parameter
+- Hansen solubility parameters (dispersion, polar, hydrogen bonding)
+- Dielectric constant
+- Viscosity
+- Boiling point
+
 ## What NOT to Try
-- ❌ exp_020 submission - CV 0.099 is much worse than baseline
-- ❌ Basic GNN without pre-training - insufficient data
-- ❌ More tree-based hyperparameter tuning - ceiling reached
-- ❌ DRFP features - exp_017 showed they hurt performance
-- ❌ GroupKFold validation - changes fold structure, causes submission errors
-- ❌ Complex architectures - more parameters = more overfitting
+- ❌ exp_021 submission - CV 0.0809 is much worse than baseline
+- ❌ More regularization - already proven to hurt performance
+- ❌ Basic GNN without pre-training - insufficient data (24 solvents)
+- ❌ GroupKFold validation - causes submission errors
+- ❌ DRFP features alone - exp_018 showed they don't help
+- ❌ Hyperparameter tuning on current architecture - ceiling reached
 
 ## Validation Notes
-- Use LOO validation (24 folds for single, 13 for full) - required by template
+- Use LOO validation (24 folds for single, 13 for full) - REQUIRED by template
 - CV-LB gap is ~50%, so CV 0.06 → LB ~0.09
 - To reach target (0.01727), need CV ~0.011 (assuming 50% gap)
 - Focus on approaches that REDUCE the CV-LB gap, not just CV
@@ -100,35 +132,35 @@ pred_final = alpha * pred_model + (1 - alpha) * mean_target
 ```python
 # Last 3 cells MUST remain exactly as template
 # Only change: model = YourModel(data='single')  # or 'full'
-# Notebook must have EXACTLY 11 cells (or fewer) with last 3 being template cells
+# Notebook must have EXACTLY 10 cells (or fewer) with last 3 being template cells
 # DO NOT add cells after the "FINAL CELL"
 ```
 
-## Submission Strategy
-- DO NOT submit exp_020 - it's worse than baseline
-- If new experiment achieves CV < 0.055, submit immediately
-- If CV is similar to 0.0623 but approach is fundamentally different, consider submitting
-- Save last submission for best performing approach
-
-## Key Insight from Research
-For small molecular datasets (20-30 molecules), the best approaches are:
-1. **Pre-trained GNN + fine-tuning** (not available without external data)
-2. **SOAP + simple descriptors + gradient boosting** (hybrid approach)
-3. **Task similarity estimation** to avoid negative transfer
-
-Since we can't use pre-trained models, focus on:
-- Robust descriptor-based learners (Spange descriptors work well)
-- Strong regularization to prevent overfitting
-- Ensemble diversity for better generalization
+## Submission Strategy (2 REMAINING)
+1. **DO NOT submit exp_021** - CV 0.0809 is 30% worse than best
+2. **Only submit if:**
+   - CV < 0.055 (significant improvement) OR
+   - Fundamentally different approach with similar CV that might generalize better
+3. **Save last submission for best candidate**
 
 ## The Path Forward
-The 53% CV-LB gap is the fundamental problem. To close it:
-1. Use simpler models with stronger regularization
-2. Focus on generalizable features (physics-based, not solvent-specific)
-3. Ensemble diverse models for robustness
-4. Accept that CV will be higher but LB may be better
 
-**Remember:** A model with CV 0.07 and 30% gap (LB 0.091) is BETTER than a model with CV 0.06 and 53% gap (LB 0.092)!
+### Reality Check
+The target (0.01727) is 5.5x better than our best LB (0.0956). This is an ENORMOUS gap. To close it:
+1. Need CV ~0.0115 (if 50% gap holds) - 82% improvement from current 0.0623
+2. OR need to reduce CV-LB gap to ~10% with CV ~0.019
+
+### Most Promising Direction
+**Pre-trained molecular representations** are the most likely path to breakthrough:
+- They capture chemical knowledge from millions of molecules
+- They can generalize to unseen solvents
+- They've been shown to work in similar OOD scenarios (see web research findings)
+
+### Backup Plan
+If pre-trained embeddings don't work:
+1. Try solvent similarity weighting
+2. Try uncertainty-aware predictions
+3. Ensemble diverse models with careful weighting
 
 ## 🚨 CRITICAL COMPETITION-SPECIFIC RULES 🚨
 
@@ -144,3 +176,7 @@ The 53% CV-LB gap is the fundamental problem. To close it:
 - Hyper-parameters must be SAME across every fold (unless clear rationale exists)
 - Test: "If I had to predict a NEW unseen solvent, would this method work without knowing results?"
 - DO NOT use any features derived from solvent-specific statistics computed on full data
+
+**VALIDATION:**
+- Must use LOO validation (24 folds single, 13 folds full)
+- GroupKFold CANNOT be used - causes submission errors
