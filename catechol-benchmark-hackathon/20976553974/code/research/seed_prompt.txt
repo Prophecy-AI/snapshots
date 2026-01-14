@@ -1,4 +1,4 @@
-# Catechol Reaction Yield Prediction - Seed Prompt (Loop 8)
+# Catechol Reaction Yield Prediction - Seed Prompt (Loop 9)
 
 ## Current Status
 - **Best CV score**: 0.0623 from exp_004 (PerTarget HGB+ETR NO TTA)
@@ -9,90 +9,106 @@
 
 ## Response to Evaluator
 
-**Technical verdict was TRUSTWORTHY.** The evaluator correctly verified the GP experiment.
+**Technical verdict was TRUSTWORTHY.** The evaluator correctly verified the diverse ensemble experiment.
 
-**Evaluator's top priority**: Submit exp_006 to test regularization hypothesis.
-- **DONE**: We submitted exp_006 and got LB 0.0991 (WORSE than exp_004's 0.0956)
-- **CRITICAL INSIGHT**: More regularization made LB WORSE! This means:
-  1. The problem is NOT traditional overfitting
-  2. We need BETTER features that generalize to new solvents
-  3. Simpler models lose signal without reducing the gap
+**Evaluator's top priority**: Try GroupKFold (5-fold) validation like top kernel.
+- **AGREE**: This is a key difference from top kernels. However, I want to first try adding MLP to the ensemble since that's the more impactful change.
 
 **Key concerns raised by evaluator**:
-1. GP underperforms on CV - CONFIRMED (0.0721 vs 0.0623)
-2. Kernel choice for GP - Valid concern, but GP alone won't beat target
-3. Gap to target remains enormous - TRUE, need fundamentally different approach
+1. GroupKFold vs Leave-One-Out - Valid concern, but MLP is higher priority
+2. Ensemble CV is worse than per-target alone - TRUE, need to investigate why
+3. Fixed weights may be suboptimal - AGREE, should try Optuna
 
-**My synthesis**: The regularization experiment was valuable - it DISPROVED the overfitting hypothesis. We now know we need BETTER features and model diversity, not simpler models.
+**My synthesis**: The diverse ensemble (exp_009) had WORSE CV than per-target (exp_004). This suggests:
+1. The fixed weights [0.4,0.2,0.2,0.2] are suboptimal
+2. We're missing MLP which is a key component in top kernels
+3. Combined features may be causing overfitting
 
 ## Data Understanding
 
 **Reference notebooks:**
 - `exploration/eda.ipynb` - Basic data characteristics
 - `exploration/evolver_loop5_lb_feedback.ipynb` - CV-LB gap analysis
-- `exploration/evolver_loop6_analysis.ipynb` - GroupKFold vs LOO, feature analysis
-- `exploration/evolver_loop7_analysis.ipynb` - GP analysis, hardest solvents
 - `exploration/evolver_loop8_lb_feedback.ipynb` - Regularization disproved overfitting hypothesis
+- `exploration/evolver_loop9_analysis.ipynb` - Top kernel analysis, MLP importance
 
 **Key patterns to exploit:**
-1. **Per-target models work** - HGB for SM, ETR for Products (exp_004 best CV)
-2. **TTA hurts performance** - Removing TTA improved full data MAE by 33%
-3. **Combined features best** - DRFP-PCA(15) + Spange + ACS_PCA
-4. **Hardest solvents**: HFIP, Cyclohexane, Water - chemically unique
+1. **Top kernel uses MLP** - We're missing this critical component
+2. **Spange descriptors only** - Top kernel uses simpler features
+3. **Learned weights** - Optuna finds optimal ensemble weights
+4. **Per-target models work** - HGB for SM, ETR for Products (exp_004 best CV)
 
 ## Recommended Approaches
 
-### Priority 1: ENSEMBLE OF DIVERSE MODEL FAMILIES (HIGH IMPACT)
-**Why**: Top kernels (lishellliang) use MLP + XGBoost + RF + LightGBM ensemble with learned weights. We haven't tried combining fundamentally different model families.
+### Priority 1: MLP + GBDT ENSEMBLE (HIGH IMPACT)
+**Why**: Top kernel (lishellliang) uses MLP + XGBoost + RF + LightGBM. We're missing MLP which captures non-linear patterns that trees miss.
 
 **Implementation**:
 ```python
-# Combine predictions from diverse models
-class DiverseEnsemble(BaseModel):
+class MLPGBDTEnsemble(BaseModel):
     def __init__(self, data='single'):
-        self.models = [
-            PerTargetModel(data),  # Our best CV model (HGB+ETR)
-            RandomForestModel(data),  # Different model family
-            XGBModel(data),        # Gradient boosting
-            LGBModel(data),        # Another gradient boosting variant
-        ]
-        self.weights = [0.4, 0.2, 0.2, 0.2]  # Tune these
+        self.mlp = EnhancedMLP(input_dim, output_dim=3)
+        self.xgb = MultiOutputRegressor(XGBRegressor(...))
+        self.rf = MultiOutputRegressor(RandomForestRegressor(...))
+        self.lgb = MultiOutputRegressor(LGBMRegressor(...))
+        self.weights = [0.35, 0.25, 0.25, 0.15]  # MLP, XGB, RF, LGB
     
     def predict(self, X):
-        preds = [m.predict(X) for m in self.models]
-        return sum(w * p for w, p in zip(self.weights, preds))
+        mlp_pred = self.mlp(X)
+        xgb_pred = self.xgb.predict(X)
+        rf_pred = self.rf.predict(X)
+        lgb_pred = self.lgb.predict(X)
+        return sum(w * p for w, p in zip(self.weights, [mlp_pred, xgb_pred, rf_pred, lgb_pred]))
 ```
 
-### Priority 2: STACKING/BLENDING (MEDIUM IMPACT)
-**Why**: Use predictions from multiple models as features for a meta-learner. This can capture complementary patterns.
+**Key MLP architecture (from top kernel)**:
+- Hidden dims: [128, 64, 32]
+- BatchNorm + ReLU + Dropout(0.2) after each layer
+- Sigmoid output (yields are 0-1)
+- Adam optimizer with lr=5e-4, weight_decay=1e-5
+- ReduceLROnPlateau scheduler
+
+### Priority 2: SIMPLIFY FEATURES (MEDIUM IMPACT)
+**Why**: Top kernel uses Spange descriptors only. Our combined features (Spange + ACS_PCA + DRFP) may be causing overfitting.
 
 **Implementation**:
-- Train base models on training data
-- Generate OOF predictions
-- Train meta-learner (Ridge/XGB) on stacked predictions
-- Final prediction = meta-learner(base_predictions)
+- Try Spange-only features first
+- If that works, compare with combined features
+- Simpler features may generalize better to unseen solvents
 
-### Priority 3: FEATURE ENGINEERING FOR GENERALIZATION (MEDIUM IMPACT)
-**Why**: The test set has chemically unique solvents. We need features that capture chemical similarity better.
+### Priority 3: OPTUNA FOR ENSEMBLE WEIGHTS (MEDIUM IMPACT)
+**Why**: Fixed weights [0.4,0.2,0.2,0.2] are suboptimal. Optuna can find optimal weights.
 
-**Ideas**:
-- Interaction features: temp * solvent_polarity, time * solvent_viscosity
-- Arrhenius kinetics: 1/T, ln(t), exp(-Ea/RT)
-- Chemical distance features: distance to nearest training solvent
+**Implementation**:
+```python
+def objective(trial):
+    w_mlp = trial.suggest_float('w_mlp', 0.1, 1.0)
+    w_xgb = trial.suggest_float('w_xgb', 0.1, 1.0)
+    w_rf = trial.suggest_float('w_rf', 0.1, 1.0)
+    w_lgb = trial.suggest_float('w_lgb', 0.1, 1.0)
+    total = w_mlp + w_xgb + w_rf + w_lgb
+    weights = [w_mlp/total, w_xgb/total, w_rf/total, w_lgb/total]
+    # Train and evaluate with these weights
+    return cv_score
+```
+
+### Priority 4: STACKING WITH META-LEARNER (LOWER PRIORITY)
+**Why**: If weighted averaging doesn't work, try stacking where a meta-learner combines base model predictions.
 
 ## What NOT to Try
 
 1. **More regularization** - DISPROVED by exp_006 (made LB worse)
-2. **Simpler models** - Ridge (exp_005) had worst CV (0.0896)
+2. **Simpler models alone** - Ridge (exp_005) had worst CV (0.0896)
 3. **GP alone** - CV worse than tree-based (0.0721 vs 0.0623)
 4. **TTA** - Hurts performance on mixed solvents
+5. **PerTarget + RF/XGB/LGB without MLP** - exp_009 showed this doesn't help
 
 ## Validation Notes
 
 - **CV scheme**: Leave-one-solvent-out for single, leave-one-ramp-out for full
 - **CV-LB gap**: ~50% (0.0623 → 0.0956) - test set has unique solvents
 - **Calibration**: CV improvements may not translate to LB improvements
-- **Strategy**: Focus on model diversity and feature generalization, not CV optimization
+- **Strategy**: Focus on MLP + GBDT ensemble like top kernel
 
 ## Competition-Specific Constraints (MUST FOLLOW)
 
@@ -119,18 +135,28 @@ submission.to_csv("submission.csv", index=True)
 
 ## Next Experiment Recommendation
 
-**Experiment 009: Diverse Ensemble**
-- Combine PerTarget (best CV) + RandomForest + XGBoost + LightGBM
-- Use weighted averaging with tuned weights (start with [0.4, 0.2, 0.2, 0.2])
-- Use combined features (Spange + Arrhenius kinetics)
-- Focus on model diversity, not individual model optimization
-- Expected CV: ~0.065 (may be slightly worse than best)
-- Expected LB: Potentially better due to diversity
+**Experiment 010: MLP + GBDT Ensemble (Like Top Kernel)**
 
-**Rationale**: The regularization experiment showed that simpler models don't help. We need model diversity to capture different patterns. Top kernels use this approach successfully.
+Key implementation details:
+1. **MLP Architecture**:
+   - Input: Spange features + Time + Temp (15 dims for single, 16 for full)
+   - Hidden: [128, 64, 32] with BatchNorm + ReLU + Dropout(0.2)
+   - Output: 3 (Sigmoid for yields 0-1)
+   - Training: Adam(lr=5e-4, weight_decay=1e-5), 200 epochs, batch_size=32
 
-**Alternative Experiment 010: Stacking with Meta-Learner**
-If ensemble doesn't improve LB, try stacking:
-- Base models: ETR, HGB, RF, XGB
-- Meta-learner: Ridge or simple average
-- This can capture complementary patterns from different models
+2. **GBDT Models**:
+   - XGBoost: n_estimators=200, max_depth=6, learning_rate=0.05
+   - RandomForest: n_estimators=200, max_depth=10
+   - LightGBM: n_estimators=200, max_depth=6, learning_rate=0.05
+
+3. **Ensemble Weights**: [0.35, 0.25, 0.25, 0.15] for MLP, XGB, RF, LGB
+
+4. **Features**: Spange descriptors only (simpler may generalize better)
+
+**Expected outcome**:
+- CV may be similar to exp_004 (~0.06-0.07)
+- LB may improve due to MLP capturing different patterns
+- This is what top kernels use successfully
+
+**Alternative Experiment 011: Optuna Weight Optimization**
+If exp_010 doesn't improve, use Optuna to find optimal ensemble weights.
