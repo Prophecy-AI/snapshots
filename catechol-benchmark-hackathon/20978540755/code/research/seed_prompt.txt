@@ -1,9 +1,10 @@
 ## Current Status
 - Best CV score: 0.008194 (exp_035 - GP+MLP+LGBM ensemble)
 - Best LB score: 0.0877 (exp_030)
-- CV-LB relationship: LB = 4.30*CV + 0.0524 (R²=0.97)
-- **CRITICAL**: Intercept (0.0524) > Target (0.0347)
-- Submissions remaining: 5
+- Latest submission: exp_035 (CV 0.0098) scored LB 0.0970 - 19.91% WORSE (minimal features FAILED)
+- CV-LB relationship: LB = 4.31*CV + 0.0525 (R²=0.95)
+- **CRITICAL**: Intercept (0.0525) > Target (0.0347)
+- Submissions remaining: 4
 
 ## Response to Evaluator
 - Technical verdict was TRUSTWORTHY - results can be relied upon
@@ -11,7 +12,7 @@
 - Evaluator's top priority: Find a fundamentally different approach that changes the CV-LB relationship
 - I AGREE with the evaluator's assessment. The current approach has hit a ceiling.
 - Key concerns raised: The CV-LB relationship has intercept > target
-- Addressing by: Researching what successful approaches do differently (GNN benchmark)
+- Addressing by: Implementing approaches that learn solvent representations (like GNN)
 
 ## CRITICAL RESEARCH FINDING
 **GNN Benchmark (arXiv:2512.19530) achieved MSE 0.0039 on this exact Catechol dataset!**
@@ -27,12 +28,14 @@
 
 **Why our approach has a ceiling:**
 - We use FIXED tabular features (Spange, DRFP, ACS PCA)
-- These cannot capture solvent-reactant interactions
-- Linear mixture interpolation misses non-linear effects
-- The CV-LB gap (intercept 0.0524) represents information our features CANNOT capture
+- These cannot capture solvent-specific patterns that emerge during training
+- Linear mixture interpolation (1-pct)*A + pct*B misses non-linear effects
+- The CV-LB gap (intercept 0.0525) represents information our features CANNOT capture
 
 ## Data Understanding
-- Reference notebooks: `exploration/evolver_loop37_analysis.ipynb`, `exploration/eda.ipynb`
+- Reference notebooks: `exploration/evolver_loop37_lb_feedback.ipynb`, `exploration/eda.ipynb`
+- SMILES available: `/home/data/smiles_lookup.csv` has SMILES for all 24 solvents
+- PyTorch Geometric and RDKit are available for GNN implementation
 - Key patterns:
   - CV-LB gap is due to FEATURE LIMITATIONS, not overfitting
   - DRFP features ARE valuable (minimal features made CV 19.91% worse)
@@ -41,10 +44,85 @@
 
 ## Recommended Approaches
 
-### PRIORITY 1: Learned Solvent Embeddings + MLP
-**Rationale**: This approximates what GNN does - learning solvent-specific patterns during training.
+### PRIORITY 1: Graph Neural Network (GNN) with AttentiveFP
+**Rationale**: GNN benchmark achieved MSE 0.0039 on this exact dataset. This is the proven winning approach.
 
-**Implementation**:
+**Implementation using PyTorch Geometric:**
+```python
+from rdkit import Chem
+from torch_geometric.data import Data, Batch
+from torch_geometric.nn import AttentiveFP, global_add_pool
+import torch
+import torch.nn as nn
+
+class GNNSolventModel(nn.Module):
+    def __init__(self, data='single'):
+        super().__init__()
+        self.data_type = data
+        
+        # Load SMILES lookup
+        self.smiles_lookup = pd.read_csv('/home/data/smiles_lookup.csv', index_col=0)
+        
+        # AttentiveFP for molecular property prediction
+        self.gnn = AttentiveFP(
+            in_channels=9,      # atom features
+            hidden_channels=64,
+            out_channels=32,    # embedding dim
+            edge_dim=3,         # bond features
+            num_layers=2,
+            num_timesteps=2,
+            dropout=0.1
+        )
+        
+        # Kinetics features: T, t, 1/T, ln(t), interaction
+        kinetics_dim = 5
+        
+        if data == 'single':
+            input_dim = 32 + kinetics_dim  # GNN embedding + kinetics
+        else:
+            input_dim = 64 + kinetics_dim + 1  # 2 GNN embeddings + kinetics + pct
+        
+        # Prediction head
+        self.predictor = nn.Sequential(
+            nn.Linear(input_dim, 64),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, 3),
+            nn.Sigmoid()
+        )
+    
+    def smiles_to_graph(self, smiles):
+        # Convert SMILES to molecular graph
+        mol = Chem.MolFromSmiles(smiles)
+        # ... atom and bond features extraction
+        return Data(x=atom_features, edge_index=edge_index, edge_attr=bond_features)
+    
+    def forward(self, solvent_graphs, kinetics, pct=None, solvent_b_graphs=None):
+        # Get GNN embeddings
+        emb_a = self.gnn(solvent_graphs.x, solvent_graphs.edge_index, 
+                        solvent_graphs.edge_attr, solvent_graphs.batch)
+        
+        if self.data_type == 'single':
+            x = torch.cat([emb_a, kinetics], dim=1)
+        else:
+            emb_b = self.gnn(solvent_b_graphs.x, solvent_b_graphs.edge_index,
+                           solvent_b_graphs.edge_attr, solvent_b_graphs.batch)
+            x = torch.cat([emb_a, emb_b, pct.unsqueeze(1), kinetics], dim=1)
+        
+        return self.predictor(x)
+```
+
+**Why this should work:**
+- GNN learns solvent representations from molecular structure
+- Captures solvent-specific patterns that fixed features miss
+- Non-linear mixture handling through concatenated embeddings
+- Proven to achieve MSE 0.0039 on this exact dataset
+
+### PRIORITY 2: Learned Solvent Embeddings + MLP (Simpler Alternative)
+**Rationale**: If GNN is too complex, learned embeddings approximate the key benefit.
+
 ```python
 class LearnedEmbeddingModel(nn.Module):
     def __init__(self, num_solvents=24, embedding_dim=32, data='single'):
@@ -54,11 +132,8 @@ class LearnedEmbeddingModel(nn.Module):
         # Learnable embedding for each solvent
         self.solvent_embedding = nn.Embedding(num_solvents, embedding_dim)
         
-        # Map solvent names to indices
-        self.solvent_to_idx = {}  # Built during training
-        
         # Combine with kinetics features
-        input_dim = embedding_dim + 5  # embedding + kinetics (T, t, 1/T, ln(t), interaction)
+        input_dim = embedding_dim + 5  # embedding + kinetics
         if data == 'full':
             input_dim = 2 * embedding_dim + 6  # two solvents + pct + kinetics
         
@@ -70,105 +145,24 @@ class LearnedEmbeddingModel(nn.Module):
             nn.Dropout(0.2),
             nn.Linear(128, 64),
             nn.ReLU(),
-            nn.Dropout(0.2),
             nn.Linear(64, 3),
             nn.Sigmoid()
         )
-    
-    def forward(self, solvent_idx, kinetics_features, pct=None, solvent_b_idx=None):
-        emb_a = self.solvent_embedding(solvent_idx)
-        
-        if self.data_type == 'single':
-            x = torch.cat([emb_a, kinetics_features], dim=1)
-        else:
-            emb_b = self.solvent_embedding(solvent_b_idx)
-            # Non-linear mixture: concatenate both embeddings + pct
-            x = torch.cat([emb_a, emb_b, pct.unsqueeze(1), kinetics_features], dim=1)
-        
-        return self.net(x)
 ```
 
-**Why this could work:**
-- Embeddings are LEARNED during training, not fixed
-- Can capture solvent-specific patterns
-- For mixtures, uses both embeddings (not linear interpolation)
-- Similar to how GNN learns solvent representations
+### PRIORITY 3: Non-linear Mixture Encoding
+**Rationale**: Current linear interpolation is too simple for mixture effects.
 
-### PRIORITY 2: Non-linear Mixture Encoding
-**Rationale**: Current linear interpolation (1-pct)*A + pct*B is too simple.
-
-**Implementation**:
 ```python
 class NonlinearMixtureModel(nn.Module):
-    def __init__(self, data='full'):
-        super().__init__()
-        self.featurizer = FullFeaturizer(mixed=True)
-        feat_dim = 145  # Full features
-        
-        # Mixture encoder: learns non-linear combination
+    def __init__(self):
+        # Mixture encoder learns non-linear combination
         self.mixture_encoder = nn.Sequential(
             nn.Linear(2 * feat_dim + 1, 256),  # A_feat, B_feat, pct
             nn.ReLU(),
             nn.Linear(256, feat_dim)
         )
-        
-        # Main predictor
-        self.predictor = nn.Sequential(
-            nn.BatchNorm1d(feat_dim),
-            nn.Linear(feat_dim, 128),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, 3),
-            nn.Sigmoid()
-        )
-    
-    def forward(self, feat_a, feat_b, pct):
-        # Non-linear mixture encoding
-        mixture_input = torch.cat([feat_a, feat_b, pct.unsqueeze(1)], dim=1)
-        mixture_feat = self.mixture_encoder(mixture_input)
-        return self.predictor(mixture_feat)
 ```
-
-### PRIORITY 3: k-NN with Solvent Similarity (Proper Implementation)
-**Rationale**: Different inductive bias might have different CV-LB relationship.
-
-**Implementation**:
-```python
-class KNNSolventModel:
-    def __init__(self, k=3, data='single'):
-        self.k = k
-        self.data_type = data
-        self.featurizer = FullFeaturizer(mixed=(data=='full'))
-    
-    def train_model(self, X_train, y_train):
-        self.X_train_feat = self.featurizer.featurize(X_train)
-        self.y_train = y_train.values
-    
-    def predict(self, X_test):
-        X_test_feat = self.featurizer.featurize(X_test)
-        predictions = []
-        
-        for i in range(len(X_test_feat)):
-            # Compute distances to all training points
-            distances = torch.cdist(X_test_feat[i:i+1], self.X_train_feat).squeeze()
-            
-            # Get k nearest neighbors
-            _, indices = torch.topk(distances, self.k, largest=False)
-            
-            # Weighted average of neighbors
-            weights = 1.0 / (distances[indices] + 1e-6)
-            weights = weights / weights.sum()
-            
-            pred = (weights.unsqueeze(1) * torch.tensor(self.y_train[indices])).sum(dim=0)
-            predictions.append(pred)
-        
-        return torch.stack(predictions)
-```
-
-### PRIORITY 4: Submit exp_035 for LB Feedback
-**Rationale**: Verify CV-LB relationship with our best CV model before trying new approaches.
 
 ## What NOT to Try
 - More feature simplification (exp_038 proved it hurts: 19.91% worse)
@@ -176,19 +170,20 @@ class KNNSolventModel:
 - Normalization of predictions (targets don't sum to 1.0)
 - Higher GP weight (exp_031 proved it hurts: 10.61% worse)
 - Four-model ensemble (exp_028 proved it hurts: 2.47% worse)
+- Similarity weighting (exp_037 proved it hurts: 220% worse)
 
 ## Validation Notes
 - CV scheme: Leave-one-solvent-out (fixed by competition)
-- CV-LB relationship: LB = 4.30*CV + 0.0524
-- The intercept (0.0524) > target (0.0347) is the key problem
+- CV-LB relationship: LB = 4.31*CV + 0.0525
+- The intercept (0.0525) > target (0.0347) is the key problem
 - We need to CHANGE the CV-LB relationship, not just improve CV
+- GNN benchmark proves the target is achievable with the right approach
 
 ## Submission Strategy
-With 5 submissions remaining:
-1. **FIRST**: Submit exp_035 (best CV 0.008194) to verify CV-LB relationship
-2. **THEN**: Try learned embeddings approach - if CV improves significantly, submit
-3. **THEN**: Try non-linear mixture encoding
-4. Reserve 2 submissions for best models
+With 4 submissions remaining:
+1. **FIRST**: Try GNN approach - if CV improves significantly AND relationship changes, submit
+2. **THEN**: Try learned embeddings if GNN is too complex
+3. Reserve 2 submissions for best models
 
 ## Key Insight
 **THE TARGET IS ABSOLUTELY REACHABLE.**
@@ -204,4 +199,4 @@ By learning solvent representations (like GNN does), we can potentially:
 2. Handle mixture effects non-linearly
 3. Reduce the systematic bias (intercept)
 
-The path forward is clear: approximate GNN benefits with learned embeddings.
+The path forward is clear: implement GNN or learned embeddings to approximate GNN benefits.
