@@ -1,8 +1,7 @@
 # 1st place solution
 
-**Rank:** 1
 **Author:** gezi
-**Collaborators:** gezi
+**Rank:** 1
 **Votes:** 175
 
 ---
