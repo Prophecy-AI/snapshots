@@ -1,8 +1,7 @@
 # 2nd place - Trust CV and diversity
 
-**Rank:** 2
 **Author:** Mahog
-**Collaborators:** Mahog
+**Rank:** 2
 **Votes:** 18
 
 ---
