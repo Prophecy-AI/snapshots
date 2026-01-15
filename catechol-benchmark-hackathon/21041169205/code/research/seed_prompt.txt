@@ -1,24 +1,25 @@
 ## Current Status
-- Best CV score: 0.0081 from exp_052 (CatBoost + XGBoost ensemble with clipping)
+- Best CV score: 0.0081 from exp_053 (CatBoost + XGBoost ensemble with clipping)
 - Best LB score: 0.0877 from exp_030 (GP ensemble)
 - Target: 0.0347 | Gap to target: 0.0530 (152.7%)
-- Pending submissions: exp_049 (CV=0.0081), exp_050 (CV=0.0081) - LB pending
+- Pending submissions: exp_049, exp_050, exp_052 (IWCV - FAILED)
+- Current submission.csv: exp_053 (CatBoost+XGBoost with clipping, CV=0.008092)
 
 ## CV-LB Relationship Analysis (CRITICAL)
 - Linear fit: LB = 4.31 * CV + 0.0525 (R² = 0.9505)
 - Intercept = 0.0525 (151.4% of target!)
 - Required CV to hit target: -0.0041 (NEGATIVE - IMPOSSIBLE)
-- **ALL 12 submissions fall on the same line with residuals < 2.5%**
+- **ALL 12 successful submissions fall on the same line with residuals < 2.5%**
 - **The target is MATHEMATICALLY UNREACHABLE by improving CV alone**
 
 ## Response to Evaluator
 
-**Technical verdict was TRUSTWORTHY** - The evaluator confirmed that exp_052 (CatBoost+XGBoost with clipping) is technically sound and ready for submission. All targets are properly clipped to [0, 1].
+**Technical verdict was TRUSTWORTHY** - The evaluator confirmed that exp_053 (CatBoost+XGBoost with clipping) is technically sound and ready for submission. All targets are properly clipped to [0, 1].
 
-**Evaluator's top priority:** Submit exp_052 to verify the clipping fix works, then analyze per-solvent errors.
+**Evaluator's top priority:** Submit exp_053 to verify the clipping fix works, then analyze per-solvent errors.
 
 **My response:**
-1. AGREE on submitting exp_052 - it's our best CV model with proper formatting
+1. AGREE on submitting exp_053 - it's our best CV model with proper formatting
 2. AGREE on per-solvent error analysis - this could reveal WHY the intercept exists
 3. The evaluator correctly identified that the intercept problem is the key issue
 4. We need approaches that CHANGE the relationship, not just improve CV
@@ -48,14 +49,8 @@ The intercept (0.0525) is HIGHER than the target (0.0347). This means:
 
 ## Recommended Approaches (Priority Order)
 
-### PRIORITY 1: Submit exp_052 for LB Feedback
-**Action: Submit exp_052 (CatBoost + XGBoost with clipping)**
-- This is our best CV model (0.0081) with proper formatting
-- Expected LB: ~0.0875 (based on CV-LB relationship)
-- This will confirm whether the clipping fix works and validate the relationship
-
-### PRIORITY 2: Per-Solvent Error Analysis
-**Experiment 053: Identify High-Error Solvents**
+### PRIORITY 1: Per-Solvent Error Analysis (CRITICAL)
+**Experiment 054: Identify High-Error Solvents**
 - Compute per-solvent CV error for all 24 solvents
 - Identify which solvents cause the most error
 - Analyze: Are high-error solvents outliers in feature space?
@@ -65,13 +60,13 @@ Implementation:
 ```python
 # For each solvent, compute the average prediction error
 solvent_errors = {}
-for solvent in all_solvents:
-    test_mask = X['SOLVENT NAME'] == solvent
-    train_mask = ~test_mask
-    model.fit(X[train_mask], Y[train_mask])
-    preds = model.predict(X[test_mask])
-    error = np.mean((preds - Y[test_mask]) ** 2)
-    solvent_errors[solvent] = error
+for fold_idx, ((train_X, train_Y), (test_X, test_Y)) in enumerate(generate_leave_one_out_splits(X, Y)):
+    solvent_name = test_X['SOLVENT NAME'].iloc[0]
+    model = CatBoostXGBEnsemble(data='single')
+    model.train_model(train_X, train_Y)
+    preds = model.predict(test_X).numpy()
+    error = np.mean((preds - test_Y.values) ** 2)
+    solvent_errors[solvent_name] = error
     
 # Identify outliers
 sorted_errors = sorted(solvent_errors.items(), key=lambda x: x[1], reverse=True)
@@ -80,63 +75,54 @@ for solvent, error in sorted_errors[:5]:
     print(f"  {solvent}: MSE = {error:.6f}")
 ```
 
-### PRIORITY 3: Uncertainty-Weighted Blending
-**Experiment 054: Conservative Predictions for Outliers**
+### PRIORITY 2: Uncertainty-Weighted Blending
+**Experiment 055: Conservative Predictions for Outliers**
 - Use ensemble variance to estimate prediction uncertainty
 - For high-uncertainty predictions (outlier solvents), blend toward population mean
 - Hypothesis: This reduces extrapolation error, lowering the intercept
 
 Implementation:
 ```python
-# Compute ensemble variance as uncertainty
-predictions = [model1.predict(X), model2.predict(X), model3.predict(X)]
-variance = np.var(predictions, axis=0)
+# Train multiple models and compute variance
+models = [CatBoostXGBEnsemble(data='single') for _ in range(5)]
+for m in models:
+    m.train_model(train_X, train_Y)
 
-# Blend toward mean for high uncertainty
-population_mean = Y_train.mean(axis=0)
+predictions = np.stack([m.predict(test_X).numpy() for m in models])
+mean_pred = predictions.mean(axis=0)
+variance = predictions.var(axis=0)
+
+# Blend toward population mean for high uncertainty
+population_mean = train_Y.mean(axis=0).values
 temperature = 0.01  # Tune this
 blend_weight = np.exp(-variance / temperature)
-final_pred = blend_weight * ensemble_pred + (1 - blend_weight) * population_mean
+final_pred = blend_weight * mean_pred + (1 - blend_weight) * population_mean
 ```
 
-### PRIORITY 4: Solvent Similarity Features
-**Experiment 055: Extrapolation Detection**
+### PRIORITY 3: Solvent Similarity Features
+**Experiment 056: Extrapolation Detection**
 - Add features measuring solvent distance to training distribution
 - Use molecular fingerprint similarity (Tanimoto) to nearest training solvents
 - When extrapolating (low similarity), blend predictions toward population mean
 
-Implementation:
-```python
-# For each test solvent, compute similarity to all training solvents
-from rdkit import DataStructs
-from rdkit.Chem import AllChem
+### PRIORITY 4: GroupKFold CV Scheme (from mixall kernel)
+**Experiment 057: Different CV Scheme**
+- The "mixall" kernel uses GroupKFold (5 splits) instead of Leave-One-Out (24 splits)
+- This might have a DIFFERENT CV-LB relationship
+- Worth testing to see if intercept changes
 
-def compute_tanimoto_similarity(smiles1, smiles2):
-    mol1 = Chem.MolFromSmiles(smiles1)
-    mol2 = Chem.MolFromSmiles(smiles2)
-    fp1 = AllChem.GetMorganFingerprintAsBitVect(mol1, 2, nBits=2048)
-    fp2 = AllChem.GetMorganFingerprintAsBitVect(mol2, 2, nBits=2048)
-    return DataStructs.TanimotoSimilarity(fp1, fp2)
-
-# Add similarity features
-for test_solvent in test_solvents:
-    max_sim = max(compute_tanimoto_similarity(test_solvent, train_solvent) 
-                  for train_solvent in train_solvents)
-    X['max_train_similarity'] = max_sim
-```
-
-### PRIORITY 5: Study Top Public Kernels
-**Experiment 056: Implement "mixall" approach**
-- The "mixall" kernel uses GroupKFold (5 splits) instead of Leave-One-Out
-- This may have a DIFFERENT CV-LB relationship
-- Ensemble: MLP + XGBoost + RandomForest + LightGBM with weighted averaging
-- Worth testing if this changes the intercept
+### PRIORITY 5: Target-Specific Models
+**Experiment 058: Separate Models per Target**
+- SM target is hardest (most variance)
+- Train separate models for each target with different hyperparameters
+- Use 2-3x weight for SM target in loss function
 
 ## What NOT to Try
 1. **More model tuning** - All models fall on the same CV-LB line. Tuning won't change the intercept.
 2. **More features** - We've tried Spange, DRFP, ACS-PCA, fragprints. None changed the relationship.
 3. **Deeper networks** - Deep residual MLP (exp_004) was 5x worse than baseline.
-4. **IWCV** - Already tested (exp_051), made CV 34.5% worse without changing the relationship.
+4. **IWCV** - Already tested (exp_052), FAILED with evaluation error.
+5. **Simple ensembles** - We've tried many ensemble combinations, all on same line.
 
 ## Validation Notes
 - CV scheme: Leave-One-Solvent-Out for single solvents, Leave-One-Ramp-Out for full data
@@ -145,9 +131,8 @@ for test_solvent in test_solvents:
 - To reach target 0.0347, we need to REDUCE THE INTERCEPT, not just improve CV
 
 ## Submission Strategy (5 remaining)
-1. **Submission 1**: exp_052 (CatBoost+XGBoost with clipping) - verify fix and relationship
-2. **Submission 2**: Per-solvent analysis model (if developed)
-3. **Submission 3-5**: Based on learnings, test fundamentally different approaches
+1. **Submission 1**: exp_053 (CatBoost+XGBoost with clipping) - verify fix and relationship
+2. **Submission 2-5**: Based on learnings, test fundamentally different approaches
 
 ## Key Insight for Executor
 The target (0.0347) is BELOW the intercept (0.0525). This means:
@@ -160,3 +145,12 @@ The path forward is NOT better models - it's understanding WHY the intercept exi
 
 ## NEVER GIVE UP
 The target IS reachable. The benchmark paper achieved MSE 0.0039 with a GNN. Top competitors have solved this problem. We just need to find the right approach. The intercept can be reduced - we just haven't found how yet.
+
+## IMPORTANT: Submission Format
+The current submission.csv (exp_053) is properly formatted:
+- Total rows: 1883 (656 single + 1227 full)
+- Task 0: 24 folds (single solvent)
+- Task 1: 13 folds (full data by solvent pairs)
+- All targets in [0, 1] range
+- No NaN, Inf, or out-of-range values
+- Ready for submission
