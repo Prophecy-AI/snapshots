@@ -29,27 +29,6 @@ The CV-LB relationship is: LB = 4.23×CV + 0.0533
 
 **To reach the target, we need to REDUCE THE INTERCEPT**, not just improve CV.
 
-## What Could Reduce the Intercept?
-
-Based on research and analysis:
-
-1. **Different CV procedure that better matches the hidden test distribution**
-   - The hidden test might have solvents MORE different from training than any single held-out solvent
-   - GroupKFold(5) was tested (exp_042) but didn't help - LB was 0.1147 (worse)
-
-2. **Features that generalize better to unseen solvents**
-   - Similarity features (exp_046) didn't help - CV got worse
-   - Need features that capture "transferable" chemical knowledge
-
-3. **Models that extrapolate better**
-   - GP provides uncertainty but follows same CV-LB relationship
-   - k-NN extrapolates by finding similar examples but CV was much worse
-   - Need models that are conservative when extrapolating
-
-4. **Ensemble diversity**
-   - Current ensemble (GP + MLP + LGBM) all follow same relationship
-   - Need fundamentally different approaches that might have different relationships
-
 ## Data Understanding
 - Reference notebooks: See `exploration/evolver_loop45_analysis.ipynb` for CV-LB analysis
 - Key patterns:
@@ -69,11 +48,17 @@ Based on research and analysis:
   - Reaction_Energy = Temperature * Residence Time
   - B_Conc_Temp = SolventB% * Temperature
 - CatBoost parameters: iterations=500, learning_rate=0.05, depth=6
+- Train 3 separate models for each target (Product 2, Product 3, SM)
 
 **Why this might work**:
 - CatBoost uses ordered boosting which might generalize better
 - Categorical features are handled differently than numerical encoding
 - Interaction features capture domain knowledge
+
+**Template compliance**:
+- Create a CatBoostModel class with train_model() and predict() methods
+- Use the same CV procedure (leave-one-out for single, leave-one-ramp-out for full)
+- Last 3 cells remain unchanged
 
 ### 2. XGBOOST + RF + LGBM ENSEMBLE (from mixall kernel)
 **Hypothesis**: The "mixall" kernel claims good CV/LB with this ensemble.
@@ -83,20 +68,8 @@ Based on research and analysis:
 - Learned weights via Optuna optimization
 - Use Spange descriptors + kinetics features
 
-**Why this might work**:
-- Different model families might have different extrapolation behavior
-- Optuna-tuned weights might find better combinations
-
 ### 3. SUBMIT BEST CV MODEL (exp_032) AS BASELINE
 **Hypothesis**: Better CV might still help, even if the relationship is the same.
-
-**Implementation**:
-- exp_032 has CV 0.008194 (best CV, not submitted)
-- Predicted LB: 0.0880 (similar to best LB 0.0877)
-
-**Why this might work**:
-- Confirms the CV-LB relationship
-- Provides a baseline for comparison with new approaches
 
 ## What NOT to Try
 - Similarity features (exp_046): CV is 6.38% worse, no evidence of different relationship
@@ -128,46 +101,47 @@ The key is to find features or model architectures that generalize better to uns
 ```python
 from catboost import CatBoostRegressor
 
-# For single solvent data
-model = CatBoostRegressor(
-    iterations=500,
-    learning_rate=0.05,
-    depth=6,
-    cat_features=[2],  # Index of SOLVENT NAME column
-    random_seed=42,
-    verbose=False
-)
-
-# Features: [Residence Time, Temperature, SOLVENT NAME, Reaction_Energy]
-# where Reaction_Energy = Temperature * Residence Time
+class CatBoostModel:
+    def __init__(self, data='single'):
+        self.data_type = data
+        self.models = []  # One per target
+        
+    def train_model(self, X_train, Y_train):
+        # Create features with interaction terms
+        X_feat = self._create_features(X_train)
+        
+        # Train 3 separate CatBoost models (one per target)
+        for i in range(3):
+            model = CatBoostRegressor(
+                iterations=500,
+                learning_rate=0.05,
+                depth=6,
+                cat_features=['solvent_cat'],  # Categorical column
+                random_seed=42,
+                verbose=False
+            )
+            model.fit(X_feat, Y_train.iloc[:, i])
+            self.models.append(model)
+    
+    def _create_features(self, X):
+        # Add interaction features
+        df = X.copy()
+        df['Reaction_Energy'] = df['Temperature'] * df['Residence Time']
+        if self.data_type == 'full':
+            df['B_Conc_Temp'] = df['SolventB%'] * df['Temperature']
+        return df
+    
+    def predict(self, X_test):
+        X_feat = self._create_features(X_test)
+        preds = []
+        for model in self.models:
+            preds.append(model.predict(X_feat))
+        return torch.tensor(np.column_stack(preds))
 ```
 
-**Interaction Features**:
-```python
-# Add interaction features
-X['Reaction_Energy'] = X['Temperature'] * X['Residence Time']
-X['B_Conc_Temp'] = X['SolventB%'] * X['Temperature']  # For full data only
-```
-
-**XGBoost + RF + LGBM Ensemble**:
-```python
-from sklearn.ensemble import RandomForestRegressor
-import xgboost as xgb
-import lightgbm as lgb
-
-# Train each model separately
-xgb_model = xgb.XGBRegressor(n_estimators=200, max_depth=6, learning_rate=0.05)
-rf_model = RandomForestRegressor(n_estimators=200, max_depth=10)
-lgb_model = lgb.LGBMRegressor(n_estimators=200, max_depth=6, learning_rate=0.05)
-
-# Ensemble with learned weights
-weights = [0.3, 0.3, 0.4]  # Or tune with Optuna
-final_pred = weights[0] * xgb_pred + weights[1] * rf_pred + weights[2] * lgb_pred
-```
-
-## CRITICAL REMINDER
-- The target IS reachable (someone achieved 0.0347)
-- Current approach has structural limitation (intercept > target)
-- Need to find approach with DIFFERENT CV-LB relationship
-- Don't waste submissions on variations of current approach
-- Each submission should test a FUNDAMENTALLY DIFFERENT hypothesis
+**Key Points**:
+1. CatBoost handles categorical features natively - no need for encoding
+2. Interaction features (Reaction_Energy, B_Conc_Temp) capture domain knowledge
+3. Train separate models for each target
+4. Clip predictions to [0, 1] range
+5. Use TTA for mixture data (average both orderings)
