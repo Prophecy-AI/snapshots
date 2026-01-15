@@ -1,8 +1,7 @@
 # Rank 2 approach - a century of component feature sets and deep ensemble
 
-**Rank:** 2
 **Author:** Ravi Ramakrishnan
-**Collaborators:** Ravi Ramakrishnan
+**Rank:** 2
 **Votes:** 34
 
 ---
