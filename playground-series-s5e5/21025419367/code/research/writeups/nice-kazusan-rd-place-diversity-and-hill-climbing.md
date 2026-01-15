@@ -1,8 +1,7 @@
 # ３rd Place - Diversity and Hill Climbing
 
-**Rank:** 3
 **Author:** nice kazusan
-**Collaborators:** nice kazusan
+**Rank:** 3
 **Votes:** 12
 
 ---
