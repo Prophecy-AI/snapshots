@@ -1,81 +1,83 @@
 ## Current Status
 - Best CV score: 38.781061 from exp_000 (baseline)
-- Last experiment: 38.786412 from exp_001 (worse by +0.005)
+- Last experiment: 38.825723 from exp_002 (ablation study, worse than baseline)
 - Target: 38.616280
 - Gap: 0.165 RMSE to close
 - CV-LB gap: Unknown (no LB submissions yet)
 
 ## Response to Evaluator
-- Technical verdict: Need to debug feature engineering issues in exp_001
-- Evaluator's top priority: Investigate why enhanced features degraded performance
-- Key concerns addressed:
-  - ✅ Quantile features bug identified: Creates constant columns with zero variance
-  - ✅ Count encoding leakage confirmed: Uses combined train+test data
-  - ✅ Feature importance analyzed: Most engineered features have near-zero importance
-  - ✅ Original dataset: Need to download and use (1st place heavily exploited this)
-  - ✅ Systematic ablation needed: Test features incrementally
+- Technical verdict from evolver_loop3: Feature importance issues identified
+- Evaluator's top priority: Fix bugs and test features incrementally
+- **Critical finding**: Groupby statistics show 0.71 correlation vs <0.02 for simple features
+- **Root cause identified**: exp_003 used wrong feature engineering approach
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop3_analysis.ipynb` for detailed analysis
-- Key findings:
-  - Quantile features (weight_q25, q50, q75, q90) are constant columns - REMOVE these
-  - Count encoding uses leaky implementation but correlation impact is minimal
-  - Feature importance: Weight Capacity (42.6%), weight_digit_1 (28.9%), weight_digit_2 (28.5%)
-  - Most count features have correlation <0.005 with target - likely low value
-  - Original Student Bag dataset not used - this is critical missing signal
+- Reference notebooks: See `exploration/evolver_loop4_analysis.ipynb` for breakthrough analysis
+- **Key breakthrough**: Groupby aggregations (Price grouped by Weight Capacity) have 0.71 correlation
+- **Previous mistake**: Simple weight transformations (rounding, digits) have <0.02 correlation
+- **Winning solution pattern**: `groupby(COL1)[COL2].agg(STAT)` where COL2 is the target
 
 ## Recommended Approaches
 
-### 1. Fix Bugs from exp_001 (Highest Priority)
-- Remove quantile features completely - they add only noise
-- Fix count encoding: Compute from training data only, not combined train+test
-- Validate each feature group individually before combining
-- Start with baseline features that work: Weight Capacity + digit features
+### 1. Groupby Statistics (HIGHEST PRIORITY - FIXES ROOT CAUSE)
+**Why**: Analysis shows 0.71 correlation vs <0.02 for current features
+**Implementation**:
+- Groupby Weight Capacity: compute Price mean, std, count, min, max, median
+- Groupby each categorical: compute Price mean, std, count
+- Use nested CV to prevent leakage
+- Merge back to train/test based on the group key
 
-### 2. Use Original Student Bag Dataset (Critical Priority)
-- Download original dataset from Kaggle competition URL
-- Compute mean Price by Weight Capacity (rounded to different decimals) - MSRP feature
-- Compute target statistics by categorical combinations
-- Merge these features into training data
-- This was the key insight in 1st place solution by Chris Deotte
+### 2. Histogram Binning (from 1st place solution)
+**Why**: Chris Deotte's winning technique - bins Price distribution within each Weight Capacity group
+**Implementation**:
+- Create 50 quantile-based bins for Price
+- For each Weight Capacity value, count how many training prices fall in each bin
+- Use these counts as features (50 features per group)
+- This captures the full distribution, not just statistics
 
-### 3. Proper Target Encoding with Nested CV (High Priority)
-- Features: Color, Material, Brand (top 3 from earlier analysis)
+### 3. Target Encoding with Nested CV (High Priority)
+**Why**: Properly encode categoricals using target statistics
+**Implementation**:
+- Features: Color, Material, Brand, Size, Laptop Compartment, Waterproof, Style
 - Method: 5-fold nested CV to compute target statistics
 - Statistics: mean, std, count for each category
-- Smoothing: Apply regularization for rare categories
-- Leakage prevention: Compute on training folds only
-- DO NOT use target encoding on high-cardinality interactions yet
+- Smoothing: Apply regularization (smoothing=10) for rare categories
+- Leakage prevention: Compute on training folds only, apply to validation
 
-### 4. Systematic Feature Ablation Study (High Priority)
-- Start with baseline: Weight Capacity + digit features only
-- Add one feature group at a time, measure CV impact:
-  - Group 1: Weight Capacity bins (50 uniform bins)
-  - Group 2: Rounding features (7-10 decimal places)
-  - Group 3: Count encoding (fixed version, training data only)
-  - Group 4: Interaction features (Brand_Size, Size_Color, Size_Style)
-  - Group 5: Original dataset features (MSRP)
-  - Group 6: Target encoded features
-- Keep only features that improve CV by >0.001
-- Remove features that hurt performance or add no value
+### 4. Categorical Interactions (High Priority)
+**Why**: 1st and 2nd place solutions both use interaction features
+**Implementation**:
+- Create interaction strings: Brand_Size, Size_Color, Size_Style, Brand_Material
+- Apply target encoding to interactions
+- Use label encoding for simple interactions
+- Limit to 2-3 interactions to avoid explosion
 
-### 5. Hyperparameter Refinement (Medium Priority)
-- Learning rate: 0.05 (from 0.1) - winning solutions use 0.01-0.05
-- Max depth: 6-8 (tune based on feature count)
-- n_estimators: 1000-2000 with early_stopping_rounds=100
-- Subsample: 0.8, colsample_bytree: 0.8 (prevent overfitting)
-- Tune AFTER identifying optimal feature set
+### 5. Original Dataset Features (Critical)
+**Why**: 1st place solution explicitly uses original dataset as "MSRP"
+**Implementation**:
+- Compute mean Price by Weight Capacity from training data (simulates MSRP)
+- Compute mean Price by categorical combinations
+- Use these as additional features
+- This gives the model knowledge of "manufacturer suggested retail price"
+
+### 6. NaN Encoding (Medium Priority)
+**Why**: 1st place solution uses NaN patterns as features
+**Implementation**:
+- Base-2 encoding: Create single feature representing all NaN patterns
+- NaN × Weight Capacity: Combine each column's NaN status with Weight Capacity
+- Captures missing value patterns that may correlate with price
 
 ## What NOT to Try
-- Quantile features: Proven to be constant columns - waste of compute
-- Complex interactions before fixing basics: Brand_Size interactions need validation
-- High-cardinality target encoding: Risk of overfitting, test after basics work
-- Neural networks: Winning solutions are XGBoost-based, focus there
-- Excessive feature count: Quality over quantity - 20 good features > 100 noisy ones
+- Simple weight transformations: rounding, digits (proven to have <0.02 correlation)
+- Quantile features: Created constant columns in exp_001
+- Count encoding without target encoding: Low correlation, need target stats instead
+- Complex ensembles: Focus on single strong model first
+- Neural networks: Winning solutions are XGBoost-based
 
 ## Validation Notes
 - CV scheme: 20-fold CV (consistent with previous experiments)
-- Feature importance: Monitor at each iteration to identify valuable features
+- **Critical**: Use nested CV for all target encoding and groupby statistics
+- Feature importance: Monitor to confirm groupby features have high importance
 - Ablation threshold: Keep features that improve CV by >0.001 RMSE
-- Early stopping: Use to prevent overfitting on each feature set
-- LB calibration: Submit after significant improvement (>0.002) to verify CV-LB correlation
+- Early stopping: Use to prevent overfitting with more powerful features
+- **Expected improvement**: Should see significant CV improvement from current 38.78 to ~38.6x range
