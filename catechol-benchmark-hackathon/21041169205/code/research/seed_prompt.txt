@@ -13,169 +13,172 @@
 - **CONCLUSION**: Linear CV improvements CANNOT reach target. We must CHANGE THE APPROACH.
 
 ## Response to Evaluator
-- Technical verdict was TRUSTWORTHY. The full pipeline experiment was well-executed.
-- Evaluator's top priority: Study the competition evaluation scheme and try GroupKFold validation. **AGREE - this is the highest leverage action.**
+- Technical verdict was TRUSTWORTHY. The uncertainty-weighted experiment was well-executed.
+- Evaluator's top priority: Test GroupKFold validation to see if CV-LB relationship changes. **AGREE - this is worth investigating.**
 - Key concerns raised:
-  1. Full pipeline from gentilless kernel made CV 7.41% WORSE
-  2. Advanced features may be overfitting to training solvents
+  1. Uncertainty-weighted predictions FAILED - blending toward mean hurts performance
+  2. All 48 experiments fall on the same CV-LB line (R²=0.95)
   3. The intercept problem is STRUCTURAL, not solvable by better models
-  4. The mixall kernel uses GroupKFold (5 splits) instead of Leave-One-Out (24 folds)
-- **CRITICAL INSIGHT**: The competition may use a DIFFERENT validation scheme than our Leave-One-Out CV.
+  4. The "mixall" kernel uses GroupKFold (5 splits) instead of Leave-One-Out (24 folds)
+- **CRITICAL INSIGHT**: We have NOT tried CatBoost, which is used in the top "ens-model" kernel.
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop48_analysis.ipynb` for CV-LB analysis
+- Reference notebooks: See `exploration/evolver_loop49_analysis.ipynb` for CV-LB analysis
 - Key patterns:
   1. All 12 submissions fall on the same CV-LB line (R²=0.95)
   2. The intercept (0.0525) represents STRUCTURAL error from distribution shift
   3. Test solvents are fundamentally different from training solvents
-  4. Full pipeline (exp_047) was 7.41% WORSE than baseline
+  4. Uncertainty-weighted predictions (exp_048) made things WORSE
 
-## CRITICAL INSIGHT: What Top Kernels Do Differently
+## CRITICAL INSIGHT: What We Haven't Tried
 
-### The "mixall" Kernel Secret (MOST IMPORTANT):
-The mixall kernel OVERWRITES the utility functions to use GroupKFold (5 splits) instead of Leave-One-Out (24 folds):
+### 1. CatBoost (HIGHEST PRIORITY)
+The "ens-model" kernel uses CatBoost + XGBoost ensemble:
+- CatBoost has DIFFERENT regularization than LightGBM
+- CatBoost handles categorical features natively
+- CatBoost may generalize better to unseen solvents
+- We have tried LGBM, XGBoost, MLP, GP, RF, GNN, ChemBERTa - but NOT CatBoost!
 
+### 2. Output Normalization (sum to 1 constraint)
+The "ens-model" kernel normalizes outputs:
 ```python
-from sklearn.model_selection import GroupKFold
-
-def generate_leave_one_out_splits(X, Y):
-    """Generate Group K-Fold splits across the solvents (5-fold)."""
-    groups = X["SOLVENT NAME"]
-    n_groups = len(groups.unique())
-    n_splits = min(5, n_groups)
-    
-    gkf = GroupKFold(n_splits=n_splits)
-    
-    for train_idx, test_idx in gkf.split(X, Y, groups):
-        yield (
-            (X.iloc[train_idx], Y.iloc[train_idx]),
-            (X.iloc[test_idx], Y.iloc[test_idx]),
-        )
+out = np.clip(out, a_min=0.0, a_max=None)
+totals = out.sum(axis=1, keepdims=True)
+divisor = np.maximum(totals, 1.0)
+out = out / divisor
 ```
+This ensures predictions sum to at most 1 (chemical constraint).
+We have NOT tried this constraint!
 
-This means:
-1. Their CV scores are NOT comparable to ours
-2. They use a DIFFERENT validation scheme
-3. The competition evaluation may use GroupKFold, not Leave-One-Out
-4. GroupKFold has MORE training data per fold (less distribution shift)
+### 3. Combined Feature Table with Correlation Filtering
+The "ens-model" kernel combines ALL feature sources:
+- spange_descriptors (13 features)
+- acs_pca_descriptors
+- drfps_catechol (filtered)
+- fragprints (filtered)
+- smiles
 
-### Why Our Leave-One-Out CV is HARDER:
-- Leave-One-Out: Each fold tests on 1 solvent (24 folds, ~27 samples per fold)
-- GroupKFold: Each fold tests on ~5 solvents (5 folds, ~130 samples per fold)
-- GroupKFold has more training data per fold
-- GroupKFold may have less distribution shift per fold
+Then applies correlation-based filtering (threshold=0.90) to remove redundant features.
+We have tried individual feature sets, but NOT this combined approach with filtering.
+
+### 4. Different Ensemble Weights for Single vs Full Data
+The "ens-model" kernel uses:
+- Single solvent: CatBoost(7) + XGBoost(6) = 54% CatBoost, 46% XGBoost
+- Full data: CatBoost(1) + XGBoost(2) = 33% CatBoost, 67% XGBoost
+
+We have used the same weights for both datasets.
 
 ## Recommended Approaches (Priority Order)
 
-### Priority 1: Uncertainty-Weighted Predictions (REDUCE INTERCEPT)
-**Why**: The intercept (0.0525) represents extrapolation error. We can reduce it by:
-1. Using GP uncertainty to detect when extrapolating
-2. When uncertainty is high, blend predictions toward population mean
-3. This could reduce catastrophic failures on hard solvents
+### Priority 1: CatBoost + XGBoost Ensemble (HIGHEST LEVERAGE)
+**Why**: CatBoost is the ONLY major gradient boosting library we haven't tried.
+- CatBoost has ordered boosting (reduces overfitting)
+- CatBoost handles categorical features natively
+- CatBoost has different regularization than LGBM/XGBoost
+- The "ens-model" kernel uses CatBoost as the PRIMARY model
 
 **Implementation Strategy**:
 ```python
-# Use GP uncertainty to weight predictions
-gp_pred, gp_std = gp.predict(X_test, return_std=True)
+from catboost import CatBoostRegressor
 
-# Compute confidence (inverse of uncertainty)
-confidence = 1 / (1 + gp_std * alpha)  # alpha controls sensitivity
+# CatBoost parameters (from ens-model kernel)
+cat_params = {
+    'iterations': 500,
+    'learning_rate': 0.03,
+    'depth': 6,
+    'l2_leaf_reg': 3.0,
+    'random_seed': 42,
+    'verbose': False
+}
 
-# Blend toward population mean when uncertain
-population_mean = Y_train.mean()
-final_pred = confidence * gp_pred + (1 - confidence) * population_mean
+# Train one CatBoost per target
+cat_models = []
+for i in range(3):
+    model = CatBoostRegressor(**cat_params)
+    model.fit(X_train, y_train[:, i])
+    cat_models.append(model)
 ```
 
-**HYPOTHESIS**: This approach may CHANGE the CV-LB relationship, not just improve CV. The intercept may decrease because we're being more conservative on hard solvents.
-
-### Priority 2: Solvent Similarity Weighting
-**Why**: For each test solvent, compute similarity to training solvents. More similar = more confident prediction.
+### Priority 2: Output Normalization
+**Why**: Chemical constraint - yields should sum to at most 1.
+- SM + Product 2 + Product 3 ≤ 1 (mass balance)
+- Enforcing this constraint may improve generalization
 
 **Implementation**:
 ```python
-from sklearn.metrics.pairwise import cosine_similarity
-
-# Compute similarity to training solvents
-train_features = spange_df.loc[train_solvents].values
-test_features = spange_df.loc[test_solvent].values.reshape(1, -1)
-similarities = cosine_similarity(test_features, train_features)[0]
-
-# Weight predictions by similarity
-max_similarity = similarities.max()
-if max_similarity < 0.8:  # Extrapolating
-    # Blend toward population mean
-    blend_factor = max_similarity
-    final_pred = blend_factor * model_pred + (1 - blend_factor) * population_mean
+# After prediction
+out = np.clip(out, 0, None)  # Non-negative
+totals = out.sum(axis=1, keepdims=True)
+out = out / np.maximum(totals, 1.0)  # Normalize if sum > 1
 ```
 
-### Priority 3: Conservative Prediction Strategy
-**Why**: Optimize for worst-case performance, not average. Use robust loss functions.
+### Priority 3: Combined Feature Table with Correlation Filtering
+**Why**: May capture complementary information from different feature sources.
 
 **Implementation**:
-- Use Huber loss instead of MSE (less sensitive to outliers)
-- Add regularization toward population mean
-- For hard solvents (Water, HFIP), use simpler models
+```python
+# Load all feature sources
+spange = load_features('spange_descriptors')
+acs = load_features('acs_pca_descriptors')
+drfps = load_features('drfps_catechol')
+fragprints = load_features('fragprints')
+
+# Combine and filter
+combined = pd.concat([spange, acs, drfps, fragprints], axis=1)
+combined = filter_correlated_features(combined, threshold=0.90)
+```
 
 ## What NOT to Try
-1. **Advanced feature engineering** - exp_047 showed this makes CV WORSE
-2. **Stronger hyperparameters** - exp_047 showed 500 iterations doesn't help
-3. **Non-linear mixture formula** - Only helps for mixture data, not single solvents
-4. **More model diversity** - exp_046 showed this doesn't help
-5. **GNN** - exp_040 failed with 8.4x worse MSE
-6. **ChemBERTa embeddings** - exp_041 failed
-7. **Simply improving CV** - The intercept problem cannot be solved by better models
+1. **Uncertainty-weighted predictions** - exp_048 showed this HURTS performance
+2. **Mean reversion** - exp_045 showed this HURTS performance
+3. **GNN** - exp_040 failed with 8.4x worse MSE
+4. **ChemBERTa embeddings** - exp_041 failed
+5. **Deeper/more complex models** - exp_004 showed this doesn't help
+6. **Simply improving CV** - The intercept problem cannot be solved by better models
 
 ## Validation Notes
 - Use Leave-One-Solvent-Out CV for single solvents (24 folds)
 - Use Leave-One-Ramp-Out CV for mixtures (13 folds)
 - CV-LB gap is ~4.3x, but intercept is the real problem
-- **CRITICAL**: Monitor if new approach changes the CV-LB relationship
+- **CRITICAL**: Monitor if CatBoost changes the CV-LB relationship
 
 ## Submission Strategy
 - 5 submissions remaining
-- Only submit if:
-  1. Using a fundamentally different approach (uncertainty-weighted)
-  2. Need to verify if new approach changes CV-LB relationship
-  3. CV improves significantly (>5% improvement)
+- Submit if:
+  1. CatBoost ensemble achieves CV < 0.0080 (better than exp_030)
+  2. Need to verify if CatBoost changes CV-LB relationship
+  3. Output normalization shows significant improvement
 
 ## Key Insight for Executor
 The problem is NOT model quality - it's DISTRIBUTION SHIFT. All 12 submissions fall on the same CV-LB line with intercept 0.0525 > target 0.0347.
 
-**THE TARGET IS REACHABLE** - but not through incremental CV improvements. We need to:
-1. **REDUCE THE INTERCEPT** by using uncertainty-weighted predictions
-2. **Detect extrapolation** and blend toward population mean when uncertain
-3. **Use solvent similarity** to weight predictions
+**HOWEVER**: We have NOT tried CatBoost, which is the PRIMARY model in the top "ens-model" kernel. CatBoost has different regularization and may generalize better to unseen solvents.
 
-**DO NOT** keep optimizing standard ML approaches. The intercept won't change.
+**THE TARGET IS REACHABLE** - but we need to try CatBoost before concluding the intercept is immutable.
 
 ## Specific Implementation for Next Experiment
 
-Create a model that implements:
-1. **GP with uncertainty estimates** for extrapolation detection
-2. **Confidence-weighted blending** toward population mean when uncertain
-3. **Solvent similarity weighting** to detect when extrapolating
-4. **Ensemble with MLP and LGBM** for base predictions
+Create a CatBoost + XGBoost ensemble that:
+1. Uses CatBoost as the primary model (from ens-model kernel)
+2. Combines with XGBoost for diversity
+3. Applies output normalization (sum to 1 constraint)
+4. Uses combined feature table with correlation filtering
 
-**Key Parameters to Tune**:
-- `alpha`: Controls sensitivity of uncertainty weighting (try 0.5, 1.0, 2.0)
-- `similarity_threshold`: Below this, blend toward mean (try 0.7, 0.8, 0.9)
-- `blend_strength`: How much to blend toward mean (try 0.3, 0.5, 0.7)
+**Key Parameters**:
+- CatBoost: iterations=500, learning_rate=0.03, depth=6, l2_leaf_reg=3.0
+- XGBoost: n_estimators=500, learning_rate=0.03, max_depth=6
+- Ensemble weights: CatBoost(7) + XGBoost(6) for single, CatBoost(1) + XGBoost(2) for full
 
-This is the highest-leverage experiment we can run to REDUCE THE INTERCEPT.
+This is the highest-leverage experiment we can run because CatBoost is the ONLY major model type we haven't tried.
 
 ## CRITICAL: Why the Target IS Reachable
 
 The benchmark achieved MSE 0.0039. The top public kernels achieve LB < 0.07. The target (0.0347) IS reachable.
 
-The key insight is that our Leave-One-Out CV is HARDER than the competition's evaluation. The mixall kernel uses GroupKFold (5 splits) which has:
-- More training data per fold
-- Less distribution shift per fold
-- Better CV-LB correlation
-
-Our intercept problem (0.0525 > 0.0347) may be an artifact of our validation scheme, not a fundamental limit.
+The "ens-model" kernel uses CatBoost + XGBoost, which we have NOT tried. CatBoost may have different generalization properties that could CHANGE the CV-LB relationship.
 
 **NEXT STEPS**:
-1. Implement uncertainty-weighted predictions to reduce intercept
-2. Test with different alpha values (0.5, 1.0, 2.0)
-3. If CV improves significantly, submit to verify CV-LB relationship
-4. If intercept doesn't decrease, try GroupKFold validation
+1. Implement CatBoost + XGBoost ensemble
+2. Add output normalization (sum to 1 constraint)
+3. Test with combined feature table
+4. If CV improves significantly, submit to verify CV-LB relationship
