@@ -1,16 +1,16 @@
 {
-  "phase": "executor",
+  "phase": "evaluator",
   "loop_count": 2,
   "last_submission": null,
   "competition_id": "csiro-biomass",
   "seed_prompt": "## Current Status\n- Best CV score: 0.7584 from exp_000 (DINOv2-base + LightGBM)\n- Best LB score: Not yet submitted\n- Target: 0.79\n- Gap to target: 0.0316 (3.16%)\n\n## Response to Evaluator\n- Technical verdict was TRUSTWORTHY. The validation methodology is sound.\n- Evaluator's top priority: \"Upgrade to patch-based DINOv2 features with a larger model.\" I AGREE - this is the highest-leverage change based on kernel research.\n- Key concerns raised:\n  1. CLS token only (missing spatial info) \u2192 Will address with patch-based features\n  2. DINOv2-base vs giant \u2192 Will upgrade to DINOv2-large (1024 dims) as intermediate step\n  3. No biomass constraints \u2192 Will implement post-processing\n  4. Single model type \u2192 Will add ensemble after feature improvements\n  5. High CV variance \u2192 Analysis shows this is NOT due to state imbalance; inherent data variability\n\n## Data Understanding\n- Reference notebooks: See `exploration/evolver_loop1_analysis.ipynb` for analysis\n- Key patterns to exploit:\n  1. **Biomass constraints are EXACT**: GDM = Dry_Green + Dry_Clover, Dry_Total = GDM + Dry_Dead\n     - Post-processing with projection matrix will enforce consistency\n  2. **Height is most predictive tabular feature** (r=0.50 with Dry_Total, r=0.58 with GDM)\n  3. **357 training images** - small dataset, so regularization and ensembling are important\n  4. **15 species types** - some rare (2-5 samples), label encoding loses this info\n\n## Recommended Approaches (Priority Order)\n\n### Priority 1: Upgrade Image Features (HIGHEST IMPACT)\n**Experiment: DINOv2-large with patch-based features**\n- Use `facebook/dinov2-large` (1024 dims vs 768 in base)\n- Extract `last_hidden_state[:,1:,:]` (patch tokens) instead of just CLS\n- Average patch embeddings OR use PCA to reduce dimensionality\n- Expected improvement: +0.02-0.03 based on kernel evidence\n\nImplementation:\n```python\nfrom transformers import AutoImageProcessor, AutoModel\nmodel = AutoModel.from_pretrained('facebook/dinov2-large').cuda().eval()\noutputs = model(**inputs)\n# Use mean of patch tokens instead of CLS\npatch_features = outputs.last_hidden_state[:, 1:, :].mean(dim=1)  # (batch, 1024)\n```\n\n### Priority 2: Post-Processing for Biomass Constraints\n**Implement projection matrix to enforce physical constraints**\n- Constraints: GDM = Dry_Green + Dry_Clover, Dry_Total = GDM + Dry_Dead\n- Use the exact method from 0.69 kernel:\n```python\ndef post_process_biomass(df_preds):\n    ordered_cols = [\"Dry_Green_g\", \"Dry_Clover_g\", \"Dry_Dead_g\", \"GDM_g\", \"Dry_Total_g\"]\n    Y = df_preds[ordered_cols].values.T\n    C = np.array([[1, 1, 0, -1, 0], [0, 0, 1, 1, -1]])  # Constraint matrix\n    C_T = C.T\n    inv_CCt = np.linalg.inv(C @ C_T)\n    P = np.eye(5) - C_T @ inv_CCt @ C  # Projection matrix\n    Y_reconciled = (P @ Y).T.clip(min=0)\n    df_preds[ordered_cols] = Y_reconciled\n    return df_preds\n```\n- Expected improvement: +0.005-0.01 (ensures consistency)\n\n### Priority 3: Multi-Model Ensemble\n**After feature improvements, ensemble multiple gradient boosting models**\n- Models to include: LightGBM, CatBoost, XGBoost, HistGradientBoosting\n- Simple averaging first, then try stacking with Ridge meta-learner\n- Expected improvement: +0.01-0.02\n\n### Priority 4: Test-Time Augmentation (TTA)\n**For inference, average predictions across augmented views**\n- Augmentations: horizontal flip, vertical flip, 90\u00b0 rotation\n- Apply to test images, average predictions\n- Expected improvement: +0.005-0.01\n\n## What NOT to Try (Yet)\n- **Fine-tuning DINOv2**: Too complex for small dataset, risk of overfitting\n- **SigLIP embeddings**: Requires additional model, try DINOv2 improvements first\n- **Neural network head**: LightGBM is working well, focus on features first\n- **Hyperparameter tuning**: Low ROI until features are improved\n\n## Validation Notes\n- Use 5-fold CV with random seed 42 (consistent with baseline)\n- Weighted R\u00b2 metric with weights: Dry_Total=0.5, GDM=0.2, others=0.1\n- Monitor fold variance - if still high, consider stratified CV by State\n\n## Execution Plan for Next Experiment\n1. Extract DINOv2-large patch features (mean of patch tokens)\n2. Train LightGBM with same parameters as baseline\n3. Apply post-processing for biomass constraints\n4. Compare CV score to baseline (0.7584)\n\nTarget for next experiment: CV \u2265 0.77 (halfway to target)",
   "evaluator_feedback": "## What I Understood\n\nThe junior researcher established a solid baseline for the CSIRO biomass prediction competition. They extracted DINOv2-base CLS token embeddings (768 dims) from images and combined them with 4 tabular features (NDVI, Height, State, Species) to train LightGBM models for each of the 5 target variables. The approach achieved an OOF weighted R\u00b2 of 0.7584 using 5-fold CV, which is a reasonable starting point but still ~0.03 below the target of 0.79.\n\n## Technical Execution Assessment\n\n**Validation**: The 5-fold CV methodology is sound. The weighted R\u00b2 calculation correctly implements the competition metric with proper per-target weights (Dry_Total_g: 0.5, GDM_g: 0.2, others: 0.1). The fold scores show reasonable variance (0.7552 \u00b1 0.0489), though Fold 5 at 0.6710 is notably lower than others, suggesting some data heterogeneity.\n\n**Leakage Risk**: None detected. The CV splits are done at the image level (correct), embeddings are extracted before CV (acceptable since DINOv2 is pretrained and not fine-tuned), and tabular feature encoding uses label encoding which doesn't leak target information.\n\n**Score Integrity**: Verified. The fold scores (0.7288, 0.7881, 0.8003, 0.7875, 0.6710) average to 0.7552, and the overall OOF R\u00b2 of 0.7584 is consistent. The scores are directly from notebook output.\n\n**Code Quality**: Good. Seeds are set, early stopping is used properly, predictions are clipped to non-negative values. One minor issue: for test predictions, tabular features are filled with training means/modes, which is a reasonable fallback but worth noting.\n\nVerdict: **TRUSTWORTHY**\n\n## Strategic Assessment\n\n**Approach Fit**: The approach is reasonable but leaves significant room for improvement. The top kernels (0.66-0.69 LB) use:\n1. **Larger models**: DINOv2-giant instead of base (1536 vs 768 dims)\n2. **Patch-based features**: Split images into 520px patches and average embeddings, rather than just CLS token\n3. **Dense features**: Use last_hidden_state[:,1:,:] (patch tokens) instead of just pooler_output\n4. **Multiple embedding types**: SigLIP + DINOv2 ensembles\n5. **Feature engineering**: PCA/PLS dimensionality reduction, semantic text features\n6. **Post-processing**: Enforce biomass constraints (GDM = Green + Clover, Total = GDM + Dead)\n\n**Effort Allocation**: The baseline is a good starting point, but the gap to target (0.79 - 0.7584 = 0.0316) requires more than incremental improvements. The current bottleneck is likely **feature quality** - the CLS token alone may not capture the spatial distribution of biomass that patch-based approaches can.\n\n**Assumptions Being Made**:\n1. CLS token captures sufficient image information (likely suboptimal for this task)\n2. DINOv2-base is sufficient (larger models consistently perform better)\n3. Simple tabular features are adequate (Species encoding loses information about species composition)\n4. Independent target prediction (ignoring biomass constraints)\n\n**Blind Spots**:\n1. **No TTA (Test-Time Augmentation)**: Top kernels use horizontal/vertical flips, rotations, and Gaussian blur\n2. **No ensemble**: Single model type (LightGBM only)\n3. **No post-processing**: Biomass constraints (GDM = Dry_Green + Dry_Clover, Dry_Total = GDM + Dry_Dead) are not enforced\n4. **No patch-based features**: The spatial distribution of vegetation matters for biomass estimation\n5. **No fine-tuning**: End-to-end training with SAM optimizer shows benefits in top kernels\n\n**Trajectory**: This is experiment 0 - a solid baseline. The score of 0.7584 is actually quite good for a first attempt. The path to 0.79+ is clear from the kernel research: larger models, patch-based features, ensembling, and post-processing.\n\n## What's Working\n\n1. **Sound validation methodology**: The weighted R\u00b2 implementation matches the competition metric exactly\n2. **Correct data handling**: Pivoting to image-level, proper CV splits\n3. **Reasonable baseline architecture**: DINOv2 + LightGBM is a proven combination\n4. **Good code practices**: Seeds set, early stopping, non-negative clipping\n\n## Key Concerns\n\n1. **Observation**: Using only CLS token (pooler_output) instead of patch-based features\n   - **Why it matters**: Biomass estimation benefits from spatial information - where the grass is dense vs sparse. CLS token compresses this into a single vector.\n   - **Suggestion**: Extract dense features (last_hidden_state[:,1:,:]) and either average them or use a learned aggregation (MLP per patch).\n\n2. **Observation**: DINOv2-base (768 dims) vs DINOv2-giant (1536 dims)\n   - **Why it matters**: Top kernels consistently use larger models. The 0.66 LB kernel explicitly uses DINOv2-giant.\n   - **Suggestion**: Upgrade to DINOv2-large or giant. The H100 GPU has plenty of memory.\n\n3. **Observation**: No biomass constraint enforcement\n   - **Why it matters**: The targets have physical relationships: GDM = Dry_Green + Dry_Clover, Dry_Total = GDM + Dry_Dead. Enforcing these improves consistency.\n   - **Suggestion**: Implement post-processing from the 0.69 kernel (projection matrix to enforce constraints).\n\n4. **Observation**: Single model type, no ensemble\n   - **Why it matters**: The 0.69 kernel uses 4 different gradient boosting models (GradientBoosting, HistGradientBoosting, CatBoost, LightGBM) plus neural approaches.\n   - **Suggestion**: Add CatBoost and XGBoost to the ensemble.\n\n5. **Observation**: High CV variance (Fold 5 at 0.6710 vs others at 0.73-0.80)\n   - **Why it matters**: This suggests the model may be sensitive to data distribution. Could indicate overfitting or data heterogeneity.\n   - **Suggestion**: Investigate what makes Fold 5 different (State distribution? Species? Date?). Consider stratified CV.\n\n## Top Priority for Next Experiment\n\n**Upgrade to patch-based DINOv2 features with a larger model.** This is the highest-leverage change because:\n\n1. The top kernels (0.66-0.69 LB) all use patch-based features, not just CLS tokens\n2. DINOv2-giant is readily available and the H100 can handle it\n3. This addresses the fundamental limitation of the current approach (spatial information loss)\n\nSpecific implementation:\n- Use `model(**inputs).last_hidden_state[:,1:,:]` to get patch tokens\n- Either average them directly, or use a simple MLP per patch and average predictions\n- Consider splitting large images into 520px patches (as in the 0.69 kernel) before embedding\n\nSecondary priorities (for subsequent experiments):\n- Add post-processing to enforce biomass constraints\n- Ensemble multiple gradient boosting models\n- Add TTA for inference\n",
   "latest_experiment": {
-    "name": "DINOv2-base + LightGBM Baseline",
+    "name": "DINOv2-large Patch + Post-Processing",
     "model_type": "lgbm",
-    "score": 0.7584,
-    "notes": "Baseline using DINOv2-base CLS token embeddings (768 dims) + 4 tabular features (NDVI, Height, State, Species). 5-fold CV with LightGBM. Mean CV R\u00b2: 0.7552 \u00b1 0.0489, Overall OOF R\u00b2: 0.7584. Good starting point. Top kernels achieve 0.66-0.69 on LB, suggesting room for improvement with better feature engineering, larger models, and ensembling.",
-    "timestamp": "2026-01-15T01:54:27.716748"
+    "score": 0.7715,
+    "notes": "Upgraded from DINOv2-base CLS to DINOv2-large patch-based features (mean of patch tokens, 1024 dims). Added post-processing to enforce biomass constraints (GDM = Green + Clover, Total = GDM + Dead). Raw CV: 0.7622, Post-processed CV: 0.7715. Improvement over baseline: +0.0131. Post-processing alone adds ~0.01. Fold variance still high (0.65-0.82). Next steps: try ensemble of multiple GB models, TTA, or DINOv2-giant.",
+    "timestamp": "2026-01-15T02:05:20.837017"
   },
   "competitive_intel": "## Available Competitive Intelligence\n\n- Competition description: `../research/description.md`\n- 5 top kernel notebooks in `../research/kernels/`",
   "target_score": 0.79,
@@ -590,6 +590,333 @@
           "tool_use_id": "toolu_01ToD1ah74P3U5EJxD6aKs2H",
           "content": "Transitioning to next phase",
           "is_error": false
+        },
+        {
+          "type": "text",
+          "text": "\ud83d\udd04 **EVALUATION COMPLETE - RESUMING**\n\n## Evaluator Feedback\n## What I Understood\n\nThe junior researcher established a solid baseline for the CSIRO biomass prediction competition. They extracted DINOv2-base CLS token embeddings (768 dims) from images and combined them with 4 tabular features (NDVI, Height, State, Species) to train LightGBM models for each of the 5 target variables. The approach achieved an OOF weighted R\u00b2 of 0.7584 using 5-fold CV, which is a reasonable starting point but still ~0.03 below the target of 0.79.\n\n## Technical Execution Assessment\n\n**Validation**: The 5-fold CV methodology is sound. The weighted R\u00b2 calculation correctly implements the competition metric with proper per-target weights (Dry_Total_g: 0.5, GDM_g: 0.2, others: 0.1). The fold scores show reasonable variance (0.7552 \u00b1 0.0489), though Fold 5 at 0.6710 is notably lower than others, suggesting some data heterogeneity.\n\n**Leakage Risk**: None detected. The CV splits are done at the image level (correct), embeddings are extracted before CV (acceptable since DINOv2 is pretrained and not fine-tuned), and tabular feature encoding uses label encoding which doesn't leak target information.\n\n**Score Integrity**: Verified. The fold scores (0.7288, 0.7881, 0.8003, 0.7875, 0.6710) average to 0.7552, and the overall OOF R\u00b2 of 0.7584 is consistent. The scores are directly from notebook output.\n\n**Code Quality**: Good. Seeds are set, early stopping is used properly, predictions are clipped to non-negative values. One minor issue: for test predictions, tabular features are filled with training means/modes, which is a reasonable fallback but worth noting.\n\nVerdict: **TRUSTWORTHY**\n\n## Strategic Assessment\n\n**Approach Fit**: The approach is reasonable but leaves significant room for improvement. The top kernels (0.66-0.69 LB) use:\n1. **Larger models**: DINOv2-giant instead of base (1536 vs 768 dims)\n2. **Patch-based features**: Split images into 520px patches and average embeddings, rather than just CLS token\n3. **Dense features**: Use last_hidden_state[:,1:,:] (patch tokens) instead of just pooler_output\n4. **Multiple embedding types**: SigLIP + DINOv2 ensembles\n5. **Feature engineering**: PCA/PLS dimensionality reduction, semantic text features\n6. **Post-processing**: Enforce biomass constraints (GDM = Green + Clover, Total = GDM + Dead)\n\n**Effort Allocation**: The baseline is a good starting point, but the gap to target (0.79 - 0.7584 = 0.0316) requires more than incremental improvements. The current bottleneck is likely **feature quality** - the CLS token alone may not capture the spatial distribution of biomass that patch-based approaches can.\n\n**Assumptions Being Made**:\n1. CLS token captures sufficient image information (likely suboptimal for this task)\n2. DINOv2-base is sufficient (larger models consistently perform better)\n3. Simple tabular features are adequate (Species encoding loses information about species composition)\n4. Independent target prediction (ignoring biomass constraints)\n\n**Blind Spots**:\n1. **No TTA (Test-Time Augmentation)**: Top kernels use horizontal/vertical flips, rotations, and Gaussian blur\n2. **No ensemble**: Single model type (LightGBM only)\n3. **No post-processing**: Biomass constraints (GDM = Dry_Green + Dry_Clover, Dry_Total = GDM + Dry_Dead) are not enforced\n4. **No patch-based features**: The spatial distribution of vegetation matters for biomass estimation\n5. **No fine-tuning**: End-to-end training with SAM optimizer shows benefits in top kernels\n\n**Trajectory**: This is experiment 0 - a solid baseline. The score of 0.7584 is actually quite good for a first attempt. The path to 0.79+ is clear from the kernel research: larger models, patch-based features, ensembling, and post-processing.\n\n## What's Working\n\n1. **Sound validation methodology**: The weighted R\u00b2 implementation matches the competition metric exactly\n2. **Correct data handling**: Pivoting to image-level, proper CV splits\n3. **Reasonable baseline architecture**: DINOv2 + LightGBM is a proven combination\n4. **Good code practices**: Seeds set, early stopping, non-negative clipping\n\n## Key Concerns\n\n1. **Observation**: Using only CLS token (pooler_output) instead of patch-based features\n   - **Why it matters**: Biomass estimation benefits from spatial information - where the grass is dense vs sparse. CLS token compresses this into a single vector.\n   - **Suggestion**: Extract dense features (last_hidden_state[:,1:,:]) and either average them or use a learned aggregation (MLP per patch).\n\n2. **Observation**: DINOv2-base (768 dims) vs DINOv2-giant (1536 dims)\n   - **Why it matters**: Top kernels consistently use larger models. The 0.66 LB kernel explicitly uses DINOv2-giant.\n   - **Suggestion**: Upgrade to DINOv2-large or giant. The H100 GPU has plenty of memory.\n\n3. **Observation**: No biomass constraint enforcement\n   - **Why it matters**: The targets have physical relationships: GDM = Dry_Green + Dry_Clover, Dry_Total = GDM + Dry_Dead. Enforcing these improves consistency.\n   - **Suggestion**: Implement post-processing from the 0.69 kernel (projection matrix to enforce constraints).\n\n4. **Observation**: Single model type, no ensemble\n   - **Why it matters**: The 0.69 kernel uses 4 different gradient boosting models (GradientBoosting, HistGradientBoosting, CatBoost, LightGBM) plus neural approaches.\n   - **Suggestion**: Add CatBoost and XGBoost to the ensemble.\n\n5. **Observation**: High CV variance (Fold 5 at 0.6710 vs others at 0.73-0.80)\n   - **Why it matters**: This suggests the model may be sensitive to data distribution. Could indicate overfitting or data heterogeneity.\n   - **Suggestion**: Investigate what makes Fold 5 different (State distribution? Species? Date?). Consider stratified CV.\n\n## Top Priority for Next Experiment\n\n**Upgrade to patch-based DINOv2 features with a larger model.** This is the highest-leverage change because:\n\n1. The top kernels (0.66-0.69 LB) all use patch-based features, not just CLS tokens\n2. DINOv2-giant is readily available and the H100 can handle it\n3. This addresses the fundamental limitation of the current approach (spatial information loss)\n\nSpecific implementation:\n- Use `model(**inputs).last_hidden_state[:,1:,:]` to get patch tokens\n- Either average them directly, or use a simple MLP per patch and average predictions\n- Consider splitting large images into 520px patches (as in the 0.69 kernel) before embedding\n\nSecondary priorities (for subsequent experiments):\n- Add post-processing to enforce biomass constraints\n- Ensemble multiple gradient boosting models\n- Add TTA for inference\n\n\n## Updated Strategy\n## Current Status\n- Best CV score: 0.7584 from exp_000 (DINOv2-base + LightGBM)\n- Best LB score: Not yet submitted\n- Target: 0.79\n- Gap to target: 0.0316 (3.16%)\n\n## Response to Evaluator\n- Technical verdict was TRUSTWORTHY. The validation methodology is sound.\n- Evaluator's top priority: \"Upgrade to patch-based DINOv2 features with a larger model.\" I AGREE - this is the highest-leverage change based on kernel research.\n- Key concerns raised:\n  1. CLS token only (missing spatial info) \u2192 Will address with patch-based features\n  2. DINOv2-base vs giant \u2192 Will upgrade to DINOv2-large (1024 dims) as intermediate step\n  3. No biomass constraints \u2192 Will implement post-processing\n  4. Single model type \u2192 Will add ensemble after feature improvements\n  5. High CV variance \u2192 Analysis shows this is NOT due to state imbalance; inherent data variability\n\n## Data Understanding\n- Reference notebooks: See `exploration/evolver_loop1_analysis.ipynb` for analysis\n- Key patterns to exploit:\n  1. **Biomass constraints are EXACT**: GDM = Dry_Green + Dry_Clover, Dry_Total = GDM + Dry_Dead\n     - Post-processing with projection matrix will enforce consistency\n  2. **Height is most predictive tabular feature** (r=0.50 with Dry_Total, r=0.58 with GDM)\n  3. **357 training images** - small dataset, so regularization and ensembling are important\n  4. **15 species types** - some rare (2-5 samples), label encoding loses this info\n\n## Recommended Approaches (Priority Order)\n\n### Priority 1: Upgrade Image Features (HIGHEST IMPACT)\n**Experiment: DINOv2-large with patch-based features**\n- Use `facebook/dinov2-large` (1024 dims vs 768 in base)\n- Extract `last_hidden_state[:,1:,:]` (patch tokens) instead of just CLS\n- Average patch embeddings OR use PCA to reduce dimensionality\n- Expected improvement: +0.02-0.03 based on kernel evidence\n\nImplementation:\n```python\nfrom transformers import AutoImageProcessor, AutoModel\nmodel = AutoModel.from_pretrained('facebook/dinov2-large').cuda().eval()\noutputs = model(**inputs)\n# Use mean of patch tokens instead of CLS\npatch_features = outputs.last_hidden_state[:, 1:, :].mean(dim=1)  # (batch, 1024)\n```\n\n### Priority 2: Post-Processing for Biomass Constraints\n**Implement projection matrix to enforce physical constraints**\n- Constraints: GDM = Dry_Green + Dry_Clover, Dry_Total = GDM + Dry_Dead\n- Use the exact method from 0.69 kernel:\n```python\ndef post_process_biomass(df_preds):\n    ordered_cols = [\"Dry_Green_g\", \"Dry_Clover_g\", \"Dry_Dead_g\", \"GDM_g\", \"Dry_Total_g\"]\n    Y = df_preds[ordered_cols].values.T\n    C = np.array([[1, 1, 0, -1, 0], [0, 0, 1, 1, -1]])  # Constraint matrix\n    C_T = C.T\n    inv_CCt = np.linalg.inv(C @ C_T)\n    P = np.eye(5) - C_T @ inv_CCt @ C  # Projection matrix\n    Y_reconciled = (P @ Y).T.clip(min=0)\n    df_preds[ordered_cols] = Y_reconciled\n    return df_preds\n```\n- Expected improvement: +0.005-0.01 (ensures consistency)\n\n### Priority 3: Multi-Model Ensemble\n**After feature improvements, ensemble multiple gradient boosting models**\n- Models to include: LightGBM, CatBoost, XGBoost, HistGradientBoosting\n- Simple averaging first, then try stacking with Ridge meta-learner\n- Expected improvement: +0.01-0.02\n\n### Priority 4: Test-Time Augmentation (TTA)\n**For inference, average predictions across augmented views**\n- Augmentations: horizontal flip, vertical flip, 90\u00b0 rotation\n- Apply to test images, average predictions\n- Expected improvement: +0.005-0.01\n\n## What NOT to Try (Yet)\n- **Fine-tuning DINOv2**: Too complex for small dataset, risk of overfitting\n- **SigLIP embeddings**: Requires additional model, try DINOv2 improvements first\n- **Neural network head**: LightGBM is working well, focus on features first\n- **Hyperparameter tuning**: Low ROI until features are improved\n\n## Validation Notes\n- Use 5-fold CV with random seed 42 (consistent with baseline)\n- Weighted R\u00b2 metric with weights: Dry_Total=0.5, GDM=0.2, others=0.1\n- Monitor fold variance - if still high, consider stratified CV by State\n\n## Execution Plan for Next Experiment\n1. Extract DINOv2-large patch features (mean of patch tokens)\n2. Train LightGBM with same parameters as baseline\n3. Apply post-processing for biomass constraints\n4. Compare CV score to baseline (0.7584)\n\nTarget for next experiment: CV \u2265 0.77 (halfway to target)\n\nContinue experimenting based on the updated guidance above."
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": "Begin experimenting. Follow the seed prompt strategy and create your first baseline.\n\n**IMPORTANT:** Before starting, read `session_state.json` to see existing data findings and notebook references. The strategy below will mention which notebooks to reference for data understanding.\n\n\n## EXISTING DATA FINDINGS\nThe following insights have already been discovered. Reference these instead of re-doing EDA:\n\n- **../research/kernels/antonoof_0-69-ensemble-3-models-embeddings/0-69-ensemble-3-models-embeddings.ipynb**: Top kernel (0.69 R\u00b2) uses ensemble of 3 models: 1) SigLIP embeddings + gradient boosting ensemble (GradientBoosting, HistGradientBoosting, CatBoost, LightGBM), 2) DINOv2/v3 backbone with FiLM conditio...\n- **../research/kernels/carsoncheng_csiro-dinov2-dense-features-lb-0-66/csiro-dinov2-dense-features-lb-0-66.ipynb**: DINOv2 dense features approach (LB 0.66): Uses DINOv2 giant model to extract patch-based features (last_hidden_state[:,1:,:]), then applies shared MLP per patch and averages predictions. Uses TTA with...\n- **exploration/evolver_loop1_analysis.ipynb**: Biomass constraints are EXACT in training data: GDM = Dry_Green + Dry_Clover (max deviation 0.0001), Dry_Total = GDM + Dry_Dead (max deviation 0.31). Post-processing to enforce these constraints will ...\n- **exploration/evolver_loop1_analysis.ipynb**: Tabular features have moderate correlation with targets: Height correlates 0.497 with Dry_Total_g, 0.583 with GDM_g. NDVI correlates 0.361 with Dry_Total_g, 0.467 with GDM_g. Image features are critic...\n- **exploration/evolver_loop1_analysis.ipynb**: Fold variance in baseline (0.67-0.80) is NOT due to state distribution imbalance - all folds have similar state distributions. Likely due to inherent data variability or model sensitivity.\n\nRead `session_state.json` for the complete list and all notebook references.\n\n## SEED PROMPT STRATEGY\n## Current Status\n- Best CV score: 0.7584 from exp_000 (DINOv2-base + LightGBM)\n- Best LB score: Not yet submitted\n- Target: 0.79\n- Gap to target: 0.0316 (3.16%)\n\n## Response to Evaluator\n- Technical verdict was TRUSTWORTHY. The validation methodology is sound.\n- Evaluator's top priority: \"Upgrade to patch-based DINOv2 features with a larger model.\" I AGREE - this is the highest-leverage change based on kernel research.\n- Key concerns raised:\n  1. CLS token only (missing spatial info) \u2192 Will address with patch-based features\n  2. DINOv2-base vs giant \u2192 Will upgrade to DINOv2-large (1024 dims) as intermediate step\n  3. No biomass constraints \u2192 Will implement post-processing\n  4. Single model type \u2192 Will add ensemble after feature improvements\n  5. High CV variance \u2192 Analysis shows this is NOT due to state imbalance; inherent data variability\n\n## Data Understanding\n- Reference notebooks: See `exploration/evolver_loop1_analysis.ipynb` for analysis\n- Key patterns to exploit:\n  1. **Biomass constraints are EXACT**: GDM = Dry_Green + Dry_Clover, Dry_Total = GDM + Dry_Dead\n     - Post-processing with projection matrix will enforce consistency\n  2. **Height is most predictive tabular feature** (r=0.50 with Dry_Total, r=0.58 with GDM)\n  3. **357 training images** - small dataset, so regularization and ensembling are important\n  4. **15 species types** - some rare (2-5 samples), label encoding loses this info\n\n## Recommended Approaches (Priority Order)\n\n### Priority 1: Upgrade Image Features (HIGHEST IMPACT)\n**Experiment: DINOv2-large with patch-based features**\n- Use `facebook/dinov2-large` (1024 dims vs 768 in base)\n- Extract `last_hidden_state[:,1:,:]` (patch tokens) instead of just CLS\n- Average patch embeddings OR use PCA to reduce dimensionality\n- Expected improvement: +0.02-0.03 based on kernel evidence\n\nImplementation:\n```python\nfrom transformers import AutoImageProcessor, AutoModel\nmodel = AutoModel.from_pretrained('facebook/dinov2-large').cuda().eval()\noutputs = model(**inputs)\n# Use mean of patch tokens instead of CLS\npatch_features = outputs.last_hidden_state[:, 1:, :].mean(dim=1)  # (batch, 1024)\n```\n\n### Priority 2: Post-Processing for Biomass Constraints\n**Implement projection matrix to enforce physical constraints**\n- Constraints: GDM = Dry_Green + Dry_Clover, Dry_Total = GDM + Dry_Dead\n- Use the exact method from 0.69 kernel:\n```python\ndef post_process_biomass(df_preds):\n    ordered_cols = [\"Dry_Green_g\", \"Dry_Clover_g\", \"Dry_Dead_g\", \"GDM_g\", \"Dry_Total_g\"]\n    Y = df_preds[ordered_cols].values.T\n    C = np.array([[1, 1, 0, -1, 0], [0, 0, 1, 1, -1]])  # Constraint matrix\n    C_T = C.T\n    inv_CCt = np.linalg.inv(C @ C_T)\n    P = np.eye(5) - C_T @ inv_CCt @ C  # Projection matrix\n    Y_reconciled = (P @ Y).T.clip(min=0)\n    df_preds[ordered_cols] = Y_reconciled\n    return df_preds\n```\n- Expected improvement: +0.005-0.01 (ensures consistency)\n\n### Priority 3: Multi-Model Ensemble\n**After feature improvements, ensemble multiple gradient boosting models**\n- Models to include: LightGBM, CatBoost, XGBoost, HistGradientBoosting\n- Simple averaging first, then try stacking with Ridge meta-learner\n- Expected improvement: +0.01-0.02\n\n### Priority 4: Test-Time Augmentation (TTA)\n**For inference, average predictions across augmented views**\n- Augmentations: horizontal flip, vertical flip, 90\u00b0 rotation\n- Apply to test images, average predictions\n- Expected improvement: +0.005-0.01\n\n## What NOT to Try (Yet)\n- **Fine-tuning DINOv2**: Too complex for small dataset, risk of overfitting\n- **SigLIP embeddings**: Requires additional model, try DINOv2 improvements first\n- **Neural network head**: LightGBM is working well, focus on features first\n- **Hyperparameter tuning**: Low ROI until features are improved\n\n## Validation Notes\n- Use 5-fold CV with random seed 42 (consistent with baseline)\n- Weighted R\u00b2 metric with weights: Dry_Total=0.5, GDM=0.2, others=0.1\n- Monitor fold variance - if still high, consider stratified CV by State\n\n## Execution Plan for Next Experiment\n1. Extract DINOv2-large patch features (mean of patch tokens)\n2. Train LightGBM with same parameters as baseline\n3. Apply post-processing for biomass constraints\n4. Compare CV score to baseline (0.7584)\n\nTarget for next experiment: CV \u2265 0.77 (halfway to target)\n\nStart with a simple baseline following this strategy. Reference the notebooks mentioned in the strategy for data understanding."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "REASONING: Following the evolver's strategy, I need to implement Priority 1 (DINOv2-large with patch-based features) and Priority 2 (post-processing for biomass constraints). Let me create a new experiment notebook."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01VXzRtyN66GbQmiio5qkgdc",
+          "name": "Bash",
+          "input": {
+            "command": "mkdir -p /home/code/experiments/002_dinov2_large_patch"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01VXzRtyN66GbQmiio5qkgdc",
+          "content": "(no output)",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_017SX4RnMeQAFRxCkkYsT1do",
+          "name": "CreateNotebook",
+          "input": {
+            "notebook_path": "/home/code/experiments/002_dinov2_large_patch/experiment.ipynb",
+            "cells": [
+              {
+                "cell_type": "markdown",
+                "content": "# Experiment 002: DINOv2-Large Patch Features + Post-Processing\n\nFollowing evolver strategy:\n1. Use DINOv2-large (1024 dims) instead of base (768 dims)\n2. Extract patch tokens (last_hidden_state[:,1:,:]) instead of just CLS\n3. Apply post-processing to enforce biomass constraints"
+              },
+              {
+                "cell_type": "code",
+                "content": "import os\nimport numpy as np\nimport pandas as pd\nimport torch\nimport torch.nn as nn\nfrom PIL import Image\nfrom tqdm import tqdm\nimport warnings\nwarnings.filterwarnings('ignore')\n\n# Verify GPU\nprint(f'CUDA available: {torch.cuda.is_available()}')\nprint(f'GPU: {torch.cuda.get_device_name(0)}')\nprint(f'Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB')"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Load data\nDATA_DIR = '/home/data'\ntrain_df = pd.read_csv(f'{DATA_DIR}/train.csv')\ntest_df = pd.read_csv(f'{DATA_DIR}/test.csv')\n\n# Pivot train data to have one row per image with all targets\ntrain_pivot = train_df.pivot_table(\n    index=['image_path', 'Sampling_Date', 'State', 'Species', 'Pre_GSHH_NDVI', 'Height_Ave_cm'],\n    columns='target_name',\n    values='target'\n).reset_index()\n\nprint(f'Pivoted train shape: {train_pivot.shape}')\nprint(f'Test shape: {test_df.shape}')"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Load DINOv2-large model (1024 dims vs 768 in base)\nfrom transformers import AutoImageProcessor, AutoModel\n\nmodel_name = 'facebook/dinov2-large'\nprocessor = AutoImageProcessor.from_pretrained(model_name)\nmodel = AutoModel.from_pretrained(model_name).cuda().eval()\n\nprint(f'Model loaded: {model_name}')\nprint(f'Hidden size: {model.config.hidden_size}')"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Extract PATCH-BASED embeddings (mean of patch tokens, not CLS)\ndef extract_patch_embeddings(image_paths, data_dir, batch_size=8):\n    \"\"\"Extract mean of patch tokens instead of CLS token.\"\"\"\n    embeddings = []\n    \n    with torch.no_grad():\n        for i in tqdm(range(0, len(image_paths), batch_size)):\n            batch_paths = image_paths[i:i+batch_size]\n            images = []\n            \n            for path in batch_paths:\n                img = Image.open(f'{data_dir}/{path}').convert('RGB')\n                images.append(img)\n            \n            inputs = processor(images=images, return_tensors='pt').to('cuda')\n            outputs = model(**inputs)\n            \n            # Use MEAN of patch tokens (excluding CLS token at position 0)\n            # last_hidden_state shape: (batch, num_patches+1, hidden_size)\n            patch_tokens = outputs.last_hidden_state[:, 1:, :]  # Exclude CLS\n            patch_mean = patch_tokens.mean(dim=1)  # Average over patches\n            \n            embeddings.append(patch_mean.cpu().numpy())\n    \n    return np.vstack(embeddings)\n\n# Extract train embeddings\nprint('Extracting train patch embeddings with DINOv2-large...')\ntrain_embeddings = extract_patch_embeddings(train_pivot['image_path'].values, DATA_DIR)\nprint(f'Train embeddings shape: {train_embeddings.shape}')"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Extract test embeddings\nprint('Extracting test patch embeddings...')\ntest_images_unique = test_df['image_path'].unique()\ntest_embeddings = extract_patch_embeddings(test_images_unique, DATA_DIR)\nprint(f'Test embeddings shape: {test_embeddings.shape}')"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Create feature dataframe with embeddings\nemb_cols = [f'emb_{i}' for i in range(train_embeddings.shape[1])]\ntrain_emb_df = pd.DataFrame(train_embeddings, columns=emb_cols)\ntrain_emb_df['image_path'] = train_pivot['image_path'].values\n\ntest_emb_df = pd.DataFrame(test_embeddings, columns=emb_cols)\ntest_emb_df['image_path'] = test_images_unique\n\nprint(f'Train embeddings df shape: {train_emb_df.shape}')\nprint(f'Test embeddings df shape: {test_emb_df.shape}')"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Prepare tabular features\nfrom sklearn.preprocessing import LabelEncoder\n\nle_state = LabelEncoder()\nle_species = LabelEncoder()\n\nall_states = pd.concat([train_pivot['State'], pd.Series(['Unknown'])])\nall_species = pd.concat([train_pivot['Species'], pd.Series(['Unknown'])])\n\nle_state.fit(all_states)\nle_species.fit(all_species)\n\ntrain_pivot['State_enc'] = le_state.transform(train_pivot['State'])\ntrain_pivot['Species_enc'] = le_species.transform(train_pivot['Species'])\n\nprint(f'States: {le_state.classes_}')\nprint(f'Species count: {len(le_species.classes_)}')"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Merge embeddings with tabular features\ntrain_full = train_pivot.merge(train_emb_df, on='image_path')\nprint(f'Train full shape: {train_full.shape}')\n\n# Define target columns and weights\ntarget_cols = ['Dry_Green_g', 'Dry_Dead_g', 'Dry_Clover_g', 'GDM_g', 'Dry_Total_g']\ntarget_weights = {'Dry_Green_g': 0.1, 'Dry_Dead_g': 0.1, 'Dry_Clover_g': 0.1, 'GDM_g': 0.2, 'Dry_Total_g': 0.5}\n\n# Define feature columns (1024 DINOv2-large + 4 tabular)\nfeature_cols = ['Pre_GSHH_NDVI', 'Height_Ave_cm', 'State_enc', 'Species_enc'] + emb_cols\nprint(f'Number of features: {len(feature_cols)}')"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Define weighted R2 metric\ndef weighted_r2(y_true_dict, y_pred_dict, weights):\n    \"\"\"Calculate globally weighted R2 across all targets.\"\"\"\n    all_y_true = []\n    all_y_pred = []\n    all_weights = []\n    \n    for target in y_true_dict.keys():\n        all_y_true.extend(y_true_dict[target])\n        all_y_pred.extend(y_pred_dict[target])\n        all_weights.extend([weights[target]] * len(y_true_dict[target]))\n    \n    all_y_true = np.array(all_y_true)\n    all_y_pred = np.array(all_y_pred)\n    all_weights = np.array(all_weights)\n    \n    y_mean = np.sum(all_weights * all_y_true) / np.sum(all_weights)\n    ss_res = np.sum(all_weights * (all_y_true - all_y_pred) ** 2)\n    ss_tot = np.sum(all_weights * (all_y_true - y_mean) ** 2)\n    \n    return 1 - ss_res / ss_tot"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Post-processing function to enforce biomass constraints\n# GDM = Dry_Green + Dry_Clover\n# Dry_Total = GDM + Dry_Dead\ndef post_process_biomass(preds_dict):\n    \"\"\"Apply projection matrix to enforce biomass constraints.\"\"\"\n    # Order: Dry_Green, Dry_Clover, Dry_Dead, GDM, Dry_Total\n    ordered_cols = ['Dry_Green_g', 'Dry_Clover_g', 'Dry_Dead_g', 'GDM_g', 'Dry_Total_g']\n    \n    # Stack predictions into matrix (5 x n_samples)\n    Y = np.vstack([preds_dict[col] for col in ordered_cols])\n    \n    # Constraint matrix C such that C @ Y = 0 for valid predictions\n    # Constraint 1: Dry_Green + Dry_Clover - GDM = 0\n    # Constraint 2: Dry_Dead + GDM - Dry_Total = 0\n    C = np.array([\n        [1, 1, 0, -1, 0],   # Dry_Green + Dry_Clover = GDM\n        [0, 0, 1, 1, -1]    # Dry_Dead + GDM = Dry_Total\n    ])\n    \n    # Projection matrix: P = I - C^T @ (C @ C^T)^-1 @ C\n    C_T = C.T\n    inv_CCt = np.linalg.inv(C @ C_T)\n    P = np.eye(5) - C_T @ inv_CCt @ C\n    \n    # Apply projection and clip to non-negative\n    Y_reconciled = (P @ Y).clip(min=0)\n    \n    # Return as dictionary\n    result = {}\n    for i, col in enumerate(ordered_cols):\n        result[col] = Y_reconciled[i]\n    \n    return result\n\nprint('Post-processing function defined')"
+              },
+              {
+                "cell_type": "code",
+                "content": "# 5-Fold Cross Validation with LightGBM\nimport lightgbm as lgb\nfrom sklearn.model_selection import KFold\n\nN_FOLDS = 5\nkf = KFold(n_splits=N_FOLDS, shuffle=True, random_state=42)\n\n# Store OOF predictions\noof_preds = {target: np.zeros(len(train_full)) for target in target_cols}\noof_preds_pp = {target: np.zeros(len(train_full)) for target in target_cols}  # Post-processed\nfold_scores = []\nfold_scores_pp = []\n\nX = train_full[feature_cols].values\n\nfor fold, (train_idx, val_idx) in enumerate(kf.split(X)):\n    print(f'\\n=== Fold {fold + 1} ===')\n    \n    X_train, X_val = X[train_idx], X[val_idx]\n    \n    fold_y_true = {}\n    fold_y_pred = {}\n    \n    for target in target_cols:\n        y = train_full[target].values\n        y_train, y_val = y[train_idx], y[val_idx]\n        \n        params = {\n            'objective': 'regression',\n            'metric': 'rmse',\n            'boosting_type': 'gbdt',\n            'num_leaves': 31,\n            'learning_rate': 0.05,\n            'feature_fraction': 0.8,\n            'bagging_fraction': 0.8,\n            'bagging_freq': 5,\n            'verbose': -1,\n            'seed': 42\n        }\n        \n        train_data = lgb.Dataset(X_train, label=y_train)\n        val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)\n        \n        model_lgb = lgb.train(\n            params,\n            train_data,\n            num_boost_round=500,\n            valid_sets=[val_data],\n            callbacks=[lgb.early_stopping(50), lgb.log_evaluation(0)]\n        )\n        \n        preds = model_lgb.predict(X_val)\n        preds = np.clip(preds, 0, None)\n        \n        oof_preds[target][val_idx] = preds\n        fold_y_true[target] = y_val\n        fold_y_pred[target] = preds\n    \n    # Calculate fold R2 before post-processing\n    fold_r2 = weighted_r2(fold_y_true, fold_y_pred, target_weights)\n    fold_scores.append(fold_r2)\n    \n    # Apply post-processing\n    fold_y_pred_pp = post_process_biomass(fold_y_pred)\n    fold_r2_pp = weighted_r2(fold_y_true, fold_y_pred_pp, target_weights)\n    fold_scores_pp.append(fold_r2_pp)\n    \n    # Store post-processed predictions\n    for target in target_cols:\n        oof_preds_pp[target][val_idx] = fold_y_pred_pp[target]\n    \n    print(f'Fold {fold + 1} Weighted R2: {fold_r2:.4f} -> {fold_r2_pp:.4f} (post-processed)')\n\nprint(f'\\n=== Overall CV Results ===')\nprint(f'Mean Weighted R2 (raw): {np.mean(fold_scores):.4f} (+/- {np.std(fold_scores):.4f})')\nprint(f'Mean Weighted R2 (post-processed): {np.mean(fold_scores_pp):.4f} (+/- {np.std(fold_scores_pp):.4f})')"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Calculate overall OOF weighted R2\noof_y_true = {target: train_full[target].values for target in target_cols}\noverall_r2 = weighted_r2(oof_y_true, oof_preds, target_weights)\noverall_r2_pp = weighted_r2(oof_y_true, oof_preds_pp, target_weights)\n\nprint(f'Overall OOF Weighted R2 (raw): {overall_r2:.4f}')\nprint(f'Overall OOF Weighted R2 (post-processed): {overall_r2_pp:.4f}')"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Train final models on full data\nfinal_models = {}\nX_full = train_full[feature_cols].values\n\nfor target in target_cols:\n    print(f'Training final model for {target}...')\n    y_full = train_full[target].values\n    \n    params = {\n        'objective': 'regression',\n        'metric': 'rmse',\n        'boosting_type': 'gbdt',\n        'num_leaves': 31,\n        'learning_rate': 0.05,\n        'feature_fraction': 0.8,\n        'bagging_fraction': 0.8,\n        'bagging_freq': 5,\n        'verbose': -1,\n        'seed': 42\n    }\n    \n    train_data = lgb.Dataset(X_full, label=y_full)\n    model_lgb = lgb.train(params, train_data, num_boost_round=500)\n    final_models[target] = model_lgb\n\nprint('All final models trained!')"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Prepare test features\ntest_features = test_emb_df.copy()\ntest_features['Pre_GSHH_NDVI'] = train_pivot['Pre_GSHH_NDVI'].mean()\ntest_features['Height_Ave_cm'] = train_pivot['Height_Ave_cm'].mean()\ntest_features['State_enc'] = train_pivot['State_enc'].mode()[0]\ntest_features['Species_enc'] = train_pivot['Species_enc'].mode()[0]\n\nX_test = test_features[feature_cols].values\nprint(f'Test features shape: {X_test.shape}')"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Make predictions for test set\ntest_preds = {}\nfor target in target_cols:\n    preds = final_models[target].predict(X_test)\n    preds = np.clip(preds, 0, None)\n    test_preds[target] = preds\n    print(f'{target}: mean={preds.mean():.2f}')\n\n# Apply post-processing\ntest_preds_pp = post_process_biomass(test_preds)\nprint('\\nAfter post-processing:')\nfor target in target_cols:\n    print(f'{target}: mean={test_preds_pp[target].mean():.2f}')"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Create submission file with post-processed predictions\nsubmission_rows = []\n\nfor i, img_path in enumerate(test_images_unique):\n    img_id = img_path.split('/')[-1].replace('.jpg', '')\n    \n    for target in target_cols:\n        sample_id = f'{img_id}__{target}'\n        pred_value = test_preds_pp[target][i]\n        submission_rows.append({'sample_id': sample_id, 'target': pred_value})\n\nsubmission_df = pd.DataFrame(submission_rows)\nprint(f'Submission shape: {submission_df.shape}')\nprint(submission_df)"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Save submission\nsubmission_df.to_csv('/home/submission/submission.csv', index=False)\nprint('Submission saved to /home/submission/submission.csv')\n\n# Verify format\nsample_sub = pd.read_csv('/home/data/sample_submission.csv')\nprint(f'\\nSample submission columns: {sample_sub.columns.tolist()}')\nprint(f'Our submission columns: {submission_df.columns.tolist()}')"
+              },
+              {
+                "cell_type": "code",
+                "content": "# Final summary\nprint('='*60)\nprint('EXPERIMENT 002 RESULTS SUMMARY')\nprint('='*60)\nprint(f'Model: DINOv2-large PATCH embeddings + LightGBM + Post-processing')\nprint(f'Features: {len(feature_cols)} (1024 DINOv2-large patch + 4 tabular)')\nprint(f'CV Folds: {N_FOLDS}')\nprint(f'\\nRaw predictions:')\nprint(f'  Mean CV Weighted R2: {np.mean(fold_scores):.4f} (+/- {np.std(fold_scores):.4f})')\nprint(f'  Overall OOF Weighted R2: {overall_r2:.4f}')\nprint(f'\\nPost-processed predictions:')\nprint(f'  Mean CV Weighted R2: {np.mean(fold_scores_pp):.4f} (+/- {np.std(fold_scores_pp):.4f})')\nprint(f'  Overall OOF Weighted R2: {overall_r2_pp:.4f}')\nprint(f'\\nBaseline comparison: 0.7584 -> {overall_r2_pp:.4f} ({overall_r2_pp - 0.7584:+.4f})')\nprint('='*60)"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_017SX4RnMeQAFRxCkkYsT1do",
+          "content": "Created: /home/code/experiments/002_dinov2_large_patch/experiment.ipynb\n\nStrong Note: OOM is unrecoverable. Use strong models - just estimate memory first.",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01Amz1FtrPpZnhqAWyquPiAb",
+          "name": "ExecuteCellRange",
+          "input": {
+            "start_cell": 0,
+            "end_cell": 3,
+            "duration": 180
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Amz1FtrPpZnhqAWyquPiAb",
+          "content": "Executed cells 0-3\n==================================================\n\nCell 1:\n```\nimport os\nimport numpy as np\nimport pandas as pd\nimport torch\nimport torch.nn as nn\nfrom PIL import Image\nfrom tqdm import tqdm\nimport warnings\nwarnings.filterwarnings('ignore')\n\n# Verify GPU\nprint(f'CUDA available: {torch.cuda.is_available()}')\nprint(f'GPU: {torch.cuda.get_device_name(0)}')\nprint(f'Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB')\n```\nOutput:\nCUDA available: True\nGPU: NVIDIA H100 80GB HBM3\nMemory: 85.0 GB\n\n\nCell 2:\n```\n# Load data\nDATA_DIR = '/home/data'\ntrain_df = pd.read_csv(f'{DATA_DIR}/train.csv')\ntest_df = pd.read_csv(f'{DATA_DIR}/test.csv')\n\n# Pivot train data to have one row per image with all targets\ntrain_pivot = train_df.pivot_table(\n    index=['image_path', 'Sampling_Date', 'State', 'Species', 'Pre_GSHH_NDVI', 'Height_Ave_cm'],\n    columns='target_name',\n    values='target'\n).reset_index()\n\nprint(f'Pivoted train shape: {train_pivot.shape}')\nprint(f'Test shape: {test_df.shape}')\n```\nOutput:\nPivoted train shape: (357, 11)\nTest shape: (5, 3)\n\n\nCell 3:\n```\n# Load DINOv2-large model (1024 dims vs 768 in base)\nfrom transformers import AutoImageProcessor, AutoModel\n\nmodel_name = 'facebook/dinov2-large'\nprocessor = AutoImageProcessor.from_pretrained(model_name)\nmodel = AutoModel.from_pretrained(model_name).cuda().eval()\n\nprint(f'Model loaded: {model_name}')\nprint(f'Hidden size: {model.config.hidden_size}')\n```\nOutput:\n2026-01-15 02:03:06.933586: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:485] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered\n2026-01-15 02:03:06.949476: E external/local_xla/xla/stream_executor/cuda/cuda_dnn.cc:8454] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered\n2026-01-15 02:03:06.953975: E external/local_xla/xla/stream_executor/cuda/cuda_blas.cc:1452] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered\n\npreprocessor_config.json:   0%|          | 0.00/436 [00:00<?, ?B/s]\nconfig.json:   0%|          | 0.00/549 [00:00<?, ?B/s]\nmodel.safetensors:   0%|          | 0.00/1.22G [00:00<?, ?B/s]\nModel loaded: facebook/dinov2-large\nHidden size: 1024\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01GD3VAkycHQPJUQPN1Mtard",
+          "name": "ExecuteCellRange",
+          "input": {
+            "start_cell": 4,
+            "end_cell": 5,
+            "duration": 180
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01GD3VAkycHQPJUQPN1Mtard",
+          "content": "Executed cells 4-5\n==================================================\n\nCell 4:\n```\n# Extract PATCH-BASED embeddings (mean of patch tokens, not CLS)\ndef extract_patch_embeddings(image_paths, data_dir, batch_size=8):\n    \"\"\"Extract mean of patch tokens instead of CLS token.\"\"\"\n    embeddings = []\n    \n    with torch.no_grad():\n        for i in tqdm(range(0, len(image_paths), batch_size)):\n            batch_paths = image_paths[i:i+batch_size]\n            images = []\n            \n            for path in batch_paths:\n                img = Image.open(f'{data_dir}/{path}').convert('R\n```\nOutput:\nExtracting train patch embeddings with DINOv2-large...\n\n\r  0%|          | 0/45 [00:00<?, ?it/s]\n\r  2%|\u258f         | 1/45 [00:00<00:31,  1.42it/s]\n\r  4%|\u258d         | 2/45 [00:01<00:25,  1.68it/s]\n\r  7%|\u258b         | 3/45 [00:01<00:23,  1.80it/s]\n\r  9%|\u2589         | 4/45 [00:02<00:21,  1.87it/s]\n\r 11%|\u2588         | 5/45 [00:02<00:20,  1.91it/s]\n\r 13%|\u2588\u258e        | 6/45 [00:03<00:20,  1.91it/s]\n\r 16%|\u2588\u258c        | 7/45 [00:03<00:19,  1.94it/s]\n\r 18%|\u2588\u258a        | 8/45 [00:04<00:18,  1.96it/s]\n\r 20%|\u2588\u2588        | 9/45 [00:04<00:18,  1.97it/s]\n\r 22%|\u2588\u2588\u258f       | 10/45 [00:05<00:17,  1.98it/s]\n\r 24%|\u2588\u2588\u258d       | 11/45 [00:05<00:16,  2.01it/s]\n\r 27%|\u2588\u2588\u258b       | 12/45 [00:06<00:16,  2.01it/s]\n\r 29%|\u2588\u2588\u2589       | 13/45 [00:06<00:16,  2.00it/s]\n\r 31%|\u2588\u2588\u2588       | 14/45 [00:07<00:15,  2.01it/s]\n\r 33%|\u2588\u2588\u2588\u258e      | 15/45 [00:07<00:14,  2.01it/s]\n\r 36%|\u2588\u2588\u2588\u258c      | 16/45 [00:08<00:14,  2.01it/s]\n\r 38%|\u2588\u2588\u2588\u258a      | 17/45 [00:08<00:13,  2.00it/s]\n\r 40%|\u2588\u2588\u2588\u2588      | 18/45 [00:09<00:13,  2.02it/s]\n\r 42%|\u2588\u2588\u2588\u2588\u258f     | 19/45 [00:09<00:12,  2.03it/s]\n\r 44%|\u2588\u2588\u2588\u2588\u258d     | 20/45 [00:10<00:12,  2.03it/s]\n\r 47%|\u2588\u2588\u2588\u2588\u258b     | 21/45 [00:10<00:11,  2.01it/s]\n\r 49%|\u2588\u2588\u2588\u2588\u2589     | 22/45 [00:11<00:11,  2.02it/s]\n\r 51%|\u2588\u2588\u2588\u2588\u2588     | 23/45 [00:11<00:10,  2.02it/s]\n\r 53%|\u2588\u2588\u2588\u2588\u2588\u258e    | 24/45 [00:12<00:10,  2.01it/s]\n\r 56%|\u2588\u2588\u2588\u2588\u2588\u258c    | 25/45 [00:12<00:09,  2.03it/s]\n\r 58%|\u2588\u2588\u2588\u2588\u2588\u258a    | 26/45 [00:13<00:09,  2.02it/s]\n\r 60%|\u2588\u2588\u2588\u2588\u2588\u2588    | 27/45 [00:13<00:08,  2.01it/s]\n\r 62%|\u2588\u2588\u2588\u2588\u2588\u2588\u258f   | 28/45 [00:14<00:08,  2.00it/s]\n\r 64%|\u2588\u2588\u2588\u2588\u2588\u2588\u258d   | 29/45 [00:14<00:08,  2.00it/s]\n\r 67%|\u2588\u2588\u2588\u2588\u2588\u2588\u258b   | 30/45 [00:15<00:07,  2.00it/s]\n\r 69%|\u2588\u2588\u2588\u2588\u2588\u2588\u2589   | 31/45 [00:15<00:06,  2.01it/s]\n\r 71%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588   | 32/45 [00:16<00:06,  2.02it/s]\n\r 73%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258e  | 33/45 [00:16<00:06,  2.00it/s]\n\r 76%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258c  | 34/45 [00:17<00:05,  2.01it/s]\n\r 78%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258a  | 35/45 [00:17<00:04,  2.01it/s]\n\r 80%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588  | 36/45 [00:18<00:04,  2.02it/s]\n\r 82%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258f | 37/45 [00:18<00:03,  2.03it/s]\n\r 84%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258d | 38/45 [00:19<00:03,  2.01it/s]\n\r 87%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258b | 39/45 [00:19<00:02,  2.01it/s]\n\r 89%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2589 | 40/45 [00:20<00:02,  2.03it/s]\n\r 91%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 | 41/45 [00:20<00:01,  2.03it/s]\n\r 93%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258e| 42/45 [00:21<00:01,  2.04it/s]\n\r 96%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258c| 43/45 [00:21<00:00,  2.01it/s]\n\r 98%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258a| 44/45 [00:22<00:00,  2.02it/s]\n\r100%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588| 45/45 [00:22<00:00,  2.29it/s]\n\r100%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588| 45/45 [00:22<00:00,  2.01it/s]\nTrain embeddings shape: (357, 1024)\n\n\n\n\nCell 5:\n```\n# Extract test embeddings\nprint('Extracting test patch embeddings...')\ntest_images_unique = test_df['image_path'].unique()\ntest_embeddings = extract_patch_embeddings(test_images_unique, DATA_DIR)\nprint(f'Test embeddings shape: {test_embeddings.shape}')\n```\nOutput:\nExtracting test patch embeddings...\n\n\r  0%|          | 0/1 [00:00<?, ?it/s]\n\r100%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588| 1/1 [00:00<00:00, 13.29it/s]\nTest embeddings shape: (1, 1024)\n\n\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_019efE6HmRn27CfZpcHmaS6r",
+          "name": "ExecuteCellRange",
+          "input": {
+            "start_cell": 6,
+            "end_cell": 10,
+            "duration": 60
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_019efE6HmRn27CfZpcHmaS6r",
+          "content": "Executed cells 6-10\n==================================================\n\nCell 6:\n```\n# Create feature dataframe with embeddings\nemb_cols = [f'emb_{i}' for i in range(train_embeddings.shape[1])]\ntrain_emb_df = pd.DataFrame(train_embeddings, columns=emb_cols)\ntrain_emb_df['image_path'] = train_pivot['image_path'].values\n\ntest_emb_df = pd.DataFrame(test_embeddings, columns=emb_cols)\ntest_emb_df['image_path'] = test_images_unique\n\nprint(f'Train embeddings df shape: {train_emb_df.shape}')\nprint(f'Test embeddings df shape: {test_emb_df.shape}')\n```\nOutput:\nTrain embeddings df shape: (357, 1025)\nTest embeddings df shape: (1, 1025)\n\n\nCell 7:\n```\n# Prepare tabular features\nfrom sklearn.preprocessing import LabelEncoder\n\nle_state = LabelEncoder()\nle_species = LabelEncoder()\n\nall_states = pd.concat([train_pivot['State'], pd.Series(['Unknown'])])\nall_species = pd.concat([train_pivot['Species'], pd.Series(['Unknown'])])\n\nle_state.fit(all_states)\nle_species.fit(all_species)\n\ntrain_pivot['State_enc'] = le_state.transform(train_pivot['State'])\ntrain_pivot['Species_enc'] = le_species.transform(train_pivot['Species'])\n\nprint(f'States: {le_state.c\n```\nOutput:\nStates: ['NSW' 'Tas' 'Unknown' 'Vic' 'WA']\nSpecies count: 16\n\n\nCell 8:\n```\n# Merge embeddings with tabular features\ntrain_full = train_pivot.merge(train_emb_df, on='image_path')\nprint(f'Train full shape: {train_full.shape}')\n\n# Define target columns and weights\ntarget_cols = ['Dry_Green_g', 'Dry_Dead_g', 'Dry_Clover_g', 'GDM_g', 'Dry_Total_g']\ntarget_weights = {'Dry_Green_g': 0.1, 'Dry_Dead_g': 0.1, 'Dry_Clover_g': 0.1, 'GDM_g': 0.2, 'Dry_Total_g': 0.5}\n\n# Define feature columns (1024 DINOv2-large + 4 tabular)\nfeature_cols = ['Pre_GSHH_NDVI', 'Height_Ave_cm', 'State_en\n```\nOutput:\nTrain full shape: (357, 1037)\nNumber of features: 1028\n\n\nCell 9:\n```\n# Define weighted R2 metric\ndef weighted_r2(y_true_dict, y_pred_dict, weights):\n    \"\"\"Calculate globally weighted R2 across all targets.\"\"\"\n    all_y_true = []\n    all_y_pred = []\n    all_weights = []\n    \n    for target in y_true_dict.keys():\n        all_y_true.extend(y_true_dict[target])\n        all_y_pred.extend(y_pred_dict[target])\n        all_weights.extend([weights[target]] * len(y_true_dict[target]))\n    \n    all_y_true = np.array(all_y_true)\n    all_y_pred = np.array(all_y_pred)\n    all\n```\n\nCell 10:\n```\n# Post-processing function to enforce biomass constraints\n# GDM = Dry_Green + Dry_Clover\n# Dry_Total = GDM + Dry_Dead\ndef post_process_biomass(preds_dict):\n    \"\"\"Apply projection matrix to enforce biomass constraints.\"\"\"\n    # Order: Dry_Green, Dry_Clover, Dry_Dead, GDM, Dry_Total\n    ordered_cols = ['Dry_Green_g', 'Dry_Clover_g', 'Dry_Dead_g', 'GDM_g', 'Dry_Total_g']\n    \n    # Stack predictions into matrix (5 x n_samples)\n    Y = np.vstack([preds_dict[col] for col in ordered_cols])\n    \n    #\n```\nOutput:\nPost-processing function defined\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_019kz1qTMLq1wWWAFRogXcHs",
+          "name": "ExecuteCellRange",
+          "input": {
+            "start_cell": 11,
+            "end_cell": 12,
+            "duration": 300
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_019kz1qTMLq1wWWAFRogXcHs",
+          "content": "Executed cells 11-12\n==================================================\n\nCell 11:\n```\n# 5-Fold Cross Validation with LightGBM\nimport lightgbm as lgb\nfrom sklearn.model_selection import KFold\n\nN_FOLDS = 5\nkf = KFold(n_splits=N_FOLDS, shuffle=True, random_state=42)\n\n# Store OOF predictions\noof_preds = {target: np.zeros(len(train_full)) for target in target_cols}\noof_preds_pp = {target: np.zeros(len(train_full)) for target in target_cols}  # Post-processed\nfold_scores = []\nfold_scores_pp = []\n\nX = train_full[feature_cols].values\n\nfor fold, (train_idx, val_idx) in enumerate(kf.split(\n```\nOutput:\n\n=== Fold 1 ===\nTraining until validation scores don't improve for 50 rounds\nEarly stopping, best iteration is:\n[135]\tvalid_0's rmse: 11.8234\n\nTraining until validation scores don't improve for 50 rounds\nEarly stopping, best iteration is:\n[208]\tvalid_0's rmse: 9.03688\n\nTraining until validation scores don't improve for 50 rounds\nEarly stopping, best iteration is:\n[190]\tvalid_0's rmse: 8.25802\n\nTraining until validation scores don't improve for 50 rounds\nEarly stopping, best iteration is:\n[90]\tvalid_0's rmse: 11.2846\nTraining until validation scores don't improve for 50 rounds\n\nEarly stopping, best iteration is:\n[142]\tvalid_0's rmse: 14.1682\nFold 1 Weighted R2: 0.7573 -> 0.7727 (post-processed)\n\n=== Fold 2 ===\nTraining until validation scores don't improve for 50 rounds\n\nEarly stopping, best iteration is:\n[171]\tvalid_0's rmse: 13.7977\nTraining until validation scores don't improve for 50 rounds\nEarly stopping, best iteration is:\n[106]\tvalid_0's rmse: 8.6437\nTraining until validation scores don't improve for 50 rounds\n\nDid not meet early stopping. Best iteration is:\n[489]\tvalid_0's rmse: 7.07342\nTraining until validation scores don't improve for 50 rounds\n\nEarly stopping, best iteration is:\n[170]\tvalid_0's rmse: 13.6407\nTraining until validation scores don't improve for 50 rounds\nEarly stopping, best iteration is:\n[133]\tvalid_0's rmse: 15.2173\nFold 2 Weighted R2: 0.7939 -> 0.7986 (post-processed)\n\n=== Fold 3 ===\n\nTraining until validation scores don't improve for 50 rounds\nEarly stopping, best iteration is:\n[110]\tvalid_0's rmse: 8.55546\nTraining until validation scores don't improve for 50 rounds\n\nEarly stopping, best iteration is:\n[80]\tvalid_0's rmse: 11.1382\nTraining until validation scores don't improve for 50 rounds\nEarly stopping, best iteration is:\n[124]\tvalid_0's rmse: 7.01853\n\nTraining until validation scores don't improve for 50 rounds\nEarly stopping, best iteration is:\n[120]\tvalid_0's rmse: 8.87867\nTraining until validation scores don't improve for 50 rounds\n\nEarly stopping, best iteration is:\n[112]\tvalid_0's rmse: 16.1986\nFold 3 Weighted R2: 0.8135 -> 0.8247 (post-processed)\n\n=== Fold 4 ===\nTraining until validation scores don't improve for 50 rounds\nEarly stopping, best iteration is:\n[123]\tvalid_0's rmse: 11.2473\n\nTraining until validation scores don't improve for 50 rounds\nEarly stopping, best iteration is:\n[76]\tvalid_0's rmse: 8.71507\nTraining until validation scores don't improve for 50 rounds\n\nEarly stopping, best iteration is:\n[190]\tvalid_0's rmse: 5.78308\nTraining until validation scores don't improve for 50 rounds\nEarly stopping, best iteration is:\n[130]\tvalid_0's rmse: 11.2635\n\nTraining until validation scores don't improve for 50 rounds\nEarly stopping, best iteration is:\n[128]\tvalid_0's rmse: 15.1666\nFold 4 Weighted R2: 0.7830 -> 0.7854 (post-processed)\n\n=== Fold 5 ===\nTraining until validation scores don't improve for 50 rounds\n\nEarly stopping, best iteration is:\n[165]\tvalid_0's rmse: 15.4654\nTraining until validation scores don't improve for 50 rounds\nEarly stopping, best iteration is:\n[74]\tvalid_0's rmse: 9.90127\nTraining until validation scores don't improve for 50 rounds\n\nEarly stopping, best iteration is:\n[37]\tvalid_0's rmse: 6.27887\nTraining until validation scores don't improve for 50 rounds\n\nEarly stopping, best iteration is:\n[266]\tvalid_0's rmse: 15.6568\nTraining until validation scores don't improve for 50 rounds\n\nEarly stopping, best iteration is:\n[204]\tvalid_0's rmse: 19.6042\nFold 5 Weighted R2: 0.6497 -> 0.6634 (post-processed)\n\n=== Overall CV Results ===\nMean Weighted R2 (raw): 0.7595 (+/- 0.0578)\nMean Weighted R2 (post-processed): 0.7690 (+/- 0.0555)\n\n\nCell 12:\n```\n# Calculate overall OOF weighted R2\noof_y_true = {target: train_full[target].values for target in target_cols}\noverall_r2 = weighted_r2(oof_y_true, oof_preds, target_weights)\noverall_r2_pp = weighted_r2(oof_y_true, oof_preds_pp, target_weights)\n\nprint(f'Overall OOF Weighted R2 (raw): {overall_r2:.4f}')\nprint(f'Overall OOF Weighted R2 (post-processed): {overall_r2_pp:.4f}')\n```\nOutput:\nOverall OOF Weighted R2 (raw): 0.7622\nOverall OOF Weighted R2 (post-processed): 0.7715\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "REASONING: The results show improvement from the baseline:\n- Raw: 0.7622 (vs 0.7584 baseline)\n- Post-processed: 0.7715 (vs 0.7584 baseline)\n\nThe post-processing adds about +0.01 improvement. Let me continue to train final models and create submission."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01CzUDiQzbDFBuEC65MtSkdq",
+          "name": "ExecuteCellRange",
+          "input": {
+            "start_cell": 13,
+            "end_cell": 18,
+            "duration": 120
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01CzUDiQzbDFBuEC65MtSkdq",
+          "content": "Executed cells 13-18\n==================================================\n\nCell 13:\n```\n# Train final models on full data\nfinal_models = {}\nX_full = train_full[feature_cols].values\n\nfor target in target_cols:\n    print(f'Training final model for {target}...')\n    y_full = train_full[target].values\n    \n    params = {\n        'objective': 'regression',\n        'metric': 'rmse',\n        'boosting_type': 'gbdt',\n        'num_leaves': 31,\n        'learning_rate': 0.05,\n        'feature_fraction': 0.8,\n        'bagging_fraction': 0.8,\n        'bagging_freq': 5,\n        'verbose': -1,\n  \n```\nOutput:\nTraining final model for Dry_Green_g...\n\nTraining final model for Dry_Dead_g...\n\nTraining final model for Dry_Clover_g...\n\nTraining final model for GDM_g...\n\nTraining final model for Dry_Total_g...\n\nAll final models trained!\n\n\nCell 14:\n```\n# Prepare test features\ntest_features = test_emb_df.copy()\ntest_features['Pre_GSHH_NDVI'] = train_pivot['Pre_GSHH_NDVI'].mean()\ntest_features['Height_Ave_cm'] = train_pivot['Height_Ave_cm'].mean()\ntest_features['State_enc'] = train_pivot['State_enc'].mode()[0]\ntest_features['Species_enc'] = train_pivot['Species_enc'].mode()[0]\n\nX_test = test_features[feature_cols].values\nprint(f'Test features shape: {X_test.shape}')\n```\nOutput:\nTest features shape: (1, 1028)\n\n\nCell 15:\n```\n# Make predictions for test set\ntest_preds = {}\nfor target in target_cols:\n    preds = final_models[target].predict(X_test)\n    preds = np.clip(preds, 0, None)\n    test_preds[target] = preds\n    print(f'{target}: mean={preds.mean():.2f}')\n\n# Apply post-processing\ntest_preds_pp = post_process_biomass(test_preds)\nprint('\\nAfter post-processing:')\nfor target in target_cols:\n    print(f'{target}: mean={test_preds_pp[target].mean():.2f}')\n```\nOutput:\nDry_Green_g: mean=32.26\nDry_Dead_g: mean=22.74\nDry_Clover_g: mean=0.86\nGDM_g: mean=46.01\nDry_Total_g: mean=60.48\n\nAfter post-processing:\nDry_Green_g: mean=36.06\nDry_Dead_g: mean=21.25\nDry_Clover_g: mean=4.66\nGDM_g: mean=40.72\nDry_Total_g: mean=61.97\n\n\nCell 16:\n```\n# Create submission file with post-processed predictions\nsubmission_rows = []\n\nfor i, img_path in enumerate(test_images_unique):\n    img_id = img_path.split('/')[-1].replace('.jpg', '')\n    \n    for target in target_cols:\n        sample_id = f'{img_id}__{target}'\n        pred_value = test_preds_pp[target][i]\n        submission_rows.append({'sample_id': sample_id, 'target': pred_value})\n\nsubmission_df = pd.DataFrame(submission_rows)\nprint(f'Submission shape: {submission_df.shape}')\nprint(submissi\n```\nOutput:\nSubmission shape: (5, 2)\n                    sample_id     target\n0   ID1001187975__Dry_Green_g  36.057944\n1    ID1001187975__Dry_Dead_g  21.252442\n2  ID1001187975__Dry_Clover_g   4.660593\n3         ID1001187975__GDM_g  40.718537\n4   ID1001187975__Dry_Total_g  61.970979\n\n\nCell 17:\n```\n# Save submission\nsubmission_df.to_csv('/home/submission/submission.csv', index=False)\nprint('Submission saved to /home/submission/submission.csv')\n\n# Verify format\nsample_sub = pd.read_csv('/home/data/sample_submission.csv')\nprint(f'\\nSample submission columns: {sample_sub.columns.tolist()}')\nprint(f'Our submission columns: {submission_df.columns.tolist()}')\n```\nOutput:\nSubmission saved to /home/submission/submission.csv\n\nSample submission columns: ['sample_id', 'target']\nOur submission columns: ['sample_id', 'target']\n\n\nCell 18:\n```\n# Final summary\nprint('='*60)\nprint('EXPERIMENT 002 RESULTS SUMMARY')\nprint('='*60)\nprint(f'Model: DINOv2-large PATCH embeddings + LightGBM + Post-processing')\nprint(f'Features: {len(feature_cols)} (1024 DINOv2-large patch + 4 tabular)')\nprint(f'CV Folds: {N_FOLDS}')\nprint(f'\\nRaw predictions:')\nprint(f'  Mean CV Weighted R2: {np.mean(fold_scores):.4f} (+/- {np.std(fold_scores):.4f})')\nprint(f'  Overall OOF Weighted R2: {overall_r2:.4f}')\nprint(f'\\nPost-processed predictions:')\nprint(f'  Mean CV\n```\nOutput:\n============================================================\nEXPERIMENT 002 RESULTS SUMMARY\n============================================================\nModel: DINOv2-large PATCH embeddings + LightGBM + Post-processing\nFeatures: 1028 (1024 DINOv2-large patch + 4 tabular)\nCV Folds: 5\n\nRaw predictions:\n  Mean CV Weighted R2: 0.7595 (+/- 0.0578)\n  Overall OOF Weighted R2: 0.7622\n\nPost-processed predictions:\n  Mean CV Weighted R2: 0.7690 (+/- 0.0555)\n  Overall OOF Weighted R2: 0.7715\n\nBaseline comparison: 0.7584 -> 0.7715 (+0.0131)\n============================================================\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "REASONING: Excellent! The experiment shows improvement:\n- Baseline: 0.7584\n- DINOv2-large patch + post-processing: 0.7715\n- Improvement: +0.0131\n\nThe post-processing alone adds about +0.01. Let me close the notebook and log the experiment."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01Axrs5uT8WXNvvHCc8EygFu",
+          "name": "CloseNotebook",
+          "input": {}
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Axrs5uT8WXNvvHCc8EygFu",
+          "content": "Closed: /home/code/experiments/002_dinov2_large_patch/experiment.ipynb",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_017mRCTWppAmopD8wf4PBDaK",
+          "name": "LogExperiment",
+          "input": {
+            "name": "DINOv2-large Patch + Post-Processing",
+            "model_type": "lgbm",
+            "score": 0.7715,
+            "notes": "Upgraded from DINOv2-base CLS to DINOv2-large patch-based features (mean of patch tokens, 1024 dims). Added post-processing to enforce biomass constraints (GDM = Green + Clover, Total = GDM + Dead). Raw CV: 0.7622, Post-processed CV: 0.7715. Improvement over baseline: +0.0131. Post-processing alone adds ~0.01. Fold variance still high (0.65-0.82). Next steps: try ensemble of multiple GB models, TTA, or DINOv2-giant.",
+            "experiment_folder": "/home/code/experiments/002_dinov2_large_patch",
+            "submission_path": "/home/submission/submission.csv"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_017mRCTWppAmopD8wf4PBDaK",
+          "content": "Transitioning to next phase",
+          "is_error": false
         }
       ]
     }
@@ -603,6 +930,15 @@
       "notes": "Baseline using DINOv2-base CLS token embeddings (768 dims) + 4 tabular features (NDVI, Height, State, Species). 5-fold CV with LightGBM. Mean CV R\u00b2: 0.7552 \u00b1 0.0489, Overall OOF R\u00b2: 0.7584. Good starting point. Top kernels achieve 0.66-0.69 on LB, suggesting room for improvement with better feature engineering, larger models, and ensembling.",
       "experiment_folder": "/home/code/experiments/001_baseline",
       "timestamp": "2026-01-15T01:54:27.716748"
+    },
+    {
+      "id": "exp_001",
+      "name": "DINOv2-large Patch + Post-Processing",
+      "model_type": "lgbm",
+      "score": 0.7715,
+      "notes": "Upgraded from DINOv2-base CLS to DINOv2-large patch-based features (mean of patch tokens, 1024 dims). Added post-processing to enforce biomass constraints (GDM = Green + Clover, Total = GDM + Dead). Raw CV: 0.7622, Post-processed CV: 0.7715. Improvement over baseline: +0.0131. Post-processing alone adds ~0.01. Fold variance still high (0.65-0.82). Next steps: try ensemble of multiple GB models, TTA, or DINOv2-giant.",
+      "experiment_folder": "/home/code/experiments/002_dinov2_large_patch",
+      "timestamp": "2026-01-15T02:05:20.837017"
     }
   ],
   "submissions": [],
@@ -613,6 +949,13 @@
       "model_name": "DINOv2-base + LightGBM Baseline",
       "experiment_id": "exp_000",
       "timestamp": "2026-01-15T01:54:27.717537"
+    },
+    {
+      "file_path": "/home/code/submission_candidates/candidate_001.csv",
+      "score": 0.7715,
+      "model_name": "DINOv2-large Patch + Post-Processing",
+      "experiment_id": "exp_001",
+      "timestamp": "2026-01-15T02:05:20.839407"
     }
   ],
   "findings": [],
@@ -665,5 +1008,5 @@
   "last_reset_date_utc": "2026-01-15",
   "start_time": "2026-01-15T01:39:23.918365",
   "time_limit_minutes": 2100,
-  "_saved_at": "2026-01-15T02:01:26.875539"
+  "_saved_at": "2026-01-15T02:05:20.853980"
 }
