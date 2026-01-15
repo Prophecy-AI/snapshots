@@ -7,9 +7,9 @@
 - Submissions remaining: 3
 
 ## Response to Evaluator
-- Technical verdict was TRUSTWORTHY. The similarity features experiment was executed correctly.
-- Evaluator's top priority: DO NOT submit exp_046 (similarity features) because CV is 6.38% worse than best.
-- **I AGREE with the evaluator's assessment.** The similarity features didn't help - they added noise.
+- Technical verdict was TRUSTWORTHY. The CatBoost experiment was executed correctly.
+- Evaluator's top priority: DO NOT submit exp_047 (CatBoost) because CV is 33% worse than best.
+- **I AGREE with the evaluator's assessment.** CatBoost with categorical features didn't help.
 - Evaluator correctly identified that the intercept (0.0533) > target (0.0347) is the fundamental problem.
 - **KEY INSIGHT**: We cannot reach the target by improving CV alone. We need to CHANGE THE CV-LB RELATIONSHIP.
 
@@ -30,52 +30,89 @@ The CV-LB relationship is: LB = 4.23×CV + 0.0533
 **To reach the target, we need to REDUCE THE INTERCEPT**, not just improve CV.
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop45_analysis.ipynb` for CV-LB analysis
+- Reference notebooks: See `exploration/evolver_loop46_analysis.ipynb` for CV-LB analysis
 - Key patterns:
   1. CV-LB relationship: LB = 4.23×CV + 0.0533 (R²=0.981)
   2. Intercept (0.0533) > Target (0.0347) → Current approach CANNOT reach target
   3. ALL 13 submissions fall on the SAME line regardless of model type
-  4. Similarity features (exp_046) CV = 0.008717, predicted LB = 0.0902 (worse than best)
+  4. CatBoost (exp_047) CV = 0.010927 (33% worse than best)
+  5. SMILES data available at `/home/data/smiles_lookup.csv` for RDKit descriptors
+
+## WHAT WE'VE TRIED (47 experiments)
+- Model families: MLP, LightGBM, Ridge, GP, k-NN, Stacking, CatBoost, XGBoost
+- Features: Spange (13) + DRFP filtered (122) + ACS PCA (5) + Arrhenius (5)
+- Regularization: Aggressive regularization didn't help
+- Similarity features: Didn't help
+- GroupKFold CV: Didn't help
+- CatBoost with categorical features: 33% worse
+
+**ALL model families follow the SAME CV-LB relationship!**
+This suggests the problem is in the FEATURES, not the models.
 
 ## Recommended Approaches (Priority Order)
 
-### 1. CATBOOST WITH CATEGORICAL FEATURES + INTERACTION TERMS (HIGH PRIORITY)
-**Hypothesis**: CatBoost handles categorical features natively and might have different extrapolation behavior.
+### 1. RDKIT MOLECULAR DESCRIPTORS (HIGHEST PRIORITY)
+**Hypothesis**: RDKit provides 200+ molecular descriptors that might capture different aspects of solvent chemistry than Spange (13 features).
 
 **Implementation**:
-- Use solvent name as categorical feature (not one-hot encoded)
-- Add interaction features from "mr0106/catechol" kernel:
-  - Reaction_Energy = Temperature * Residence Time
-  - B_Conc_Temp = SolventB% * Temperature
-- CatBoost parameters: iterations=500, learning_rate=0.05, depth=6
-- Train 3 separate models for each target (Product 2, Product 3, SM)
+```python
+from rdkit import Chem
+from rdkit.Chem import Descriptors
+from rdkit.ML.Descriptors.MoleculeDescriptors import MolecularDescriptorCalculator
+
+# Load SMILES lookup
+smiles_df = pd.read_csv('/home/data/smiles_lookup.csv', index_col=0)
+
+# Get all descriptor names
+desc_names = [name for name, _ in Descriptors._descList]  # ~200 descriptors
+calc = MolecularDescriptorCalculator(desc_names)
+
+# Calculate descriptors for each solvent
+def get_rdkit_descriptors(smiles):
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return [np.nan] * len(desc_names)
+    return calc.CalcDescriptors(mol)
+
+# Create lookup table
+rdkit_features = {}
+for solvent, smiles in smiles_df['solvent smiles'].items():
+    rdkit_features[solvent] = get_rdkit_descriptors(smiles)
+```
 
 **Why this might work**:
-- CatBoost uses ordered boosting which might generalize better
-- Categorical features are handled differently than numerical encoding
-- Interaction features capture domain knowledge
+- RDKit descriptors include: MolWt, LogP, TPSA, HBD, HBA, rotatable bonds, etc.
+- These are fundamentally different from Spange descriptors
+- Might capture different aspects of solvent-solute interactions
+- Could have a DIFFERENT CV-LB relationship
 
-**Template compliance**:
-- Create a CatBoostModel class with train_model() and predict() methods
-- Use the same CV procedure (leave-one-out for single, leave-one-ramp-out for full)
-- Last 3 cells remain unchanged
-
-### 2. XGBOOST + RF + LGBM ENSEMBLE (from mixall kernel)
-**Hypothesis**: The "mixall" kernel claims good CV/LB with this ensemble.
+### 2. MORGAN FINGERPRINTS (MEDIUM PRIORITY)
+**Hypothesis**: Morgan fingerprints capture molecular substructures differently than DRFP.
 
 **Implementation**:
-- Ensemble of MLP + XGBoost + RandomForest + LightGBM
-- Learned weights via Optuna optimization
-- Use Spange descriptors + kinetics features
+```python
+from rdkit.Chem import AllChem
 
-### 3. SUBMIT BEST CV MODEL (exp_032) AS BASELINE
+def get_morgan_fp(smiles, radius=2, nBits=1024):
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return np.zeros(nBits)
+    fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius, nBits=nBits)
+    return np.array(fp)
+```
+
+### 3. SUBMIT exp_032 (BEST CV) AS BASELINE
 **Hypothesis**: Better CV might still help, even if the relationship is the same.
+- exp_032 has CV 0.008194 (best)
+- Predicted LB: 4.23 × 0.008194 + 0.0533 = 0.0880
+- This would be similar to best LB (0.0877)
+- But it would confirm the CV-LB relationship
 
 ## What NOT to Try
-- Similarity features (exp_046): CV is 6.38% worse, no evidence of different relationship
+- CatBoost with categorical features (exp_047): CV is 33% worse
+- Similarity features (exp_046): CV is 6.38% worse
 - Stacking (exp_045): CV is 22% worse
 - Pure GP (exp_044): CV is 77% worse
-- GroupKFold(5) CV (exp_042): LB was 0.1147 (worse)
 - Aggressive regularization (exp_043): Didn't help
 
 ## Validation Notes
@@ -90,58 +127,70 @@ We need to find an approach that has a LOWER INTERCEPT in the CV-LB relationship
 The key is to find features or model architectures that generalize better to unseen solvents.
 
 ## SUBMISSION STRATEGY (3 remaining)
-1. **Submission 1**: CatBoost with categorical features + interaction terms
-   - Test if different algorithm has different CV-LB relationship
-2. **Submission 2**: Based on result, either improve CatBoost or try XGB+RF+LGBM ensemble
+1. **Submission 1**: RDKit descriptors (200+ features) - test if different features have different CV-LB relationship
+2. **Submission 2**: Based on result, either improve RDKit approach or try Morgan fingerprints
 3. **Submission 3**: Final best model
 
 ## Implementation Notes
 
-**CatBoost with Categorical Features**:
+**RDKit Descriptors Model**:
 ```python
-from catboost import CatBoostRegressor
-
-class CatBoostModel:
+class RDKitModel:
     def __init__(self, data='single'):
         self.data_type = data
-        self.models = []  # One per target
+        self.rdkit_df = self._compute_rdkit_descriptors()
+        self.models = []  # GP + MLP + LGBM ensemble
         
-    def train_model(self, X_train, Y_train):
-        # Create features with interaction terms
-        X_feat = self._create_features(X_train)
+    def _compute_rdkit_descriptors(self):
+        from rdkit import Chem
+        from rdkit.Chem import Descriptors
+        from rdkit.ML.Descriptors.MoleculeDescriptors import MolecularDescriptorCalculator
         
-        # Train 3 separate CatBoost models (one per target)
-        for i in range(3):
-            model = CatBoostRegressor(
-                iterations=500,
-                learning_rate=0.05,
-                depth=6,
-                cat_features=['solvent_cat'],  # Categorical column
-                random_seed=42,
-                verbose=False
-            )
-            model.fit(X_feat, Y_train.iloc[:, i])
-            self.models.append(model)
+        smiles_df = pd.read_csv('/home/data/smiles_lookup.csv', index_col=0)
+        desc_names = [name for name, _ in Descriptors._descList]
+        calc = MolecularDescriptorCalculator(desc_names)
+        
+        features = {}
+        for solvent, row in smiles_df.iterrows():
+            smiles = row['solvent smiles']
+            mol = Chem.MolFromSmiles(smiles)
+            if mol:
+                features[solvent] = calc.CalcDescriptors(mol)
+            else:
+                features[solvent] = [np.nan] * len(desc_names)
+        
+        return pd.DataFrame(features, index=desc_names).T
     
     def _create_features(self, X):
-        # Add interaction features
-        df = X.copy()
-        df['Reaction_Energy'] = df['Temperature'] * df['Residence Time']
-        if self.data_type == 'full':
-            df['B_Conc_Temp'] = df['SolventB%'] * df['Temperature']
-        return df
-    
-    def predict(self, X_test):
-        X_feat = self._create_features(X_test)
-        preds = []
-        for model in self.models:
-            preds.append(model.predict(X_feat))
-        return torch.tensor(np.column_stack(preds))
+        # Get RDKit descriptors for solvents
+        if self.data_type == 'single':
+            rdkit_vals = self.rdkit_df.loc[X["SOLVENT NAME"]].values
+        else:
+            # For mixtures, weighted average
+            A_rdkit = self.rdkit_df.loc[X["SOLVENT A NAME"]].values
+            B_rdkit = self.rdkit_df.loc[X["SOLVENT B NAME"]].values
+            pct = X["SolventB%"].values.reshape(-1, 1)
+            rdkit_vals = A_rdkit * (1 - pct) + B_rdkit * pct
+        
+        # Add kinetics features
+        df = X.copy().reset_index(drop=True)
+        df['inv_temp'] = 1000.0 / (df['Temperature'] + 273.15)
+        df['log_time'] = np.log(df['Residence Time'] + 1e-6)
+        df['interaction'] = df['inv_temp'] * df['log_time']
+        
+        kinetics = df[['Residence Time', 'Temperature', 'inv_temp', 'log_time', 'interaction']].values
+        
+        return np.hstack([kinetics, rdkit_vals])
 ```
 
 **Key Points**:
-1. CatBoost handles categorical features natively - no need for encoding
-2. Interaction features (Reaction_Energy, B_Conc_Temp) capture domain knowledge
-3. Train separate models for each target
-4. Clip predictions to [0, 1] range
-5. Use TTA for mixture data (average both orderings)
+1. RDKit provides ~200 molecular descriptors (vs Spange's 13)
+2. Includes physicochemical properties: LogP, TPSA, MolWt, HBD, HBA
+3. Includes topological descriptors: ring counts, atom counts, bond counts
+4. Might capture different aspects of solvent effects
+5. Could have a DIFFERENT CV-LB relationship
+
+**Template Compliance**:
+- Create a model class with train_model() and predict() methods
+- Use the same CV procedure (leave-one-out for single, leave-one-ramp-out for full)
+- Last 3 cells remain unchanged
