@@ -1,186 +1,200 @@
 ## Current Status
-- **Best CV score**: 0.02047 from exp_000 (baseline XGBoost)
+- **Best CV score**: 0.201842 from exp_003 (CatBoost with hyperopt)
 - **Best LB score**: Not yet submitted
 - **CV-LB gap**: Unknown (need submission for calibration)
-- **Target score**: 0.058410 (need to INCREASE CV from 0.020 to ~0.058)
+- **Target score**: 0.058410 (need to improve by ~0.143)
 
 ## Response to Evaluator
 
-**Technical Verdict: TRUSTWORTHY**
-- The evaluator correctly identified that target encoding + product features caused 933% performance degradation (0.020 → 0.212)
-- Implementation was technically sound (no leakage, proper CV), but strategically flawed
-- **Key insight from analysis**: Product features (Weight_Duration, Duration_Heart_Rate) have 0.94 correlation with target and cause overfitting
-- **Second insight**: Target encoding on 'Sex' (2 categories) is ineffective - adds minimal signal (correlation 0.123)
+**Technical Verdict from Loop 4: CONCERNS**
+- **Target encoding implementation**: Manual implementation lacks internal cross-fitting, causing potential leakage. Winners used sklearn's TargetEncoder with built-in cross-validation.
+- **Feature engineering gaps**: Missing groupby z-score features that winners found effective.
+- **Overfitting risk**: Product features (Weight_Duration, Duration_Heart_Rate) have correlation 0.94 with target, causing overfitting (CV jumps from 0.0205 to 0.2275 when using only these features).
 
-**Evaluator's Top Priority: Investigate WHY Target Encoding Failed**
-- **AGREE COMPLETELY**: Analysis reveals product features are the main culprit, not target encoding
-- Product features alone achieve CV 0.2275 (much worse than baseline 0.020)
-- Manual target encoding on low-cardinality 'Sex' adds almost no value
-- Winners encoded HIGH-cardinality binned features, not 'Sex'
+**Evaluator's Top Priority: Implement Residual Modeling**
+- **AGREE COMPLETELY**: Both 1st (Chris Deotte) and 4th (Angelosmar) place winners emphasized residual modeling as key to success. This is the highest-impact change we can make.
+- **Implementation plan**: Sequential pipeline - LinearRegression baseline → Neural Network on LR residuals → XGBoost on NN residuals → Sum predictions.
 
 **Key Concerns Addressed**:
-1. **Performance degradation**: Caused by overfitting from product features (too predictive) + ineffective target encoding on 'Sex'
-2. **No diagnostic analysis**: Now completed - see `exploration/evolver_loop4_analysis.ipynb`
-3. **Hyperparameters not adapted**: Will tune regularization parameters for new features
-4. **Missing residual modeling**: Will implement as top priority (key winner technique)
-5. **No feature selection**: Will run ablation studies to identify helpful vs harmful features
+1. **Manual target encoding on 'Sex' is ineffective**: Only 2 categories (M/F), correlation 0.123. Winners encoded HIGH-cardinality binned features instead.
+2. **Product features cause overfitting**: r=0.94 correlation is too predictive. Remove temporarily, re-add later with proper regularization.
+3. **Missing residual modeling**: This was THE key technique for both winners. Implement immediately.
+4. **No groupby features**: Winners used z-score features grouped by Sex. Need to add.
+5. **Hyperparameters unchanged**: Added 16 features in exp_003 but kept same regularization. Need to tune.
 
 ## Data Understanding
 
 **Reference Notebooks**:
-- `exploration/evolver_loop4_analysis.ipynb`: Diagnostic analysis of target encoding failure
-- `exploration/evolver_loop1_analysis.ipynb`: Winning solution analysis
-- `experiments/001_baseline.ipynb`: XGBoost baseline (CV 0.02047)
-- `experiments/003_target_encoding.ipynb`: Failed target encoding experiment (CV 0.21156)
+- `exploration/evolver_loop5_analysis.ipynb`: Strategic analysis with winning solution insights
+- `exploration/evolver_loop4_analysis.ipynb`: Product feature overfitting analysis
+- `research/writeups/chris-deotte-1st-place-gpu-hill-climbing.md`: 1st place solution details
+- `research/writeups/4th-place-ridge-ensemble.md`: 4th place solution details
 
-**Key Findings from Analysis**:
-1. **Product features are TOO predictive**: Weight_Duration (r=0.94), Duration_Heart_Rate (r=0.94)
-2. **Target encoding on 'Sex' is ineffective**: Only 2 categories, correlation 0.123
-3. **Winners' approach differences**:
-   - Used sklearn's TargetEncoder with internal cross-fitting (not manual)
-   - Applied target encoding to binned features (high cardinality)
-   - Used residual modeling (NN on LR residuals, XGB on NN residuals)
-   - Used groupby z-score features
-   - GBDT models worked best with MINIMAL feature engineering (per AngelosMar)
+**Key Patterns from Winners**:
+1. **Chris Deotte (1st place, CV 0.05880)**:
+   - 7 diverse models in ensemble
+   - Target encoding (25% of ensemble weight) on HIGH-cardinality features
+   - Product features: log1p + all pairwise products/divisions/sums/differences
+   - CatBoost with binned features + groupby z-score features
+   - **NN on LinearRegression residuals** (key technique)
+   - **XGBoost on NN residuals** (key technique)
+
+2. **Angelosmar (4th place, CV 0.05868)**:
+   - 12 models in ensemble, Autogluon weight > 0.5
+   - Linear regression with ~400 features (CV 0.05976)
+   - **Sequential modeling: NN on LR residuals, XGB on NN residuals**
+   - GBDT models worked best with MINIMAL feature engineering
+   - Final ensemble: Ridge regression on OOF predictions
+
+3. **Common insights**:
+   - **Residual modeling is CRITICAL** - both winners emphasized this
+   - Target encoding on high-cardinality features (not low-card like 'Sex')
+   - Product features effective BUT need proper regularization
+   - Groupby z-score features add relative positioning signal
+   - GBDT models (XGB, CatBoost, LGBM) work best with minimal features
+   - Trust CV over LB (unstable correlation)
 
 ## Recommended Approaches (Priority Order)
 
-### Priority 1: Implement Residual Modeling (CRITICAL - Key Winner Technique)
+### Priority 1: Implement Residual Modeling Pipeline (CRITICAL)
 
-**Why**: Both Chris Deotte and AngelosMar emphasized this as crucial. It captures complementary patterns that direct modeling misses.
+**1.1 Linear Regression Baseline**
+- Use original features: Sex (one-hot encoded), Age, Height, Weight, Duration, Heart_Rate, Body_Temp
+- NO product features initially (too predictive, causes overfitting)
+- NO target encoding initially (implement properly later)
+- Use Ridge regularization (alpha=1.0)
+- Expected CV: ~0.065-0.075 (captures linear patterns)
 
-**Implementation**:
-1. **LinearRegression baseline**
-   - Use original features + basic interactions
-   - 5-fold CV, get OOF predictions
-   - Expected CV: ~0.059-0.060
+**1.2 Neural Network on LR Residuals**
+- Train on residuals: target - LR_predictions
+- Architecture: Input (7 features) → Dense(64, ReLU) → Dropout(0.2) → Dense(32, ReLU) → Dropout(0.2) → Dense(1)
+- Optimizer: Adam, lr=0.001
+- Early stopping: patience=10, monitor validation loss
+- Expected CV: ~0.060-0.070 (captures non-linear patterns)
 
-2. **Neural Network on LR residuals**
-   - Target: `new_target = actual - LR_OOF_predictions`
-   - Train NN on residuals (captures non-linear patterns)
-   - Final prediction: `NN_PRED + LR_PRED`
-   - Expected CV: ~0.059-0.060
+**1.3 XGBoost on NN Residuals**
+- Train on residuals: LR_residuals - NN_predictions
+- Features: original 7 features (minimal engineering)
+- Parameters: n_estimators=1000, lr=0.05, max_depth=4, subsample=0.8, colsample_bytree=0.8
+- Early stopping: rounds=50
+- Expected CV: ~0.058-0.065 (captures tree-based patterns)
 
-3. **XGBoost on NN residuals**
-   - Target: `new_target = actual - NN_OOF_predictions`
-   - Train XGBoost on second-level residuals
-   - Final prediction: `XGB_PRED + NN_PRED + LR_PRED`
-   - Expected CV: ~0.058-0.059
+**1.4 Final Prediction**
+- Sum all three model predictions: pred_final = pred_LR + pred_NN + pred_XGB
+- This sequential approach captures different pattern types
+- Expected combined CV: 0.059-0.062 (close to winning scores)
 
-**Expected outcome**: 3 diverse models capturing different patterns (linear, non-linear, tree-based)
+### Priority 2: Add Groupby Z-Score Features
 
-### Priority 2: Fix Feature Engineering (Based on Diagnostic Analysis)
+**2.1 Create Relative Positioning Features**
+- Group by 'Sex' and compute z-scores for numerical features
+- Formula: (value - mean(group)) / std(group)
+- Features to create:
+  - Weight_zscore_by_Sex
+  - Height_zscore_by_Sex
+  - Duration_zscore_by_Sex
+  - Heart_Rate_zscore_by_Sex
+  - Body_Temp_zscore_by_Sex
+  - Age_zscore_by_Sex
+- These capture how a value compares to others of same Sex
+- Winners found these very effective
 
-**2.1 Remove Product Features (Temporary)**
-- Weight_Duration and Duration_Heart_Rate cause overfitting (r=0.94)
-- Remove from next experiments to establish baseline without them
-- Can re-add later with proper regularization
+**2.2 Add to Residual Pipeline**
+- Add these 6 features to all three models in pipeline
+- Re-run CV to measure improvement
+- Expected CV gain: -0.001 to -0.003
 
-**2.2 Abandon Target Encoding on 'Sex'**
-- Only 2 categories - adds minimal signal
-- Winners encoded binned features instead
-- Skip target encoding until we implement sklearn's TargetEncoder properly
+### Priority 3: Implement Proper Target Encoding
 
-**2.3 Add GroupBy Z-Score Features**
-- Group by Sex + Age bins, compute z-scores for Height, Weight, etc.
-- Creates relative positioning features
-- Winners found these effective
-- Example: For males in 30s, how does their weight compare to other males in 30s?
+**3.1 Use sklearn's TargetEncoder**
+- Create binned features first (15 bins each for numerical features)
+- Apply TargetEncoder with internal cross-fitting (cv=5)
+- Set smoothing parameter (target_noise=0.1)
+- Encode HIGH-cardinality binned features (not 'Sex')
+- Features to encode: Age_binned, Height_binned, Weight_binned, Duration_binned, Heart_Rate_binned, Body_Temp_binned
 
-**2.4 Create Binned Features for CatBoost**
-- Convert numerical features to 9 equal-width bins
-- Helps CatBoost handle numerical features better
-- Use these for target encoding later (high cardinality)
+**3.2 Add to Residual Pipeline**
+- Add encoded features to all three models
+- Use careful cross-validation to prevent leakage
+- Expected CV gain: -0.002 to -0.005
 
-### Priority 3: Hyperparameter Tuning for Regularization
+### Priority 4: Hyperparameter Tuning for Regularization
 
-**Why**: Added 16 new features in exp_003 but kept same hyperparameters, causing overfitting.
+**4.1 XGBoost Regularization**
+- Increase reg_alpha: 0 → 0.1 → 0.5 → 1.0
+- Increase reg_lambda: 1.0 → 1.5 → 2.0
+- Reduce max_depth: 6 → 5 → 4
+- Reduce learning_rate: 0.05 → 0.03 → 0.01
+- These changes counteract overfitting from added features
 
-**For XGBoost**:
-- Increase `reg_alpha` (L1 regularization): try [0.1, 0.5, 1.0]
-- Increase `reg_lambda` (L2 regularization): try [1.0, 1.5, 2.0]
-- Reduce `max_depth`: try [4, 5] (was 6)
-- Increase `min_child_samples`: try [5, 10] (was 1)
+**4.2 CatBoost Regularization**
+- Increase l2_leaf_reg: 3.0 → 5.0 → 7.0
+- Reduce depth: 6 → 5 → 4
+- Use model_size_reg to prevent overfitting
 
-**For CatBoost**:
-- Increase `l2_leaf_reg`: try [3, 5, 7] (was default)
-- Reduce `depth`: try [4, 5] (was 6)
-- Increase `min_data_in_leaf`: try [5, 10]
+**4.3 Neural Network Regularization**
+- Increase dropout: 0.2 → 0.3 → 0.4
+- Add L2 regularization: kernel_regularizer=l2(0.01)
+- Reduce layer sizes if overfitting detected
 
-### Priority 4: Create Diverse Base Models
+### Priority 5: Re-introduce Product Features (With Regularization)
 
-**4.1 LightGBM with GOSS**
-- Use histogram-based approach
-- Try Gradient-based One-Side Sampling for speed
-- Different feature subset than XGBoost/CatBoost
-- Expected CV: ~0.059-0.061
+**5.1 Add Product Features Back**
+- Weight_Duration, Duration_Heart_Rate, Height_Weight
+- Apply AFTER tuning regularization parameters
+- Monitor CV closely - if it increases, increase regularization further
+- These features are very predictive (r=0.94) but cause overfitting without proper control
 
-**4.2 Neural Network (Direct - Not Residual)**
-- 2-3 hidden layers with dropout
-- Use original features + log transforms
-- Different architecture than residual NN
-- Expected CV: ~0.060-0.062
+### Priority 6: Create Additional Diverse Models
 
-**4.3 Linear Regression with Many Features**
-- Create ~200 features (products, ratios, polynomials)
-- Use Ridge regularization
-- Expected CV: ~0.059-0.061
+**6.1 LightGBM with GOSS**
+- Use Gradient-based One-Side Sampling
+- Minimal feature engineering (original 7 features)
+- Different hyperparameters than XGBoost
+- Adds diversity to ensemble
 
-### Priority 5: Proper Target Encoding (After Fixing Other Issues)
+**6.2 CatBoost with Binned Features**
+- Use binned versions of numerical features
+- Native categorical handling for 'Sex'
+- Different algorithm = diversity
 
-**Only after implementing above**:
-1. Use sklearn's TargetEncoder with internal cross-fitting (cv=5)
-2. Apply to HIGH-cardinality features (binned versions of numerical features)
-3. Test on small subset first to verify no degradation
-4. Add smoothing parameter tuning
+**6.3 Neural Network (Direct, Not Residual)**
+- Train on raw target (not residuals)
+- Different architecture: deeper/wider
+- Adds different perspective
 
 ## What NOT to Try
 
-1. **Don't use product features (Weight_Duration, Duration_Heart_Rate) yet**
-   - Too predictive (r=0.94), causing overfitting
-   - Establish baseline without them first
-   - Can re-add later with stronger regularization
-
-2. **Don't use manual target encoding on 'Sex'**
-   - Only 2 categories, adds minimal signal
-   - Use sklearn's TargetEncoder on binned features instead
-
-3. **Don't add all features at once**
-   - Run ablation studies to identify helpful vs harmful features
-   - Add features systematically, one group at a time
-
-4. **Don't chase LB feedback**
-   - Winners explicitly ignored LB due to unstable correlation
-   - Focus on CV improvement
-
-5. **Don't skip residual modeling**
-   - This was KEY to winning solutions
-   - Implement before trying other complex approaches
+1. **Don't use manual target encoding**: Use sklearn's TargetEncoder with internal cross-fitting
+2. **Don't encode 'Sex' with target encoding**: Only 2 categories, adds minimal signal (correlation 0.123)
+3. **Don't use product features without regularization**: r=0.94 correlation causes overfitting
+4. **Don't skip residual modeling**: This is THE key technique from winners
+5. **Don't chase LB feedback**: CV-LB correlation is unstable, trust CV optimization
+6. **Don't use simple averaging for ensemble**: Use hill climbing or Ridge regression
+7. **Don't skip groupby features**: Winners found these effective
 
 ## Validation Notes
 
 - **CV Scheme**: 5-fold CV with seed 42 (consistent with winners)
 - **Metric**: RMSLE (Root Mean Squared Logarithmic Error)
-- **Clipping**: Clip predictions to [train_min, train_max] range
-- **Trust CV**: Do not chase LB feedback - focus on CV improvement
-- **Diagnostic tracking**: For each experiment, analyze:
-  - Feature importance to see which features are used
-  - Train vs validation performance per fold (overfitting check)
-  - Correlation between engineered features and target
-  - Ablation results (which feature groups help vs hurt)
+- **Target Transformation**: Use log1p for training, expm1 for predictions
+- **Prediction Clipping**: Clip to [train_min, train_max] range
+- **Residual Calculation**: Always compute residuals on out-of-fold predictions
+- **Feature Engineering**: All feature creation must be done inside CV loop to prevent leakage
+- **Target Encoding**: Use sklearn's TargetEncoder with cv=5 for internal cross-fitting
 
 ## Expected Timeline
 
-**Loop 5-6**: Implement residual modeling (3 models)
-**Loop 7-8**: Add groupby features + hyperparameter tuning
-**Loop 9-10**: Create additional diverse models (LGBM, direct NN, Linear)
-**Loop 11-12**: Implement proper target encoding on binned features
-**Loop 13+**: Ensemble with hill climbing
+- **Loop 5-6**: Implement residual modeling pipeline (3 models) → Target CV: 0.059-0.062
+- **Loop 7-8**: Add groupby features + hyperparameter tuning → Target CV: 0.057-0.060
+- **Loop 9-10**: Create additional diverse models → Target CV: 0.056-0.059
+- **Loop 11-12**: Implement proper target encoding on binned features → Target CV: 0.055-0.058
+- **Loop 13+**: Ensemble with hill climbing → Target CV: < 0.058410
 
 ## Success Criteria
 
-- Generate at least 7 diverse models with CV scores in 0.058-0.065 range
-- Implement residual modeling pipeline (3 sequential models)
-- Run ablation studies to identify optimal feature set
-- Achieve final CV score < 0.058410 (target)
-- Create robust ensemble that beats best single model by >0.001
+1. Generate at least 7 diverse models with CV 0.058-0.065
+2. Implement residual modeling pipeline (3 sequential models)
+3. Run ablation studies to identify optimal feature set
+4. Achieve final CV < 0.058410 (target)
+5. Create robust ensemble beating best single model by >0.001
