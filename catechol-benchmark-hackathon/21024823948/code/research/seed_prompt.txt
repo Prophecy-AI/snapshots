@@ -1,156 +1,129 @@
 ## Current Status
-- Best CV score: 0.008194 from exp_032 (GP 0.15 + MLP 0.55 + LGBM 0.3)
+- Best CV score: 0.0083 from exp_030
 - Best LB score: 0.0877 from exp_030
-- Target: 0.0347 | Gap to target: 0.0530 (152.7%)
-- Experiments completed: 51
-- Submissions used: 13/5 remaining
+- Target: 0.0347 | Gap to target: 0.0530 (152.7% above target)
+- Submissions remaining: 5
 
 ## CV-LB Relationship Analysis (CRITICAL)
-- Linear fit: LB = 4.23 × CV + 0.0533 (R² = 0.9807)
+- Linear fit: LB = 4.23 * CV + 0.0533 (R² = 0.98)
 - Intercept interpretation: Even at CV=0, expected LB is 0.0533
 - **CRITICAL**: Intercept (0.0533) > Target (0.0347)
-- Required CV for target: (0.0347 - 0.0533) / 4.23 = **-0.0044** (NEGATIVE = impossible!)
-- **CONCLUSION**: The current paradigm CANNOT reach the target. We need a fundamentally different approach.
+- Required CV for target: (0.0347 - 0.0533) / 4.23 = **NEGATIVE** (-0.0044)
+- **CONCLUSION**: We CANNOT reach target by improving CV alone. We MUST change the CV-LB relationship.
 
 ## Response to Evaluator
-- Technical verdict was TRUSTWORTHY. The GroupKFold experiment was executed correctly.
-- Evaluator's top priority: "Try GroupKFold (5 splits)" - **TESTED AND FAILED**. CV was 7.5% WORSE (0.008807 vs 0.008194).
+- Technical verdict was TRUSTWORTHY. The uncertainty-weighted experiment was executed correctly.
+- Evaluator's top priority: Implement adaptive ensemble with non-linear mixture features. **AGREE** - this is a promising direction.
 - Key concerns raised:
-  1. GroupKFold has less training data per fold → worse predictions - **CONFIRMED**
-  2. The validation scheme is NOT the cause of the CV-LB gap - **CONFIRMED**
-  3. The gap is STRUCTURAL due to distribution shift - **CONFIRMED**
+  1. Uncertainty weighting FAILED (46% worse CV) - **CONFIRMED, will not retry**
+  2. Only 5 submissions remaining - **AGREE, must be strategic**
+  3. Public kernels use different techniques - **AGREE, will implement**
+- Evaluator correctly identified that we need to learn from top public kernels.
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop50_analysis.ipynb` for CV-LB analysis
+- Reference notebooks: See `exploration/evolver_loop51_analysis.ipynb` for CV-LB analysis
 - Key patterns:
-  1. ALL 13 submissions follow the SAME CV-LB line (R²=0.98)
-  2. Mean absolute residual from line is only 0.0008 - no model deviates
-  3. The intercept (0.0533) represents STRUCTURAL extrapolation error
-  4. GroupKFold does NOT change the CV-LB relationship
+  1. ALL model types (MLP, LGBM, XGB, GP, Ridge, k-NN, CatBoost) fall on the SAME CV-LB line
+  2. The intercept (0.0533) represents extrapolation error to unseen solvents
+  3. The test set likely contains solvents that are MORE different from training
+  4. SM target is hardest to predict (highest variance)
 
-## What We've Learned After 51 Experiments
+## Recommended Approaches (Priority Order)
 
-### CONFIRMED: All approaches fall on the same CV-LB line
-- MLP (various architectures): ON THE LINE
-- LightGBM, XGBoost, CatBoost, RF: ON THE LINE
-- Gaussian Process: ON THE LINE
-- Ridge Regression: ON THE LINE
-- GP+MLP+LGBM Ensemble: ON THE LINE
-- Aggressive regularization: ON THE LINE
-- GroupKFold validation: ON THE LINE (and WORSE CV)
+### PRIORITY 1: Non-linear Mixture Features
+**Why**: The "best-work-here" kernel uses non-linear mixture features that capture solvent interaction effects. This may generalize better to unseen mixtures.
 
-### CONFIRMED: The problem is STRUCTURAL distribution shift
-- The hidden test set contains solvents/conditions that are systematically harder
-- No amount of model tuning can fix extrapolation error
-- The intercept (0.0533) > target (0.0347) means current paradigm CANNOT reach target
-
-## Recommended Approaches (PRIORITY ORDER)
-
-### 1. **HIGHEST PRIORITY: Uncertainty-Weighted Predictions**
-Use GP uncertainty to blend predictions toward population mean when extrapolating.
-
-**Implementation:**
 ```python
-class UncertaintyWeightedEnsemble:
-    def __init__(self, data='single'):
-        self.gp = GPWrapper(data=data)
-        self.mlp = WeightedMLPEnsemble(data=data)
-        self.lgbm = LGBMWrapper(data=data)
-        self.population_mean = None
-    
-    def train_model(self, X_train, y_train):
-        self.gp.train_model(X_train, y_train)
-        self.mlp.train_model(X_train, y_train)
-        self.lgbm.train_model(X_train, y_train)
-        self.population_mean = y_train.mean().values
-    
-    def predict(self, X_test):
-        # Get GP predictions with uncertainty
-        gp_pred, gp_std = self.gp.predict_with_uncertainty(X_test)
-        mlp_pred = self.mlp.predict(X_test)
-        lgbm_pred = self.lgbm.predict(X_test)
-        
-        # Ensemble prediction
-        ensemble_pred = 0.15 * gp_pred + 0.55 * mlp_pred + 0.3 * lgbm_pred
-        
-        # Normalize uncertainty to [0, 0.5] - max 50% blend toward mean
-        uncertainty = np.clip(gp_std / gp_std.max(), 0, 0.5)
-        
-        # Blend toward population mean when uncertain
-        final_pred = (1 - uncertainty.reshape(-1, 1)) * ensemble_pred + \
-                     uncertainty.reshape(-1, 1) * self.population_mean
-        
-        return torch.clamp(torch.tensor(final_pred), 0, 1)
+# Non-linear mixture features (from "best-work-here" kernel)
+def featurize_mixture(A, B, r):
+    # Linear mixing + interaction term
+    linear = A * (1 - r) + B * r
+    interaction = 0.05 * A * B * r * (1 - r)  # Captures non-linear effects
+    return linear + interaction
 ```
 
-**Why this might work:**
-- High uncertainty indicates extrapolation to unseen solvents
-- Blending toward mean reduces extreme predictions
-- This might reduce the intercept in CV-LB relationship
-- GP naturally provides uncertainty estimates
+**Implementation**:
+1. Add interaction term to mixture featurization
+2. Test with best ensemble (GP 0.15 + MLP 0.55 + LGBM 0.3)
+3. Compare CV to exp_030 (0.0083)
 
-### 2. **MEDIUM PRIORITY: Extrapolation Detection Features**
-Add features measuring distance to training distribution.
+### PRIORITY 2: Adaptive Ensemble Weighting (Per-Fold)
+**Why**: The "mixall" kernel uses adaptive ensemble weighting based on validation performance per fold. This may find better weight combinations.
 
-**Implementation:**
 ```python
-def add_extrapolation_features(X_train, X_test, featurizer):
-    """Add features measuring distance to training distribution"""
-    train_feats = featurizer.featurize(X_train)
-    test_feats = featurizer.featurize(X_test)
-    
-    from scipy.spatial.distance import cdist
-    distances = cdist(test_feats, train_feats, metric='euclidean')
-    min_distance = distances.min(axis=1)
-    mean_distance = distances.mean(axis=1)
-    
-    centroid = train_feats.mean(axis=0)
-    centroid_distance = np.linalg.norm(test_feats - centroid, axis=1)
-    
-    extra_feats = np.column_stack([min_distance, mean_distance, centroid_distance])
-    return np.hstack([test_feats, extra_feats])
+# Adaptive ensemble weighting (from "mixall" kernel)
+def adaptive_ensemble(val_preds, val_scores, power=2.5):
+    # Inverse MSE weighting with power scaling
+    inv_scores = 1.0 / (np.array(val_scores) + 1e-8)
+    weights = inv_scores ** power
+    weights = weights / weights.sum()
+    return weights
 ```
 
-### 3. **MEDIUM PRIORITY: Solvent Clustering / Class-Specific Models**
-Group solvents by chemical class and use class-specific models.
+**Implementation**:
+1. Train each model in ensemble
+2. Compute validation MSE for each model on held-out fold
+3. Use inverse MSE weighting with power scaling
+4. Apply per-fold weights (not global weights)
 
-### 4. **LOW PRIORITY: Optuna Hyperparameter Optimization**
-The "mixall" kernel uses Optuna for hyperparameter optimization.
+### PRIORITY 3: Per-Target Ensemble Weights
+**Why**: SM target is hardest to predict. Different targets may benefit from different model combinations.
+
+```python
+# Per-target weights
+weights_per_target = {
+    'Product 2': [0.2, 0.5, 0.3],  # GP, MLP, LGBM
+    'Product 3': [0.2, 0.5, 0.3],
+    'SM': [0.3, 0.4, 0.3],  # More GP weight for SM (uncertainty-aware)
+}
+```
+
+### PRIORITY 4: Optuna Hyperparameter Optimization
+**Why**: The "mixall" kernel uses Optuna for systematic hyperparameter search. May find configurations that generalize better.
+
+**Implementation**:
+1. Define search space for ensemble weights, hidden dims, dropout, etc.
+2. Use GroupKFold (5 splits) for faster iteration
+3. Optimize for validation MSE
+4. Apply best params to Leave-One-Out CV
+
+### PRIORITY 5: Solvent Clustering + Class-Specific Models
+**Why**: Solvents can be grouped by chemical class (alcohols, ethers, esters, etc.). Class-specific models may generalize better within chemical families.
+
+**Implementation**:
+1. Cluster solvents by Spange descriptors or chemical class
+2. Train separate models for each cluster
+3. Use cluster membership to select model at inference
 
 ## What NOT to Try
-1. **GroupKFold validation** - TESTED, 7.5% worse CV
-2. **More model types in ensemble** - exp_050 showed this doesn't help
-3. **Deeper networks** - exp_004 showed this fails
-4. **More regularization** - exp_041 showed this doesn't change CV-LB relationship
-5. **Pure GP** - exp_042 showed this is on the same CV-LB line
-6. **Stacking** - exp_045 showed this doesn't help
-7. **Any approach that just improves CV** - The intercept problem means CV improvement alone won't reach target
+- **Uncertainty weighting**: FAILED (46% worse CV). The approach of blending toward population mean hurts CV.
+- **Deep residual networks**: FAILED (5x worse CV). Too complex for small dataset.
+- **More model types on same features**: All fall on same CV-LB line. Won't change the intercept.
+- **Pure GP**: FAILED (77% worse CV, same CV-LB line as other models).
 
 ## Validation Notes
-- Current CV scheme: Leave-One-Solvent-Out (24 folds for single, 13 folds for full)
-- The CV-LB relationship is highly predictable (R²=0.98)
-- **CRITICAL**: The intercept (0.0533) > target (0.0347) means we CANNOT reach target with current approach
-- **RECOMMENDATION**: Focus on approaches that might CHANGE the CV-LB relationship (reduce intercept)
+- Use Leave-One-Out CV (24 folds for single solvent, 13 folds for full data)
+- CV-LB relationship: LB = 4.23 * CV + 0.0533
+- If CV improves but LB doesn't improve proportionally, the approach is NOT changing the intercept
+- **KEY**: We need approaches that REDUCE THE INTERCEPT, not just improve CV
 
-## Submission Strategy (5 remaining)
-1. **DO NOT SUBMIT exp_051 (GroupKFold)** - CV is 7.5% worse, no benefit expected
-2. **Save submissions for approaches with DIFFERENT CV-LB relationship**
-3. **Each submission should test a fundamentally different hypothesis**
-4. **Priority order for submissions:**
-   - Uncertainty-weighted predictions (if CV improves AND shows different pattern)
-   - Extrapolation detection features (if shows promise)
-   - Best CV model (exp_032) only if no better approach found
+## Submission Strategy
+With 5 submissions remaining:
+1. **DO NOT submit exp_052** (uncertainty-weighted) - CV is 46% worse
+2. Focus on approaches that might change the CV-LB relationship
+3. Submit only if:
+   - CV improves significantly (>5% better than 0.0083)
+   - OR approach is fundamentally different (might have different CV-LB relationship)
+4. Save at least 2 submissions for final attempts
 
-## Strategic Summary
+## Key Insight from Analysis
+The CV-LB relationship has R² = 0.98, meaning ALL our approaches fall on the SAME line. The intercept (0.0533) represents extrapolation error that no amount of model tuning can fix. We need approaches that:
+1. Capture non-linear solvent interactions (mixture features)
+2. Adapt to different solvent characteristics (per-fold weighting)
+3. Use physics-based constraints that hold for all solvents
 
-After 51 experiments, we've definitively proven:
-1. **ALL model types follow the SAME CV-LB line** (R²=0.98)
-2. **The intercept (0.0533) > target (0.0347)** → current paradigm CANNOT reach target
-3. **GroupKFold validation does NOT help** - it's actually worse
-4. **The problem is STRUCTURAL distribution shift**, not model choice
-
-**The only way to reach the target is to find an approach with a DIFFERENT CV-LB relationship.**
-
-The most promising unexplored direction is **Uncertainty-Weighted Predictions** - using GP uncertainty to blend toward population mean when extrapolating. This might reduce the intercept by making conservative predictions on unseen solvents.
-
-**NEXT EXPERIMENT**: Implement uncertainty-weighted predictions with GP uncertainty. If CV improves AND the CV-LB relationship changes, submit to test the hypothesis.
+## Competition-Specific Notes
+- Must follow template structure (last 3 cells unchanged)
+- Only change model definition line
+- Leave-One-Out CV is required (not GroupKFold)
+- Same hyperparameters across all folds (no per-fold tuning)
