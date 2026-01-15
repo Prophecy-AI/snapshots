@@ -13,21 +13,21 @@
 3. GNN is the most promising path forward
 
 **Evaluator's top priority: Implement GNN with AttentiveFP.** I FULLY AGREE.
-- GNN benchmark achieved MSE 0.0039 on this exact dataset
+- GNN benchmark achieved MSE 0.0039 on this exact dataset (22x better than our best LB!)
 - GNN learns from molecular STRUCTURE, not IDENTITY
-- Can generalize to unseen solvents
+- Can generalize to unseen solvents through graph structure
 - May have a DIFFERENT CV-LB relationship (which is what we need)
 
 **Key concerns raised:**
 1. CV-LB intercept > target → Addressed by trying fundamentally different approach (GNN)
 2. Only 4 submissions remaining → Will test GNN before submitting
-3. Current submission file is from exp_038 (worse CV) → DO NOT SUBMIT current file
+3. exp_035 regenerated with CV 0.008194 → Best CV model ready for submission if needed
 
 ## Data Understanding
 
 Reference notebooks:
-- `exploration/evolver_loop39_analysis.ipynb` - CV-LB relationship analysis
-- `exploration/evolver_loop38_analysis.ipynb` - Learned embeddings failure analysis
+- `exploration/evolver_loop40_analysis.ipynb` - CV-LB relationship analysis
+- `exploration/evolver_loop39_analysis.ipynb` - Learned embeddings failure analysis
 - `exploration/eda.ipynb` - Initial data exploration
 
 Key patterns:
@@ -36,13 +36,14 @@ Key patterns:
 3. **All 24 solvents have SMILES** - GNN implementation is feasible
 4. **PyTorch Geometric 2.7.0 and AttentiveFP are available**
 5. **RDKit is available for SMILES → molecular graph conversion**
+6. **lishellliang kernel uses GroupKFold(5)** - May explain part of CV-LB gap
 
 ## Recommended Approaches
 
 ### PRIORITY 1: GNN with AttentiveFP (MUST TRY)
 
 **Rationale:**
-- GNN benchmark achieved MSE 0.0039 on this exact dataset
+- GNN benchmark achieved MSE 0.0039 on this exact dataset (22x better than our best LB!)
 - GNN learns from molecular STRUCTURE, not IDENTITY
 - Can generalize to unseen solvents through graph structure
 - May have a DIFFERENT CV-LB relationship (which is what we need to reach target)
@@ -50,49 +51,85 @@ Key patterns:
 **Implementation:**
 ```python
 from torch_geometric.nn.models import AttentiveFP
+from torch_geometric.data import Data, Batch
 from rdkit import Chem
-from torch_geometric.data import Data
+from rdkit.Chem import AllChem
 
 # 1. Convert SMILES to molecular graphs
 def smiles_to_graph(smiles):
     mol = Chem.MolFromSmiles(smiles)
-    # Extract atom features (atomic number, degree, etc.)
-    # Extract bond features (bond type, aromaticity)
-    # Build PyG Data object
-    return Data(x=atom_features, edge_index=edge_index, edge_attr=edge_attr)
+    
+    # Atom features: atomic number, degree, hybridization, aromaticity, etc.
+    atom_features = []
+    for atom in mol.GetAtoms():
+        features = [
+            atom.GetAtomicNum(),
+            atom.GetDegree(),
+            atom.GetFormalCharge(),
+            int(atom.GetHybridization()),
+            int(atom.GetIsAromatic()),
+            atom.GetTotalNumHs(),
+        ]
+        atom_features.append(features)
+    
+    # Edge features: bond type, aromaticity, etc.
+    edge_index = []
+    edge_attr = []
+    for bond in mol.GetBonds():
+        i, j = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+        edge_index.extend([[i, j], [j, i]])
+        bond_features = [
+            int(bond.GetBondType()),
+            int(bond.GetIsAromatic()),
+            int(bond.GetIsConjugated()),
+        ]
+        edge_attr.extend([bond_features, bond_features])
+    
+    return Data(
+        x=torch.tensor(atom_features, dtype=torch.float),
+        edge_index=torch.tensor(edge_index, dtype=torch.long).t().contiguous(),
+        edge_attr=torch.tensor(edge_attr, dtype=torch.float)
+    )
 
-# 2. Use AttentiveFP for solvent representation
+# 2. GNN Model
 class GNNModel(nn.Module):
     def __init__(self):
+        super().__init__()
         self.gnn = AttentiveFP(
-            in_channels=num_atom_features,
+            in_channels=6,  # atom features
             hidden_channels=64,
             out_channels=32,
-            edge_dim=num_edge_features,
+            edge_dim=3,  # edge features
             num_layers=2,
             num_timesteps=2
         )
         self.mlp = nn.Sequential(
             nn.Linear(32 + 5, 64),  # 32 from GNN + 5 kinetics features
             nn.ReLU(),
-            nn.Linear(64, 3)
+            nn.Dropout(0.2),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, 3),
+            nn.Sigmoid()
         )
     
-    def forward(self, graph, kinetics):
-        solvent_repr = self.gnn(graph.x, graph.edge_index, graph.edge_attr, graph.batch)
+    def forward(self, graph_batch, kinetics):
+        solvent_repr = self.gnn(graph_batch.x, graph_batch.edge_index, 
+                                graph_batch.edge_attr, graph_batch.batch)
         combined = torch.cat([solvent_repr, kinetics], dim=1)
         return self.mlp(combined)
 ```
 
 **Key considerations:**
-- Must handle mixtures by combining GNN representations of both solvents
+- Must handle mixtures by combining GNN representations of both solvents (weighted average by SolventB%)
 - Include kinetics features (1/T, ln(t), interaction)
 - Use leave-one-solvent-out CV as required by competition
+- The model must have `train_model(X_train, y_train)` and `predict(X_test)` methods
 
-### PRIORITY 2: k-NN with Tanimoto Similarity
+### PRIORITY 2: k-NN with Tanimoto Similarity (Backup)
 
 **Rationale:**
-- Simple to implement
+- Simple to implement as a backup
 - Uses molecular fingerprints for similarity
 - May help with distribution shift by weighting predictions by similarity
 
@@ -111,24 +148,21 @@ def compute_similarity(smiles1, smiles2):
 # Weight predictions by similarity
 ```
 
-### PRIORITY 3: Calibration / Post-processing
+### PRIORITY 3: Ensemble GNN with Current Best Models
 
-**Rationale:**
-- The large intercept suggests systematic bias
-- Calibration may reduce the intercept
-
-**Implementation:**
-- Isotonic regression on validation predictions
-- Temperature scaling
-- Adjust predictions based on solvent similarity to training set
+If GNN shows promise, ensemble it with our best GP+MLP+LGBM model:
+- GNN provides molecular structure understanding
+- GP+MLP+LGBM provides kinetics understanding
+- Ensemble may capture both aspects
 
 ## What NOT to Try
 
 1. **Learned embeddings** - PROVEN TO FAIL (exp_039). Test solvent never seen during training.
-2. **More regularization** - Already tried extensively, doesn't help.
+2. **More regularization on current models** - Already tried extensively, doesn't help.
 3. **Simpler features** - exp_038 proved DRFP features ARE valuable.
 4. **Similarity weighting with unnormalized features** - exp_037 failed due to implementation bug.
 5. **Higher GP weight** - exp_031 showed 10.61% worse CV.
+6. **Ridge/Kernel Ridge** - exp_033, exp_034 showed much worse CV.
 
 ## Validation Notes
 
@@ -147,14 +181,21 @@ def compute_similarity(smiles1, smiles2):
 
 ## Summary
 
-**THE TARGET IS REACHABLE.** The GNN benchmark achieved MSE 0.0039, which is 8.9x BETTER than the target (0.0347). Our current best LB (0.0877) is 2.53x worse than target.
+**THE TARGET IS REACHABLE.** The GNN benchmark achieved MSE 0.0039, which is 22x BETTER than our best LB (0.0877) and 8.9x BETTER than the target (0.0347).
 
 The key insight is that the CV-LB relationship has intercept > target, meaning we CANNOT reach target by improving CV with the current approach. We need a fundamentally different approach that changes the CV-LB relationship.
 
 GNN is the most promising path because:
 1. It's proven to work on this exact dataset (MSE 0.0039)
 2. It learns from molecular structure, not identity
-3. It can generalize to unseen solvents
+3. It can generalize to unseen solvents through graph structure
 4. It may have a different CV-LB relationship
 
 **Next step:** Implement GNN with AttentiveFP and test on leave-one-solvent-out CV.
+
+**Fallback:** If GNN doesn't work, try k-NN with Tanimoto similarity as a simpler approach.
+
+**Submission strategy:** 
+- Do NOT submit until we have a fundamentally different approach tested
+- exp_035 (CV 0.008194) is ready as our best current model if needed
+- 4 submissions remaining - use wisely
