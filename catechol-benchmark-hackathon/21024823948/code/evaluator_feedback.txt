@@ -1,8 +1,8 @@
 ## What I Understood
 
-The junior researcher tested **uncertainty-weighted predictions** following my previous recommendation. The hypothesis was that by using GP uncertainty to blend predictions toward the population mean when extrapolating to unseen solvents, we might reduce the intercept in the CV-LB relationship (which is the structural barrier preventing us from reaching the target). The implementation used the best ensemble (GP 0.15 + MLP 0.55 + LGBM 0.3) with a max_blend parameter of 0.3, meaning predictions could be blended up to 30% toward the population mean when uncertainty was highest.
+The junior researcher tested **non-linear mixture features** following my previous recommendation from the "best-work-here" kernel. The hypothesis was that adding interaction terms to mixture featurization (`A * (1-r) + B * r + 0.05 * A * B * r * (1-r)`) would capture solvent interaction effects and potentially improve generalization to unseen mixtures. The implementation added 140 extra interaction features (spange + drfp + acs) to the existing 145 features, totaling 285 features for mixtures.
 
-**Result**: CV = 0.011985, which is **46.27% WORSE** than the best CV (0.008194 from exp_035). This is a significant degradation.
+**Result**: CV = 0.024372, which is **197% WORSE** than the best CV (0.008194 from exp_032). The failure is concentrated in the Full Data (mixtures): Single Solvent MSE = 0.008485 (acceptable), but Full Data MSE = 0.032865 (catastrophic).
 
 ## Technical Execution Assessment
 
@@ -14,14 +14,13 @@ The junior researcher tested **uncertainty-weighted predictions** following my p
 
 **Leakage Risk**: NONE DETECTED ✓
 - Features computed from static lookup tables (no data leakage)
-- GP uncertainty computed from training data only
-- Population mean computed from training data only
+- Interaction features computed per-sample, not globally
 - Per-model training within each fold
 
 **Score Integrity**: VERIFIED ✓
-- Single Solvent MSE: 0.012804 (n=656)
-- Full Data MSE: 0.011548 (n=1227)
-- Overall MSE: 0.011985
+- Single Solvent MSE: 0.008485 (n=656)
+- Full Data MSE: 0.032865 (n=1227)
+- Overall MSE: 0.024372
 - Scores verified in notebook output cell 14
 
 **Code Quality**: GOOD ✓
@@ -34,84 +33,90 @@ Verdict: **TRUSTWORTHY** - The experiment was executed correctly and results can
 
 ## Strategic Assessment
 
-**Approach Fit**: HYPOTHESIS DISPROVED - UNCERTAINTY WEIGHTING HURTS PERFORMANCE
+**Approach Fit**: HYPOTHESIS DISPROVED - NON-LINEAR MIXTURE FEATURES HURT PERFORMANCE BADLY
 
-The uncertainty-weighted approach was a reasonable hypothesis to test, but the results clearly show it doesn't work:
-- CV degraded by 46% (0.008194 → 0.011985)
-- The blending toward population mean is too aggressive
-- GP uncertainty may not correlate well with actual extrapolation error
+The non-linear mixture features were a reasonable hypothesis from the "best-work-here" kernel, but the implementation failed catastrophically:
+- CV degraded by 197% (0.008194 → 0.024372)
+- Single Solvent MSE is acceptable (0.008485), but Full Data MSE is terrible (0.032865)
+- The interaction features are HURTING mixture predictions, not helping
 
 **Why it failed (analysis)**:
-1. **Population mean is a poor anchor**: The population mean [0.05, 0.10, 0.75] may not be representative of the true distribution for unseen solvents
-2. **GP uncertainty may not capture extrapolation**: The GP's uncertainty is based on feature-space distance, which may not correlate with actual prediction error
-3. **Blending hurts good predictions**: Even when the model is confident and correct, blending toward mean degrades performance
-4. **max_blend=0.3 is too aggressive**: 30% blend toward mean is a large perturbation
+1. **Feature explosion**: 285 features for mixtures vs 145 for single solvents - too many features for the small dataset
+2. **Interaction term coefficient (0.05) may be wrong**: The "best-work-here" kernel uses this coefficient, but it may not be appropriate for our feature set
+3. **Redundant interaction features**: Adding A*B*r*(1-r) for ALL 140 molecular features creates highly correlated features
+4. **Different feature set**: The "best-work-here" kernel uses only Spange descriptors (13 features), not Spange+DRFP+ACS (140 features)
+5. **Overfitting to interaction patterns**: The model may be fitting noise in the interaction terms
+
+**Critical Insight**: The "best-work-here" kernel uses ONLY Spange descriptors (13 features) with non-linear mixing, not the combined feature set. Our implementation added interaction terms to 140 features, creating 285 total features - this is likely causing overfitting.
 
 **Effort Allocation**: APPROPRIATE - TESTING PARADIGM-SHIFTING APPROACHES
 
-Given the structural CV-LB gap (intercept 0.0533 > target 0.0347), testing approaches that might change the CV-LB relationship was the right thing to do. This experiment definitively shows that simple uncertainty weighting is NOT the answer.
+Given the structural CV-LB gap (intercept 0.0535 > target 0.0347), testing approaches that might change the CV-LB relationship was the right thing to do. This experiment definitively shows that naive non-linear mixture features with our feature set is NOT the answer.
 
 **CV-LB Relationship Analysis - CRITICAL**:
 
 After 52 experiments and 13 submissions, the pattern is clear:
-- **LB = 4.21 × CV + 0.0535 (R² = 0.98)**
-- **Intercept (0.0535) > Target (0.0347)**
-- All model types (MLP, LGBM, XGB, GP, RF, CatBoost, Ridge, k-NN) fall on the SAME line
-- The uncertainty-weighted approach would likely fall on the same line (predicted LB = 0.104)
+```
+LB = 4.21 × CV + 0.0535 (R² = 0.98)
+Intercept (0.0535) > Target (0.0347)
+```
 
-**What the public kernels reveal**:
+**ALL model types fall on the SAME line:**
+- MLP, LGBM, XGB, GP, RF, CatBoost, Ridge, k-NN
+- This is DISTRIBUTION SHIFT, not a modeling problem
+- The intercept represents extrapolation error that no model tuning can fix
 
-1. **"mixall" kernel**: Uses GroupKFold (5 splits), MLP+XGB+RF+LGBM ensemble, Optuna optimization, simple Spange features. Runtime only 2m15s. The key insight: they use GroupKFold which has LESS training data per fold but faster iteration.
+**What this means:**
+- Even with CV = 0, the predicted LB would be 0.0535 > target 0.0347
+- To reach target, we need to REDUCE THE INTERCEPT (change the CV-LB relationship)
+- Both uncertainty weighting (exp_050) and non-linear mixture features (exp_051) failed to change this relationship
 
-2. **"best-work-here" kernel**: Uses CatBoost+XGBoost+LightGBM+Neural Network with adaptive ensemble weighting. Very deep neural network (768→512→384→256→128) with SE attention blocks and residual connections. Uses polynomial features and interaction terms.
+**Blind Spots - CRITICAL OBSERVATIONS FROM PUBLIC KERNELS**:
 
-**Key observation**: Neither kernel uses the combined Spange+DRFP+ACS_PCA features that our best models use. They rely on simpler Spange-only features but with more sophisticated model architectures and ensemble strategies.
+1. **"mixall" kernel uses GroupKFold(5) instead of Leave-One-Out**
+   - This is a DIFFERENT validation scheme that may have a different CV-LB relationship
+   - With 5 folds instead of 24/13, each fold has MORE training data
+   - The kernel claims "good CV-LB" relationship
+   - **WE TESTED THIS (exp_049)**: CV = 0.008807 (7.5% worse than best)
+   - But we didn't submit it to check if the CV-LB relationship is different!
 
-**Blind Spots - WHAT HASN'T BEEN TRIED**:
+2. **"best-work-here" kernel uses ONLY Spange descriptors**
+   - Not combined Spange+DRFP+ACS features
+   - Non-linear mixing with 13 features, not 140
+   - This is a MUCH simpler feature set
 
-1. **Optuna Hyperparameter Optimization** (from "mixall" kernel)
-   - Systematic optimization of ensemble weights and architecture
-   - Could find better combinations than manual tuning
-   - Quick to implement
-
-2. **Adaptive Ensemble Weighting** (from "best-work-here" kernel)
-   - Weights based on validation performance per fold
+3. **Adaptive ensemble weighting** (from "best-work-here" kernel)
    - Power-weighted ensemble (weights^2.5)
    - NN weight boosting (1.15x)
+   - Per-fold weight optimization based on validation MSE
 
-3. **SE Attention Blocks + Residual Connections** (from "best-work-here" kernel)
+4. **SE Attention Blocks + Residual Connections** (from "best-work-here" kernel)
    - Squeeze-and-Excitation blocks for feature recalibration
    - Deeper architecture with skip connections
    - LayerNorm instead of BatchNorm
 
-4. **Non-linear Mixture Features** (from "best-work-here" kernel)
-   - `A * (1 - r) + B * r + 0.05 * A * B * r * (1 - r)`
-   - Captures interaction effects between solvents
-
-5. **Per-Target Ensemble Weights**
-   - Different weights for SM vs Product 1 vs Product 2
-   - SM is hardest to predict - may need different treatment
-
 ## What's Working
 
-1. **Combined Spange + DRFP + ACS PCA features** - Best CV achieved with these features
+1. **Combined Spange + DRFP + ACS PCA features** - Best CV achieved with these features (for single solvents)
 2. **GP + MLP + LGBM ensemble** - Best LB (0.0877) with weights [0.15, 0.55, 0.30]
 3. **Arrhenius kinetics features** (1/T, ln(t), interaction) - Physically meaningful
 4. **TTA for mixtures** - Reduces variance
-5. **Leave-One-Out CV** - Better than GroupKFold for this problem
+5. **Leave-One-Out CV** - Proper validation for unseen solvents
 
 ## Key Concerns
 
-### CRITICAL: Uncertainty Weighting Failed - Need Different Approach
+### CRITICAL: Both Paradigm-Shifting Approaches Failed
 
-**Observation**: Uncertainty-weighted predictions degraded CV by 46% (0.008194 → 0.011985).
+**Observation**: 
+- Uncertainty weighting (exp_050): CV 46% worse
+- Non-linear mixture features (exp_051): CV 197% worse
 
-**Why it matters**: This was a promising hypothesis to change the CV-LB relationship, but it clearly doesn't work. The simple approach of blending toward population mean based on GP uncertainty is too crude.
+**Why it matters**: These were the two main approaches recommended to change the CV-LB relationship. Both failed badly. We need to think differently.
 
-**Suggestion**: Try more sophisticated approaches:
-- Per-target uncertainty weighting (SM vs Products)
-- Uncertainty-based model selection (use simpler model when uncertain)
-- Adaptive ensemble weights based on solvent similarity to training set
+**Suggestion**: The problem may not be the approach, but the implementation:
+1. Non-linear mixing should use ONLY Spange (13 features), not all 140 features
+2. Uncertainty weighting may need per-target calibration
+3. Consider submitting GroupKFold model to check if CV-LB relationship is different
 
 ### HIGH: Only 5 Submissions Remaining - Need Strategic Choices
 
@@ -120,65 +125,86 @@ After 52 experiments and 13 submissions, the pattern is clear:
 **Why it matters**: Each submission is precious. We need to maximize information gained.
 
 **Suggestion**: 
-- DO NOT SUBMIT exp_052 (uncertainty-weighted) - CV is 46% worse
-- Consider submitting exp_035 (best CV = 0.008194) to confirm CV-LB relationship
-- Focus remaining experiments on approaches from top public kernels
+- DO NOT SUBMIT exp_051 (non-linear mixture) - CV is 197% worse
+- Consider submitting exp_049 (GroupKFold) to check if CV-LB relationship is different
+- Focus remaining experiments on simpler feature sets with non-linear mixing
 
-### MEDIUM: Public Kernels Use Different Techniques
+### MEDIUM: Feature Set Mismatch with Public Kernels
 
-**Observation**: Top public kernels use:
-- Adaptive ensemble weighting (power-weighted, per-fold)
-- SE attention blocks + residual connections
-- Non-linear mixture features
-- Optuna hyperparameter optimization
+**Observation**: Top public kernels use simpler feature sets:
+- "mixall": Spange only (13 features)
+- "best-work-here": Spange only (13 features)
+- Our best: Spange + DRFP + ACS (140 features)
 
-**Why it matters**: These techniques haven't been tried and may offer improvement.
+**Why it matters**: Our complex feature set may be causing overfitting, especially for mixture predictions.
 
-**Suggestion**: Implement adaptive ensemble weighting and non-linear mixture features as quick wins.
+**Suggestion**: Try non-linear mixture features with ONLY Spange descriptors (13 features), not the full 140-feature set.
 
 ## Top Priority for Next Experiment
 
-**THE TARGET IS REACHABLE - BUT WE NEED TO LEARN FROM TOP KERNELS**
+**THE TARGET IS REACHABLE - BUT WE NEED TO SIMPLIFY**
 
-The uncertainty-weighted approach failed. We need to pivot to techniques that have proven successful in public kernels.
+The non-linear mixture features failed because we applied them to 140 features instead of 13. The "best-work-here" kernel uses ONLY Spange descriptors with non-linear mixing.
 
-**RECOMMENDED NEXT EXPERIMENT: Adaptive Ensemble with Non-linear Mixture Features**
+**RECOMMENDED NEXT EXPERIMENT: Non-linear Mixture with Spange-Only Features**
 
 ```python
-# 1. Non-linear mixture features (from "best-work-here" kernel)
-def featurize_mixture(A, B, r):
-    # Linear mixing + interaction term
-    return A * (1 - r) + B * r + 0.05 * A * B * r * (1 - r)
+# Use ONLY Spange descriptors (13 features) for non-linear mixing
+# This matches what the "best-work-here" kernel does
 
-# 2. Adaptive ensemble weighting (from "best-work-here" kernel)
-def adaptive_ensemble(val_preds, val_scores, power=2.5):
-    # Inverse MSE weighting with power scaling
-    inv_scores = 1.0 / (np.array(val_scores) + 1e-8)
-    weights = inv_scores ** power
-    weights = weights / weights.sum()
-    return weights
-
-# 3. Per-fold weight optimization
-# Train ensemble, compute validation MSE for each model
-# Use validation MSE to compute adaptive weights for that fold
+class SimpleNonlinearFeaturizer:
+    def __init__(self, mixed=False):
+        self.mixed = mixed
+        self.spange_df = SPANGE_DF  # Only 13 features
+        if mixed:
+            self.feats_dim = 5 + 13  # kinetics + spange (NO interaction features)
+        else:
+            self.feats_dim = 5 + 13
+    
+    def featurize(self, X, flip=False):
+        # Kinetics features
+        X_vals = X[INPUT_LABELS_NUMERIC].values.astype(np.float64)
+        temp_c = X_vals[:, 1:2]
+        time_m = X_vals[:, 0:1]
+        temp_k = temp_c + 273.15
+        inv_temp = 1000.0 / temp_k
+        log_time = np.log(time_m + 1e-6)
+        interaction = inv_temp * log_time
+        X_kinetic = np.hstack([X_vals, inv_temp, log_time, interaction])
+        
+        if self.mixed:
+            A = self.spange_df.loc[X["SOLVENT A NAME"]].values
+            B = self.spange_df.loc[X["SOLVENT B NAME"]].values
+            r = X["SolventB%"].values.reshape(-1, 1) / 100.0
+            
+            if flip:
+                r = 1 - r
+                A, B = B, A
+            
+            # Non-linear mixing (from "best-work-here" kernel)
+            # NO additional interaction features - just the mixed descriptors
+            X_spange = A * (1 - r) + B * r + 0.05 * A * B * r * (1 - r)
+        else:
+            X_spange = self.spange_df.loc[X["SOLVENT NAME"]].values
+        
+        return np.hstack([X_kinetic, X_spange])
 ```
 
 **Why this might work**:
-1. Non-linear mixture features capture solvent interaction effects
-2. Adaptive weighting gives more weight to models that perform well on validation
-3. Per-fold optimization adapts to different solvent characteristics
-4. These techniques are used by top public kernels
+1. Matches the "best-work-here" kernel's approach exactly
+2. Only 18 features (5 kinetics + 13 spange) - no overfitting risk
+3. Non-linear mixing captures interaction effects without feature explosion
+4. Simpler models often generalize better
 
 **Alternative approaches to try if this fails**:
-1. **Optuna optimization** of ensemble weights and architecture
-2. **SE attention blocks** in neural network
-3. **Per-target ensemble weights** (different weights for SM vs Products)
-4. **Solvent clustering** - train class-specific models
+1. **Submit exp_049 (GroupKFold)** to check if CV-LB relationship is different
+2. **Adaptive ensemble weighting** from "best-work-here" kernel
+3. **Per-target models** with different feature sets for SM vs Products
 
-**CRITICAL REMINDER**: With only 5 submissions remaining, we should:
-1. NOT submit exp_052 (uncertainty-weighted) - CV is 46% worse
-2. Focus on approaches from top public kernels
-3. Consider submitting exp_035 (best CV) to gather more CV-LB data points
+**CRITICAL REMINDER**: With only 5 submissions remaining:
+1. DO NOT submit exp_051 (non-linear mixture with 285 features) - CV is 197% worse
+2. Consider submitting exp_049 (GroupKFold) to gather CV-LB data
+3. Focus on SIMPLER approaches that match public kernels
 4. Save at least 2 submissions for final attempts
 
-**KEY INSIGHT**: The uncertainty-weighted approach was a good hypothesis but failed. The path forward is to learn from what top public kernels are doing differently - adaptive ensemble weighting, non-linear mixture features, and more sophisticated neural network architectures.
+**KEY INSIGHT**: The non-linear mixture features failed because we applied them to too many features. The path forward is to SIMPLIFY - use only Spange descriptors (13 features) with non-linear mixing, exactly as the "best-work-here" kernel does.
