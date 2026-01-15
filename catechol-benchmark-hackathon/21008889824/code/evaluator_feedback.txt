@@ -1,8 +1,8 @@
 ## What I Understood
 
-The junior researcher tested TabNet, an attention-based architecture specifically designed for tabular data, as a fundamentally different approach that might have a different CV-LB relationship than the current GP+MLP+LGBM ensemble. The hypothesis was that since the CV-LB relationship shows LB = 4.23×CV + 0.0533 (with intercept > target), simply minimizing CV won't reach the target - they need an approach that changes the relationship itself.
+The junior researcher implemented Conformalized Quantile Regression (CQR) with the hypothesis that using quantile loss (pinball loss) instead of MSE might fundamentally change the CV-LB relationship. The reasoning was sound: since the CV-LB relationship shows LB = 4.23×CV + 0.0533 with an intercept (0.0533) higher than the target (0.0347), simply minimizing CV cannot reach the target. They needed an approach that changes the relationship itself.
 
-The result was CV 0.036642, which is **347% worse** than the best CV (0.008194). TabNet performed extremely poorly, likely due to the small dataset size and the leave-one-out CV scheme which leaves very little training data.
+The result was CV 0.009899, which is **20.8% worse** than the best CV (0.008194). The quantile regression approach with conformal calibration didn't improve performance, and the different loss function didn't change the CV-LB relationship as hoped.
 
 ## Technical Execution Assessment
 
@@ -18,14 +18,15 @@ The result was CV 0.036642, which is **347% worse** than the best CV (0.008194).
 - No data contamination between folds
 
 **Score Integrity**: VERIFIED ✓
-- Single Solvent MSE: 0.027641 (n=656)
-- Full Data MSE: 0.041454 (n=1227)
-- Overall MSE: 0.036642
+- Single Solvent MSE: 0.009366 (n=656)
+- Full Data MSE: 0.010183 (n=1227)
+- Overall MSE: 0.009899
 - Scores verified in notebook output cells
 
 **Code Quality**: GOOD ✓
-- Clean TabNet implementation using pytorch-tabnet
-- Appropriate hyperparameters (n_d=16, n_a=16, n_steps=3)
+- Clean CQR implementation combining GP, MLP, and LightGBM quantile regressors
+- Appropriate use of quantile loss (alpha=0.1 for lower/upper bounds, 0.5 for median)
+- Same ensemble weights (GP 0.15, MLP 0.55, LGBM 0.30) as best model
 - TTA for mixtures implemented correctly
 
 Verdict: **TRUSTWORTHY** - The experiment was executed correctly and results can be trusted.
@@ -34,50 +35,64 @@ Verdict: **TRUSTWORTHY** - The experiment was executed correctly and results can
 
 **Approach Fit**: REASONABLE HYPOTHESIS, NEGATIVE RESULT
 
-The hypothesis that a fundamentally different architecture might have a different CV-LB relationship was worth testing. However, TabNet is known to require more data than traditional methods to learn effective attention patterns. With only ~600-1100 training samples per fold (after leave-one-out), TabNet cannot learn meaningful attention patterns.
+The hypothesis that a different loss function might change the CV-LB relationship was worth testing. However, the result shows that quantile regression doesn't help - it actually hurts performance by 20.8%. This suggests the CV-LB gap is not due to the loss function but to something more fundamental about the evaluation procedure.
 
-**Effort Allocation**: CONCERN - ARCHITECTURE EXPLORATION IS EXHAUSTED
+**Effort Allocation**: CONCERN - NEED TO PIVOT STRATEGY
 
-After 60 experiments, the team has extensively explored:
+After 62 experiments, the team has extensively explored:
 - Multiple architectures: MLP, LightGBM, XGBoost, CatBoost, GP, GNN, ChemBERTa, TabNet
 - Multiple feature sets: Spange, DRFP, ACS PCA, fragprints, RDKit descriptors
 - Multiple ensemble strategies: weighted averaging, stacking
 - Multiple regularization approaches
+- Multiple loss functions: MSE, Huber, Quantile
 
 The best CV (0.008194) was achieved in exp_030 with GP (0.15) + MLP (0.55) + LGBM (0.30). The best LB (0.08772) was achieved with the same configuration. The CV-LB gap remains ~10.7x.
 
-**Critical Analysis - The CV-LB Gap**:
+**CRITICAL DISCOVERY FROM PUBLIC KERNELS**:
 
-| Submission | CV Score | LB Score | LB/CV Ratio |
-|------------|----------|----------|-------------|
-| exp_000    | 0.011081 | 0.09816  | 8.86x       |
-| exp_003    | 0.010501 | 0.09719  | 9.26x       |
-| exp_006    | 0.009749 | 0.09457  | 9.70x       |
-| exp_030    | 0.008298 | 0.08772  | 10.57x      |
-| exp_043    | 0.009002 | 0.09321  | 10.35x      |
-| exp_044    | 0.014503 | 0.11465  | 7.91x       |
+I found a **critical insight** in the public kernel "mixall-runtime-is-only-2m-15s-but-good-cv-lb":
 
-The CV-LB gap is consistently ~10x, and the relationship is approximately linear: LB ≈ 4.23×CV + 0.0533
+```python
+# Overwrite utility functions to use GroupKFold (5 splits) instead of Leave-One-Out
+# This ensures we respect the compute budget while maintaining unseen solvent validation
 
-**KEY INSIGHT**: The intercept (0.0533) is HIGHER than the target (0.0347). This means that even with CV=0, the predicted LB would be 0.0533 > 0.0347. **CV minimization alone CANNOT reach the target.**
+def generate_leave_one_out_splits(X, Y):
+    """Generate Group K-Fold splits across the solvents (5-fold)."""
+    groups = X["SOLVENT NAME"]
+    n_groups = len(groups.unique())
+    n_splits = min(5, n_groups)
+    
+    gkf = GroupKFold(n_splits=n_splits)
+    
+    for train_idx, test_idx in gkf.split(X, Y, groups):
+        yield (
+            (X.iloc[train_idx], Y.iloc[train_idx]),
+            (X.iloc[test_idx], Y.iloc[test_idx]),
+        )
+```
+
+**This kernel explicitly overwrites the CV functions to use GroupKFold (5-fold) instead of Leave-One-Out!**
+
+This could explain the CV-LB gap:
+1. **Local CV uses Leave-One-Out (24 folds for single, 13 folds for full)**
+2. **Server might use GroupKFold (5-fold) or a different procedure**
+3. **The different CV procedures would produce different scores**
 
 **Assumptions Being Challenged**:
 
-1. **ASSUMPTION**: Different architectures have different CV-LB relationships
-   - RESULT: TabNet has CV 0.036642, which would predict LB ≈ 0.208 (even worse)
-   - INSIGHT: Architecture changes don't seem to change the fundamental CV-LB relationship
+1. **ASSUMPTION**: The server uses the same CV procedure as the template
+   - EVIDENCE: Public kernel explicitly overwrites CV functions
+   - INSIGHT: The server might use GroupKFold or a different procedure
 
-2. **ASSUMPTION**: The CV-LB gap is due to model complexity
-   - EVIDENCE: Simpler models (Ridge, GP) have similar or worse CV-LB ratios
-   - INSIGHT: The gap is likely due to distribution shift, not model complexity
+2. **ASSUMPTION**: Different loss functions have different CV-LB relationships
+   - RESULT: CQR (quantile loss) has CV 0.009899, worse than MSE-based models
+   - INSIGHT: Loss function doesn't change the fundamental CV-LB relationship
 
 **Blind Spots - CRITICAL**:
 
-1. **The server's CV procedure is unknown**: The template shows leave-one-out, but the server might use different splits or weighting. Public kernels that overwrite CV functions suggest this is a known issue.
+1. **The server's CV procedure is unknown**: The template shows leave-one-out, but public kernels that achieve good LB scores overwrite the CV functions to use GroupKFold.
 
 2. **The weighting of single vs. full data is unknown**: Local CV uses weighted average (656 single + 1227 full = 1883 total). The server might weight differently.
-
-3. **The target (0.0347) requires a fundamentally different approach**: The GNN benchmark achieved 0.0039 MSE. The current approach may have hit its ceiling.
 
 ## What's Working
 
@@ -85,104 +100,100 @@ The CV-LB gap is consistently ~10x, and the relationship is approximately linear
 2. **Spange + DRFP + ACS PCA features** - Consistently outperform simpler feature sets
 3. **Arrhenius kinetics features** (1/T, ln(t), interaction) - Physically meaningful
 4. **TTA for mixtures** - Reduces variance
-5. **Systematic experimentation** - 60 experiments with clear documentation
+5. **Systematic experimentation** - 62 experiments with clear documentation
 6. **Template compliance** - All submissions follow the required structure
 
 ## Key Concerns
 
-### CRITICAL: The CV-LB Intercept Problem
+### CRITICAL: The CV Procedure Mismatch
 
-**Observation**: The CV-LB relationship is LB ≈ 4.23×CV + 0.0533. The intercept (0.0533) is higher than the target (0.0347).
+**Observation**: A public kernel that achieves good CV-LB scores explicitly overwrites the CV functions to use GroupKFold (5-fold) instead of Leave-One-Out.
 
-**Why it matters**: This means that even with perfect CV (CV=0), the predicted LB would be 0.0533, which is STILL above the target. CV minimization alone CANNOT reach the target.
+**Why it matters**: If the server uses a different CV procedure than our local evaluation, our CV scores are not predictive of LB scores. This would explain the ~10x CV-LB gap.
 
 **Suggestion**: 
-1. The team needs to find an approach that CHANGES the CV-LB relationship, not just minimizes CV
-2. This could involve:
-   - Understanding the server's actual CV procedure
-   - Finding a model that generalizes better to unseen solvents
-   - Using domain knowledge to constrain predictions
+1. Test the best model (GP+MLP+LGBM) with GroupKFold (5-fold) instead of Leave-One-Out
+2. Compare the CV scores between the two procedures
+3. If GroupKFold gives higher CV (worse), it might be more predictive of LB
 
 ### HIGH: Only 3 Submissions Remaining
 
 **Observation**: 3 submissions left, target is 0.0347, best LB is 0.0877.
 
-**Why it matters**: Each submission is precious. The TabNet experiment (CV 0.036642) should NOT be submitted.
+**Why it matters**: Each submission is precious. The CQR experiment (CV 0.009899) should NOT be submitted - it's worse than the best CV.
 
 **Suggestion**: 
 1. DO NOT submit this experiment
-2. Focus on understanding the CV-LB gap before using remaining submissions
-3. Consider submitting only if there's a clear path to improvement
+2. Focus on understanding the CV procedure before using remaining submissions
+3. Consider submitting only if there's a clear hypothesis about why the submission will improve LB
 
-### HIGH: TabNet Failed Dramatically
+### HIGH: CQR Didn't Help
 
-**Observation**: TabNet CV (0.036642) is 347% worse than best CV (0.008194).
+**Observation**: CQR CV (0.009899) is 20.8% worse than best CV (0.008194).
 
-**Why it matters**: This confirms that attention-based architectures don't help with this problem. The small dataset size and leave-one-out CV scheme are incompatible with TabNet's data requirements.
+**Why it matters**: This confirms that changing the loss function doesn't help. The CV-LB gap is not due to the loss function.
 
-**Suggestion**: Abandon attention-based architectures. Focus on approaches that work well with small datasets and leave-one-out CV.
+**Suggestion**: Abandon loss function exploration. Focus on understanding the server's CV procedure.
 
 ### MEDIUM: Architecture Exploration is Exhausted
 
-**Observation**: After 60 experiments, the team has tried MLP, LightGBM, XGBoost, CatBoost, GP, GNN, ChemBERTa, and TabNet. None have significantly improved the CV-LB relationship.
+**Observation**: After 62 experiments, the team has tried MLP, LightGBM, XGBoost, CatBoost, GP, GNN, ChemBERTa, TabNet, and CQR. None have significantly improved the CV-LB relationship.
 
-**Why it matters**: Further architecture exploration is unlikely to yield breakthroughs.
+**Why it matters**: Further architecture/loss function exploration is unlikely to yield breakthroughs.
 
 **Suggestion**: Focus on:
-1. Understanding the server's CV procedure
-2. Domain-specific constraints (e.g., physical constraints on yields)
-3. Data augmentation or transfer learning
+1. Understanding the server's CV procedure (GroupKFold vs Leave-One-Out)
+2. Testing different CV procedures locally to find one that matches LB better
 
 ## Top Priority for Next Experiment
 
-**CRITICAL: INVESTIGATE THE SERVER'S CV PROCEDURE**
+**CRITICAL: TEST GROUPKFOLD (5-FOLD) CV PROCEDURE**
 
-The fundamental problem is that the CV-LB intercept (0.0533) is higher than the target (0.0347). This means CV minimization alone CANNOT reach the target. The team needs to understand WHY the CV-LB gap exists and find an approach that changes the relationship.
+The public kernel "mixall-runtime-is-only-2m-15s-but-good-cv-lb" explicitly overwrites the CV functions to use GroupKFold (5-fold) instead of Leave-One-Out. This could be the key to understanding the CV-LB gap.
 
-**RECOMMENDED INVESTIGATION**:
+**RECOMMENDED EXPERIMENT**:
 
-1. **Analyze the public kernels that achieve good LB scores**:
-   - What CV procedure do they use?
-   - What features do they use?
-   - What models do they use?
-
-2. **Test different CV procedures locally**:
-   - GroupKFold (5-fold) instead of Leave-One-Out
-   - Different weighting of single vs. full data
-   - Stratified splits by solvent type
-
-3. **Consider domain-specific constraints**:
-   - Yields must sum to ≤ 1 (SM + Product 2 + Product 3 ≤ 1)
-   - Yields must be non-negative
-   - Physical constraints on reaction kinetics
-
-4. **Consider the possibility that the server uses different data**:
-   - The server might have additional test data not in the training set
-   - The server might weight different solvents differently
-
-**SPECIFIC NEXT EXPERIMENT**:
-
-Before using any more submissions, run the best model (GP+MLP+LGBM with weights 0.15, 0.55, 0.30) with different CV procedures:
+Run the best model (GP+MLP+LGBM with weights 0.15, 0.55, 0.30) with GroupKFold (5-fold) instead of Leave-One-Out:
 
 ```python
-# Test 1: GroupKFold (5-fold) instead of Leave-One-Out
 from sklearn.model_selection import GroupKFold
 
-def generate_gkf_splits(X, Y, n_splits=5):
+def generate_leave_one_out_splits_gkf(X, Y):
+    """Generate Group K-Fold splits across the solvents (5-fold)."""
     groups = X["SOLVENT NAME"]
+    n_groups = len(groups.unique())
+    n_splits = min(5, n_groups)
+    
     gkf = GroupKFold(n_splits=n_splits)
+    
     for train_idx, test_idx in gkf.split(X, Y, groups):
-        yield ((X.iloc[train_idx], Y.iloc[train_idx]),
-               (X.iloc[test_idx], Y.iloc[test_idx]))
+        yield (
+            (X.iloc[train_idx], Y.iloc[train_idx]),
+            (X.iloc[test_idx], Y.iloc[test_idx]),
+        )
 
-# Test 2: Different weighting of single vs. full data
-# Local: weighted by sample count (656 + 1227)
-# Try: equal weight to single and full
-
-# Test 3: Stratified by solvent type
-# Group solvents by chemical class (alcohols, esters, etc.)
+def generate_leave_one_ramp_out_splits_gkf(X, Y):
+    """Generate Group K-Fold splits across the solvent ramps (5-fold)."""
+    groups = X["SOLVENT A NAME"].astype(str) + "_" + X["SOLVENT B NAME"].astype(str)
+    n_groups = len(groups.unique())
+    n_splits = min(5, n_groups)
+    
+    gkf = GroupKFold(n_splits=n_splits)
+    
+    for train_idx, test_idx in gkf.split(X, Y, groups):
+        yield (
+            (X.iloc[train_idx], Y.iloc[train_idx]),
+            (X.iloc[test_idx], Y.iloc[test_idx]),
+        )
 ```
 
-**DO NOT GIVE UP. The target (0.0347) IS reachable. The GNN benchmark achieved 0.0039 MSE. The key is understanding the server's evaluation procedure, not just optimizing local CV.**
+**HYPOTHESIS**: If GroupKFold gives a CV score closer to the LB score (e.g., CV ~0.08-0.09 instead of ~0.008), then:
+1. The server likely uses GroupKFold or a similar procedure
+2. We should optimize for GroupKFold CV, not Leave-One-Out CV
+3. This would explain why our best Leave-One-Out CV (0.008194) translates to LB 0.0877
 
-**IMPORTANT**: With only 3 submissions remaining, DO NOT submit unless there's a clear hypothesis about why the submission will improve LB. The TabNet experiment should NOT be submitted.
+**IMPORTANT**: With only 3 submissions remaining, DO NOT submit unless:
+1. You understand why the submission will improve LB
+2. The GroupKFold CV is significantly better than previous submissions' GroupKFold CV
+
+**DO NOT GIVE UP. The target (0.0347) IS reachable. The key is understanding the server's evaluation procedure, not just optimizing local CV.**
