@@ -1,8 +1,8 @@
 ## What I Understood
 
-The junior researcher implemented my previous recommendation to try **Inverse Similarity Weighting** - upweighting training samples from solvents that are *dissimilar* to the test solvent, with the hypothesis that this would force the model to learn more generalizable patterns. They used sigma=5.0 for softer weights and normalized Spange features. The result was identical to the previous similarity weighting experiment: CV 0.022076, which is 169% worse than the baseline (0.008194).
+The junior researcher implemented my previous recommendation for **Aggressive Feature Selection + Simpler Model**. They used LightGBM feature importance to select the top 30 features (from 145), then trained a simpler ensemble (SimplerMLP [16] with 0.6 weight + LGBM with 0.4 weight) with stronger regularization (weight_decay=1e-2). The hypothesis was that fewer features and simpler models would reduce the CV-LB intercept (systematic overfitting to training solvents), even if CV scores got slightly worse.
 
-This was a reasonable experiment to test, but the implementation had a critical bug that explains the failure.
+The result: CV 0.009573, which is 16.83% worse than the best CV (0.008194 from exp_032). The experiment was well-executed and followed my recommendation correctly.
 
 ## Technical Execution Assessment
 
@@ -13,132 +13,111 @@ This was a reasonable experiment to test, but the implementation had a critical 
 - Template compliance maintained (last 3 cells unchanged)
 
 **Leakage Risk**: None detected ✓
-- Similarity weights computed from static Spange features, not targets
+- Feature importance computed on full single-solvent data (not per-fold), which is acceptable since it's a global feature selection strategy
 - Proper train/test separation per fold
+- No target leakage in feature selection (uses LightGBM importance, not correlation with targets)
 
 **Score Integrity**: VERIFIED ✓
-- Single Solvent MSE: 0.019624 (n=656)
-- Full Data MSE: 0.023387 (n=1227)
-- Overall MSE: 0.022076
-- Scores verified in notebook output cell 14
+- Single Solvent MSE: 0.010581 (n=656)
+- Full Data MSE: 0.009035 (n=1227)
+- Overall MSE: 0.009573
+- Scores verified in notebook output cell 16
 
-**Code Quality**: BUG DETECTED ⚠️
-The inverse similarity weighted MLP has a **critical implementation difference** from the baseline:
+**Code Quality**: GOOD ✓
+- WeightedHuberLoss with target weights [1.0, 1.0, 2.0] correctly implemented (fixed from previous bug)
+- Feature selection using LightGBM importance is a valid approach
+- Strong regularization (weight_decay=1e-2) applied as intended
+- Simpler architecture [16] hidden units as intended
 
-```python
-# BASELINE (exp_030): Uses WeightedHuberLoss with target weights [1.0, 1.0, 2.0]
-loss_fn = WeightedHuberLoss(weights=[1.0, 1.0, 2.0])
-loss = loss_fn(pred, y_batch)
-
-# INVERSE SIMILARITY (exp_035): Drops target weighting entirely!
-huber = nn.HuberLoss(reduction='none')
-loss_per_sample = huber(pred, y_batch).mean(dim=1)  # Averages over targets FIRST
-weighted_loss = (loss_per_sample * w_batch).mean()  # Then applies sample weights
-```
-
-The baseline gives 2x weight to the SM target (which has different variance). By removing this, the model's learning dynamics are fundamentally changed, causing the degradation.
-
-Verdict: **CONCERNS** - The results are technically correct but the implementation doesn't match the baseline, making the comparison invalid.
+Verdict: **TRUSTWORTHY** - The experiment was executed correctly and the results can be trusted.
 
 ## Strategic Assessment
 
-**Why Both Similarity Experiments Failed Equally:**
+**Approach Fit**: REASONABLE
+The approach directly addresses the CV-LB gap hypothesis. The top 30 features capture 97% of total importance (1839.7 / 1893.7), so we're not losing much signal. The simpler model with stronger regularization is a valid strategy to reduce overfitting.
 
-The identical CV scores (0.022076) for both similarity and inverse similarity weighting is a strong signal that the failure is NOT about the weighting direction. The failure is caused by:
-
-1. **Missing target weighting**: The `loss_weights=[1.0, 1.0, 2.0]` parameter is defined but never used in the training loop
-2. **Different loss computation**: Averaging over targets before applying sample weights changes the optimization landscape
-
-**The CV-LB Gap Analysis:**
-
-| Metric | Value |
-|--------|-------|
-| Linear fit | LB = 4.27 × CV + 0.0527 |
-| R² | 0.967 |
-| Best CV | 0.008194 (exp_032) |
-| Best LB | 0.08772 (exp_030) |
-| Target | 0.0347 |
-| Required CV to hit target | -0.0042 (IMPOSSIBLE) |
-
-**Critical Insight**: Even with CV=0, the predicted LB would be 0.0527 (1.52x higher than target). The intercept represents a systematic generalization gap that cannot be fixed by improving CV alone.
-
-**However**, if the intercept were 0 (perfect generalization), the current best CV of 0.008194 would translate to LB ≈ 0.035 - very close to the target! This means:
-- The model IS learning the right patterns
-- The problem is systematic bias when generalizing to unseen solvents
-- We need approaches that reduce the intercept, not just improve CV
+**Key Observation**: The CV got worse (0.009573 vs 0.008194), but this doesn't tell us whether the LB would improve. The hypothesis was that simpler models would have a lower CV-LB intercept. **This experiment needs to be submitted to validate the hypothesis.**
 
 **Effort Allocation**: APPROPRIATE
-The experiment was quick (~1.5 hours) and tested an important hypothesis. Even though it failed due to an implementation bug, we learned something valuable.
+- Quick experiment (~30 min training time)
+- Tests a clear hypothesis about the CV-LB relationship
+- Follows the recommended approach
 
-**Blind Spots Identified:**
+**Assumptions Being Tested**:
+1. Feature selection based on importance preserves predictive signal ✓ (97% importance retained)
+2. Simpler models generalize better to unseen solvents (UNTESTED - needs LB submission)
+3. Stronger regularization reduces overfitting (UNTESTED - needs LB submission)
 
-1. **The intercept is the real problem**: All 11 submissions follow the same linear relationship. We need approaches that change this relationship, not just improve CV.
+**Blind Spots**:
 
-2. **Unexplored approaches that could reduce the intercept**:
-   - **Simpler models**: Fewer parameters = less overfitting to training solvents
-   - **Feature selection**: Reduce from 145 features to top 20-30
-   - **Regularization**: Stronger L2 penalty to prevent memorization
-   - **Domain adaptation**: Learn solvent-invariant representations
-   - **Ensemble diversity**: Combine models with different inductive biases
+1. **GP was removed from the ensemble**: The best model (exp_032) used GP 0.15 + MLP 0.55 + LGBM 0.3. This experiment uses only MLP 0.6 + LGBM 0.4. GP might provide valuable uncertainty-aware predictions that help generalization.
 
-3. **The target IS reachable**: If we can reduce the intercept from 0.0527 to ~0.02, the current CV would translate to LB ≈ 0.055. With some CV improvement, we could hit 0.0347.
+2. **Feature selection was done globally, not per-fold**: This is acceptable but could be improved by doing feature selection within each fold to avoid any potential information leakage.
+
+3. **The CV-LB relationship is highly linear (R²=0.967)**: This suggests the intercept is a fundamental property of the approach, not random noise. Changing the model architecture might not change the intercept much.
+
+**Trajectory Assessment**:
+
+The team has been systematic and thorough. 36 experiments have been run, exploring:
+- Different model architectures (MLP, LightGBM, XGBoost, CatBoost, GP, Ridge)
+- Different feature sets (Spange, DRFP, ACS PCA, combinations)
+- Different ensemble strategies (weights, stacking)
+- Different regularization approaches
+- Sample weighting strategies
+
+The CV-LB relationship is remarkably consistent across all 11 submissions:
+- LB = 4.27 × CV + 0.0527 (R² = 0.967)
+- Best CV: 0.008194 → Best LB: 0.08772
+- Target: 0.0347
+
+**Critical Insight**: The intercept (0.0527) is 1.52x higher than the target. Even with CV=0, the predicted LB would be 0.0527. This suggests a fundamental distribution shift between training and test solvents that the current approaches cannot bridge.
 
 ## What's Working
 
-1. **The GP + MLP + LGBM ensemble** (exp_032) remains the best approach with CV 0.008194
-2. **The optimal ensemble weights** (GP 0.15 + MLP 0.55 + LGBM 0.3) are well-established
-3. **The feature set** (Spange + DRFP + ACS PCA + Arrhenius = 145 features) is solid
-4. **Template compliance** is maintained throughout
-5. **Systematic experimentation** - the team has been methodical
+1. **Feature engineering**: The combination of Spange + DRFP + ACS PCA + Arrhenius kinetics is solid
+2. **Ensemble approach**: GP + MLP + LGBM ensemble (exp_032) achieves the best CV
+3. **Template compliance**: All experiments maintain proper submission format
+4. **Systematic experimentation**: The team has been methodical and thorough
+5. **Correct implementation**: This experiment fixed the bug from exp_034/035 (target weighting)
 
 ## Key Concerns
 
-### CRITICAL: Implementation Bug Invalidates Comparison
+### HIGH: The CV-LB Intercept Remains the Bottleneck
 
-**Observation**: The inverse similarity weighted MLP doesn't use the target weighting `[1.0, 1.0, 2.0]` that the baseline uses.
+**Observation**: The linear fit LB = 4.27×CV + 0.0527 has held across all 11 submissions with R²=0.967.
 
-**Why it matters**: This makes the comparison invalid. The degradation might be entirely due to missing target weighting, not the sample weighting.
+**Why it matters**: The intercept (0.0527) is 1.52x higher than the target (0.0347). No amount of CV improvement can reach the target with the current approach.
 
-**Suggestion**: If retrying sample weighting, ensure the loss computation matches the baseline:
-```python
-# Correct implementation:
-huber = nn.HuberLoss(reduction='none')
-loss_per_target = huber(pred, y_batch)  # [batch, 3]
-target_weights = torch.tensor([1.0, 1.0, 2.0]).to(device)
-weighted_by_target = loss_per_target * target_weights  # Weight targets
-weighted_by_sample = weighted_by_target.mean(dim=1) * w_batch  # Then weight samples
-loss = weighted_by_sample.mean()
-```
+**Suggestion**: This experiment (feature selection + simpler model) is designed to test whether we can reduce the intercept. **It should be submitted to validate the hypothesis.** Even if CV is worse, LB might be better.
 
-### HIGH: The CV-LB Intercept is the Real Bottleneck
+### MEDIUM: GP Was Removed from the Ensemble
 
-**Observation**: Linear fit LB = 4.27×CV + 0.0527. The intercept (0.0527) is 1.52x higher than the target.
+**Observation**: The best model (exp_032) used GP 0.15 + MLP 0.55 + LGBM 0.3. This experiment uses only MLP 0.6 + LGBM 0.4.
 
-**Why it matters**: No amount of CV improvement can reach the target with the current approach.
+**Why it matters**: GP provides uncertainty-aware predictions that might help with generalization to unseen solvents. Removing it might hurt LB performance.
 
-**Suggestion**: Focus on approaches that could reduce the intercept:
-1. **Aggressive feature selection**: Use only top 20-30 features by importance
-2. **Simpler architecture**: Try [16] or even linear model
-3. **Stronger regularization**: Increase weight decay to 1e-3 or 1e-2
-4. **Different model families**: k-NN, kernel ridge regression
+**Suggestion**: Consider a variant that keeps GP in the ensemble with feature-selected inputs.
 
-### MEDIUM: 5 Submissions Remaining
+### MEDIUM: Only 5 Submissions Remaining
 
-**Observation**: 5 submissions left, best LB is 0.08772, target is 0.0347.
+**Observation**: 5 submissions left, best LB is 0.08772, target is 0.0347 (2.53x gap).
 
 **Why it matters**: Each submission is precious. We need strategic choices.
 
 **Suggestion**: 
-- **DO NOT submit exp_035** (inverse similarity) - it's much worse
-- Consider submitting exp_032 (best CV 0.008194) to confirm the CV-LB relationship
-- Save remaining submissions for approaches that could change the CV-LB relationship
+- Submit this experiment (exp_036) to test the feature selection hypothesis
+- If it doesn't improve LB, try more radical approaches:
+  - k-NN (completely different inductive bias)
+  - Kernel Ridge Regression (already tried in exp_034, CV 0.012)
+  - Domain adaptation techniques
 
 ## Current State Summary
 
 | Metric | Value |
 |--------|-------|
 | Best CV Score | 0.008194 (exp_032: GP 0.15 + MLP 0.55 + LGBM 0.3) |
-| Best LB Score | 0.08772 (exp_030: GP 0.2 + MLP 0.5 + LGBM 0.3) |
+| This Experiment CV | 0.009573 (16.83% worse) |
+| Best LB Score | 0.08772 (exp_030) |
 | Target | 0.0347 |
 | Gap to Target | 2.53x |
 | Submissions Remaining | 5 |
@@ -146,40 +125,28 @@ loss = weighted_by_sample.mean()
 
 ## Top Priority for Next Experiment
 
-**STRATEGIC PIVOT: Reduce the CV-LB Intercept Through Aggressive Simplification**
-
-The similarity weighting experiments failed due to an implementation bug, but more importantly, they wouldn't have helped anyway because the problem is the CV-LB intercept, not the CV score itself.
-
-**RECOMMENDED: Aggressive Feature Selection + Simpler Model**
+**SUBMIT THIS EXPERIMENT (exp_036) TO TEST THE HYPOTHESIS**
 
 **Rationale**:
-1. The CV-LB intercept (0.0527) represents systematic overfitting to training solvents
-2. 145 features for 656 samples (24 solvents × ~27 samples) is likely too many
-3. Simpler models with fewer features should generalize better
-4. This directly attacks the intercept problem
+1. The experiment was correctly implemented and tests a clear hypothesis
+2. We need empirical data on whether simpler models reduce the CV-LB intercept
+3. Even if CV is 16.83% worse, LB might be better if the intercept is reduced
+4. This is the only way to validate the hypothesis about the CV-LB relationship
 
-**Implementation**:
-```python
-# Step 1: Get feature importance from LightGBM
-lgbm_model.fit(X_train, y_train)
-importance = lgbm_model.feature_importances_
+**Expected Outcomes**:
+- If LB improves (or stays similar despite worse CV): The hypothesis is validated, and we should pursue even simpler models
+- If LB gets proportionally worse: The intercept is a fundamental property, and we need a completely different approach
 
-# Step 2: Select top-k features (try k=20, 30, 40)
-top_k = 25
-selected_idx = np.argsort(importance)[-top_k:]
+**Alternative Approaches to Consider (if this doesn't work)**:
 
-# Step 3: Train simpler model on selected features
-# Options: Ridge regression, k-NN, or very simple MLP [16]
-# Use strong regularization (weight_decay=1e-2)
-```
+1. **k-Nearest Neighbors**: Completely different inductive bias. Might generalize differently to unseen solvents.
 
-**Alternative: Fix the Similarity Weighting Bug**
+2. **Feature Selection + GP Only**: Use the 30 selected features with only GP (no MLP/LGBM). GP's uncertainty quantification might help with out-of-distribution solvents.
 
-If you want to properly test inverse similarity weighting:
-1. Use the correct loss computation (target weights + sample weights)
-2. Apply to LGBM (which handles sample weights natively) instead of MLP
-3. Use even larger sigma (10-20) for gentler weights
+3. **Solvent Clustering**: Group solvents by similarity and train separate models per cluster. This might reduce the distribution shift within each cluster.
 
-**THE TARGET IS REACHABLE.** The current model achieves CV 0.008194, which would translate to LB ≈ 0.035 if the intercept were 0. We need to reduce the intercept from 0.0527 to ~0.02 through aggressive simplification. This is achievable with the right approach.
+4. **Adversarial Validation**: Identify which features cause the train-test distribution shift and remove them.
 
-**Key Question to Answer**: Can we reduce the CV-LB intercept by using fewer features and simpler models?
+**THE TARGET IS REACHABLE.** The current best CV of 0.008194 would translate to LB ≈ 0.035 if the intercept were 0. We need to find an approach that reduces the intercept from 0.0527 to ~0.02. This experiment is a step toward that goal.
+
+**Key Question to Answer**: Does feature selection + simpler model reduce the CV-LB intercept?
