@@ -1,8 +1,7 @@
 # 19th Place Solution: 108 OOFs blending with RidgeCV
 
-**Rank:** 19
 **Author:** Oscar Iván Bocanegra
-**Collaborators:** Oscar Iván Bocanegra, gaston sanchez
+**Rank:** 19
 **Votes:** 9
 
 ---
