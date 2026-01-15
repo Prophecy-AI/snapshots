@@ -56,14 +56,12 @@ class UncertaintyWeightedEnsemble:
         self.gp = GPWrapper(data=data)
         self.mlp = WeightedMLPEnsemble(data=data)
         self.lgbm = LGBMWrapper(data=data)
-        # Population means from training data
         self.population_mean = None
     
     def train_model(self, X_train, y_train):
         self.gp.train_model(X_train, y_train)
         self.mlp.train_model(X_train, y_train)
         self.lgbm.train_model(X_train, y_train)
-        # Store population mean for blending
         self.population_mean = y_train.mean().values
     
     def predict(self, X_test):
@@ -101,106 +99,23 @@ def add_extrapolation_features(X_train, X_test, featurizer):
     train_feats = featurizer.featurize(X_train)
     test_feats = featurizer.featurize(X_test)
     
-    # Compute distance to nearest training sample
     from scipy.spatial.distance import cdist
     distances = cdist(test_feats, train_feats, metric='euclidean')
     min_distance = distances.min(axis=1)
     mean_distance = distances.mean(axis=1)
     
-    # Compute distance to training centroid
     centroid = train_feats.mean(axis=0)
     centroid_distance = np.linalg.norm(test_feats - centroid, axis=1)
     
-    # Add as features
     extra_feats = np.column_stack([min_distance, mean_distance, centroid_distance])
     return np.hstack([test_feats, extra_feats])
 ```
 
-**Why this might work:**
-- Model can learn to be conservative when extrapolating
-- Features explicitly encode "how different is this from training"
-
 ### 3. **MEDIUM PRIORITY: Solvent Clustering / Class-Specific Models**
 Group solvents by chemical class and use class-specific models.
 
-**Implementation:**
-```python
-# Solvent classes based on chemical structure
-SOLVENT_CLASSES = {
-    'alcohols': ['Methanol', 'Ethanol', 'Propanol', 'Butanol', 'Pentanol', 'Hexanol', 'Heptanol', 'Octanol'],
-    'ethers': ['THF', 'Dioxane', 'DME'],
-    'esters': ['Ethyl Acetate', 'Methyl Acetate'],
-    'amides': ['DMF', 'NMP', 'DMAc'],
-    'nitriles': ['Acetonitrile', 'Propionitrile'],
-    'ketones': ['Acetone', 'MEK'],
-    'other': ['DMSO', 'Water', 'Toluene', 'DCM']
-}
-
-class ClassSpecificEnsemble:
-    def __init__(self):
-        self.class_models = {}
-        self.default_model = None
-    
-    def train_model(self, X_train, y_train):
-        # Train class-specific models
-        for class_name, solvents in SOLVENT_CLASSES.items():
-            mask = X_train['SOLVENT NAME'].isin(solvents)
-            if mask.sum() > 0:
-                model = GPMLPLGBMEnsemble(data='single')
-                model.train_model(X_train[mask], y_train[mask])
-                self.class_models[class_name] = model
-        
-        # Train default model on all data
-        self.default_model = GPMLPLGBMEnsemble(data='single')
-        self.default_model.train_model(X_train, y_train)
-    
-    def predict(self, X_test):
-        # Predict using class-specific model if available
-        predictions = []
-        for idx, row in X_test.iterrows():
-            solvent = row['SOLVENT NAME']
-            model = self.default_model
-            for class_name, solvents in SOLVENT_CLASSES.items():
-                if solvent in solvents and class_name in self.class_models:
-                    model = self.class_models[class_name]
-                    break
-            pred = model.predict(X_test.iloc[[idx]])
-            predictions.append(pred)
-        return torch.cat(predictions, dim=0)
-```
-
 ### 4. **LOW PRIORITY: Optuna Hyperparameter Optimization**
 The "mixall" kernel uses Optuna for hyperparameter optimization.
-
-**Implementation:**
-```python
-import optuna
-
-def objective(trial):
-    # Hyperparameters to optimize
-    gp_weight = trial.suggest_float('gp_weight', 0.05, 0.3)
-    mlp_weight = trial.suggest_float('mlp_weight', 0.3, 0.7)
-    lgbm_weight = 1 - gp_weight - mlp_weight
-    
-    hidden_dim = trial.suggest_int('hidden_dim', 16, 64)
-    dropout = trial.suggest_float('dropout', 0.01, 0.2)
-    
-    # Train and evaluate
-    model = GPMLPLGBMEnsemble(
-        gp_weight=gp_weight,
-        mlp_weight=mlp_weight,
-        lgbm_weight=lgbm_weight,
-        hidden_dims=[hidden_dim, hidden_dim//2],
-        dropout=dropout
-    )
-    
-    # Cross-validation
-    cv_score = cross_validate(model, X, Y)
-    return cv_score
-
-study = optuna.create_study(direction='minimize')
-study.optimize(objective, n_trials=50)
-```
 
 ## What NOT to Try
 1. **GroupKFold validation** - TESTED, 7.5% worse CV
