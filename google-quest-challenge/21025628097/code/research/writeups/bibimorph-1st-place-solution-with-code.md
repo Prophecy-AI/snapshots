@@ -1,8 +1,7 @@
 # 1st place solution with code
 
-**Rank:** 1
 **Author:** Oleg Yaroshevskiy
-**Collaborators:** Yury Kashnitsky, Dmytro Danevskyi, Oleg Yaroshevskiy, Dmitry Abulkhanov
+**Rank:** 1
 **Votes:** 328
 
 ---
