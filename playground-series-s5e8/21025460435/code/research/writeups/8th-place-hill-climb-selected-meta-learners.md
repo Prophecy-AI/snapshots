@@ -1,8 +1,7 @@
 # 8th place - hill climb selected meta-learners
 
-**Rank:** 8
 **Author:** DanteTheAbstract
-**Collaborators:** DanteTheAbstract
+**Rank:** 8
 **Votes:** 9
 
 ---
