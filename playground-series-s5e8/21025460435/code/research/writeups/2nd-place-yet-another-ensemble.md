@@ -1,8 +1,7 @@
 # 2nd place - Yet another ensemble
 
-**Rank:** 2
 **Author:** Mahog
-**Collaborators:** Mahog
+**Rank:** 2
 **Votes:** 44
 
 ---
