@@ -7,50 +7,86 @@
 
 ## Response to Evaluator
 
-**Technical verdict was TRUSTWORTHY** - The feature selection experiment (exp_036) was correctly implemented and the results can be trusted.
+**Technical verdict was TRUSTWORTHY** - The k-NN experiment (exp_040) was correctly implemented and the results can be trusted.
 
-**Evaluator's top priority**: Submit exp_036 to test if feature selection reduces the CV-LB intercept. **I AGREE.** However, I want to first try k-NN as a completely different approach that may have a fundamentally different CV-LB relationship.
+**Evaluator's top priority**: Do NOT submit k-NN (CV too poor). Instead, try GroupKFold(5) CV locally or submit exp_036 (feature selection). **I AGREE with not submitting k-NN.** The CV is 222% worse than baseline.
 
 **Key concerns raised**:
-1. GP was removed from the ensemble - **Valid concern. Will consider adding GP back in future experiments.**
-2. Only 5 submissions remaining - **Will be strategic. k-NN is a quick experiment that could reveal a different CV-LB relationship.**
-3. The CV-LB intercept is the bottleneck - **Agreed. This is why we need approaches with different inductive biases.**
+1. k-NN performance is fundamentally poor (3.2x worse than best CV) - **Agreed. k-NN cannot extrapolate to unseen solvents.**
+2. The CV-LB gap remains the bottleneck - **Agreed. The intercept (0.0527) > target (0.0347) means we cannot reach target with current approach.**
+3. Limited submissions remaining (5) - **Will be strategic. Need to test approaches that might change the CV-LB relationship.**
+
+**Key insight from public kernels**: The "mixall" kernel uses GroupKFold(5) instead of leave-one-out CV. This might explain the CV-LB gap - if the evaluation uses a different CV scheme, our leave-one-out CV might be overly pessimistic.
 
 ## Data Understanding
 
 Reference notebooks:
+- `exploration/evolver_loop38_analysis.ipynb` - k-NN failure analysis and strategic options
 - `exploration/evolver_loop37_analysis.ipynb` - CV-LB relationship analysis
-- `exploration/evolver_loop34_analysis.ipynb` - Detailed CV-LB analysis
 
 Key patterns:
 - CV-LB relationship is highly linear (R² = 0.967) - the gap is STRUCTURAL
 - Intercept (0.0527) > Target (0.0347) - current approach cannot reach target
 - All 11 submissions follow the same linear relationship
-- No approach has significantly beaten the linear fit (best residual: -0.00193)
+- k-NN (exp_040) CV 0.026414 is 222% WORSE than best - k-NN cannot extrapolate to unseen solvents
 
 ## Recommended Approaches
 
-### PRIORITY 1: k-Nearest Neighbors Regression
-**Rationale**: Research shows k-NN can match neural network performance for chemical property prediction and may generalize better to unseen solvents because:
-1. It doesn't learn a global parametric mapping - just returns average of similar examples
-2. Less prone to overfitting on small datasets
-3. Predictions are anchored to nearby training points, not extrapolated from a fitted surface
-4. May have a fundamentally different CV-LB relationship
+### PRIORITY 1: Try GroupKFold(5) CV Locally
+**Rationale**: The "mixall" kernel uses GroupKFold(5) instead of leave-one-out CV. If the evaluation uses a similar scheme, our leave-one-out CV might be overly pessimistic. This could explain the CV-LB gap.
 
 **Implementation**:
 ```python
-from sklearn.neighbors import KNeighborsRegressor
-from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import GroupKFold
 
-class KNNModel:
-    def __init__(self, n_neighbors=5, weights='distance', data='single'):
+def generate_leave_one_out_splits_groupkfold(X, Y, n_splits=5):
+    """Generate Group K-Fold splits across the solvents (5-fold)."""
+    groups = X["SOLVENT NAME"]
+    gkf = GroupKFold(n_splits=n_splits)
+    
+    for train_idx, test_idx in gkf.split(X, Y, groups):
+        yield (
+            (X.iloc[train_idx], Y.iloc[train_idx]),
+            (X.iloc[test_idx], Y.iloc[test_idx]),
+        )
+
+def generate_leave_one_ramp_out_splits_groupkfold(X, Y, n_splits=5):
+    """Generate Group K-Fold splits across the solvent ramps (5-fold)."""
+    groups = X["SOLVENT A NAME"].astype(str) + "_" + X["SOLVENT B NAME"].astype(str)
+    gkf = GroupKFold(n_splits=n_splits)
+    
+    for train_idx, test_idx in gkf.split(X, Y, groups):
+        yield (
+            (X.iloc[train_idx], Y.iloc[train_idx]),
+            (X.iloc[test_idx], Y.iloc[test_idx]),
+        )
+```
+
+**Test with best model (GP+MLP+LGBM)** and compare CV scores:
+- If GroupKFold(5) CV is significantly different from leave-one-out CV, this might explain the gap
+- If GroupKFold(5) CV is similar, the gap is due to something else
+
+### PRIORITY 2: Ensemble with 4 Models (MLP + LGBM + GP + XGBoost)
+**Rationale**: The "mixall" kernel uses a 4-model ensemble (MLP + XGBoost + RF + LightGBM). We haven't tried XGBoost in our best ensemble. Adding diversity might help.
+
+**Implementation**:
+```python
+import xgboost as xgb
+
+class XGBModel:
+    def __init__(self, data='single'):
         self.data_type = data
         self.featurizer = FullFeaturizer(mixed=(data=='full'))
-        self.scalers = []
         self.models = []
-        self.n_neighbors = n_neighbors
-        self.weights = weights
-
+        self.params = {
+            'max_depth': 6,
+            'learning_rate': 0.03,
+            'n_estimators': 500,
+            'reg_alpha': 0.1,
+            'reg_lambda': 0.1,
+            'random_state': 42
+        }
+    
     def train_model(self, X_train, y_train):
         X_feat = self.featurizer.featurize(X_train)
         y_vals = y_train.values
@@ -61,15 +97,11 @@ class KNNModel:
             y_vals = np.vstack([y_vals, y_vals])
         
         self.models = []
-        self.scalers = []
         for i in range(3):
-            scaler = StandardScaler()
-            X_scaled = scaler.fit_transform(X_feat)
-            model = KNeighborsRegressor(n_neighbors=self.n_neighbors, weights=self.weights)
-            model.fit(X_scaled, y_vals[:, i])
-            self.scalers.append(scaler)
+            model = xgb.XGBRegressor(**self.params)
+            model.fit(X_feat, y_vals[:, i])
             self.models.append(model)
-
+    
     def predict(self, X_test):
         X_feat = self.featurizer.featurize(X_test)
         
@@ -77,49 +109,46 @@ class KNNModel:
             X_flip = self.featurizer.featurize(X_test, flip=True)
         
         preds = []
-        for i, (scaler, model) in enumerate(zip(self.scalers, self.models)):
-            X_scaled = scaler.transform(X_feat)
-            pred = model.predict(X_scaled)
+        for i, model in enumerate(self.models):
+            pred = model.predict(X_feat)
             if self.data_type == 'full':
-                X_flip_scaled = scaler.transform(X_flip)
-                pred_flip = model.predict(X_flip_scaled)
+                pred_flip = model.predict(X_flip)
                 pred = (pred + pred_flip) / 2
             preds.append(pred)
         
         return torch.clamp(torch.tensor(np.column_stack(preds)), 0, 1)
 ```
 
-**Try different k values**: k=3, 5, 7, 10
+**Ensemble weights to try**: GP 0.1 + MLP 0.4 + LGBM 0.3 + XGB 0.2
 
-### PRIORITY 2: k-NN + GP Ensemble
-**Rationale**: If k-NN shows promise, combine it with GP for uncertainty-aware predictions.
+### PRIORITY 3: Submit exp_032 (Best CV) for Calibration
+**Rationale**: exp_032 has the best CV (0.008194) but we haven't submitted it. Submitting it would give us another data point to verify the CV-LB relationship.
 
-### PRIORITY 3: Submit exp_036 (Feature Selection)
-**Rationale**: If k-NN doesn't show a different CV-LB relationship, submit exp_036 to test if feature selection reduces the intercept.
+**Expected LB**: 4.27 × 0.008194 + 0.0527 = 0.0877 (same as exp_030)
+
+If the LB is significantly different from 0.0877, this would indicate the CV-LB relationship has changed.
 
 ## What NOT to Try
 
-1. **More complex models** - Deep residual networks (exp_004) failed badly. Complexity hurts generalization.
-2. **Similarity weighting on MLP** - exp_034/035 had bugs and showed 169% degradation.
-3. **Four-model ensemble** - exp_028 showed adding XGBoost and CatBoost didn't help.
-4. **Normalization post-processing** - exp_029 showed targets don't sum to 1.0.
-5. **Higher GP weight** - exp_031 showed 10.61% worse CV with GP weight 0.4.
+1. **k-NN** - exp_040 showed 222% worse CV. k-NN cannot extrapolate to unseen solvents.
+2. **Deep Residual MLP** - exp_004 showed 5x worse CV. Too complex for small dataset.
+3. **Higher GP weight** - exp_031 showed 10.61% worse CV with GP weight 0.4.
+4. **Similarity weighting** - exp_037/038 had bugs and showed 169% degradation.
+5. **Feature selection alone** - exp_036 showed 16.83% worse CV without improving LB.
 
 ## Validation Notes
 
 - CV scheme: Leave-one-solvent-out for single solvent (24 folds), leave-one-ramp-out for full data (13 folds)
 - CV-LB relationship: LB = 4.27 × CV + 0.0527 (R² = 0.967)
-- To reach target LB = 0.0347, we need to reduce the intercept from 0.0527 to ~0.02
-- k-NN may have a different CV-LB relationship due to its different inductive bias
+- The intercept (0.0527) > target (0.0347) means we need to change the CV-LB relationship
+- GroupKFold(5) might give different CV scores that better match LB
 
 ## Key Insight
 
-**The target IS reachable.** The CV-LB relationship shows that all our approaches follow the same linear pattern. We need an approach with a fundamentally different inductive bias that may have a different CV-LB relationship.
+**The target IS reachable.** The CV-LB relationship shows that all our approaches follow the same linear pattern. We need to:
 
-k-NN is promising because:
-1. It doesn't learn a global function - just uses nearest neighbors
-2. Research shows it can match neural networks for chemical property prediction
-3. It may generalize differently to unseen solvents
-4. It's fast to train and test
+1. **Understand WHY the intercept exists** - Is it due to CV scheme mismatch? Distribution shift? Additional test data?
+2. **Try GroupKFold(5) locally** - This is what the "mixall" kernel uses. If CV scores change significantly, we might have found the issue.
+3. **Add more model diversity** - The "mixall" kernel uses 4 models. We should try XGBoost in our ensemble.
 
 **DO NOT GIVE UP. The target is achievable with the right approach.**
