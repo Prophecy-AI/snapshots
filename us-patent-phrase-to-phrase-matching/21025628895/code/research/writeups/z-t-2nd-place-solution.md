@@ -1,8 +1,7 @@
 # 2nd Place Solution
 
-**Rank:** 2
 **Author:** Leon
-**Collaborators:** Leon, Tifo
+**Rank:** 2
 **Votes:** 154
 
 ---
