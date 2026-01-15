@@ -1,8 +1,7 @@
 # 4th place solution: Stacking with XGB + Pseudo labeling + metric optimizing.
 
-**Rank:** 4
 **Author:** Kirderf
-**Collaborators:** Kirderf
+**Rank:** 4
 **Votes:** 76
 
 ---
