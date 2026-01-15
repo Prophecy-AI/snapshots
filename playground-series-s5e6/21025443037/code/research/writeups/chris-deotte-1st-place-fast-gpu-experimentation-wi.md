@@ -1,8 +1,7 @@
 # 1st Place - Fast GPU Experimentation with RAPIDS cuDF cuML
 
-**Rank:** 1
 **Author:** Chris Deotte
-**Collaborators:** Chris Deotte
+**Rank:** 1
 **Votes:** 186
 
 ---
