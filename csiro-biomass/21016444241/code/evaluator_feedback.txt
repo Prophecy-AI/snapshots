@@ -1,0 +1,89 @@
+## What I Understood
+
+The junior researcher established a solid baseline for the CSIRO biomass prediction competition. They extracted DINOv2-base CLS token embeddings (768 dims) from images and combined them with 4 tabular features (NDVI, Height, State, Species) to train LightGBM models for each of the 5 target variables. The approach achieved an OOF weighted R² of 0.7584 using 5-fold CV, which is a reasonable starting point but still ~0.03 below the target of 0.79.
+
+## Technical Execution Assessment
+
+**Validation**: The 5-fold CV methodology is sound. The weighted R² calculation correctly implements the competition metric with proper per-target weights (Dry_Total_g: 0.5, GDM_g: 0.2, others: 0.1). The fold scores show reasonable variance (0.7552 ± 0.0489), though Fold 5 at 0.6710 is notably lower than others, suggesting some data heterogeneity.
+
+**Leakage Risk**: None detected. The CV splits are done at the image level (correct), embeddings are extracted before CV (acceptable since DINOv2 is pretrained and not fine-tuned), and tabular feature encoding uses label encoding which doesn't leak target information.
+
+**Score Integrity**: Verified. The fold scores (0.7288, 0.7881, 0.8003, 0.7875, 0.6710) average to 0.7552, and the overall OOF R² of 0.7584 is consistent. The scores are directly from notebook output.
+
+**Code Quality**: Good. Seeds are set, early stopping is used properly, predictions are clipped to non-negative values. One minor issue: for test predictions, tabular features are filled with training means/modes, which is a reasonable fallback but worth noting.
+
+Verdict: **TRUSTWORTHY**
+
+## Strategic Assessment
+
+**Approach Fit**: The approach is reasonable but leaves significant room for improvement. The top kernels (0.66-0.69 LB) use:
+1. **Larger models**: DINOv2-giant instead of base (1536 vs 768 dims)
+2. **Patch-based features**: Split images into 520px patches and average embeddings, rather than just CLS token
+3. **Dense features**: Use last_hidden_state[:,1:,:] (patch tokens) instead of just pooler_output
+4. **Multiple embedding types**: SigLIP + DINOv2 ensembles
+5. **Feature engineering**: PCA/PLS dimensionality reduction, semantic text features
+6. **Post-processing**: Enforce biomass constraints (GDM = Green + Clover, Total = GDM + Dead)
+
+**Effort Allocation**: The baseline is a good starting point, but the gap to target (0.79 - 0.7584 = 0.0316) requires more than incremental improvements. The current bottleneck is likely **feature quality** - the CLS token alone may not capture the spatial distribution of biomass that patch-based approaches can.
+
+**Assumptions Being Made**:
+1. CLS token captures sufficient image information (likely suboptimal for this task)
+2. DINOv2-base is sufficient (larger models consistently perform better)
+3. Simple tabular features are adequate (Species encoding loses information about species composition)
+4. Independent target prediction (ignoring biomass constraints)
+
+**Blind Spots**:
+1. **No TTA (Test-Time Augmentation)**: Top kernels use horizontal/vertical flips, rotations, and Gaussian blur
+2. **No ensemble**: Single model type (LightGBM only)
+3. **No post-processing**: Biomass constraints (GDM = Dry_Green + Dry_Clover, Dry_Total = GDM + Dry_Dead) are not enforced
+4. **No patch-based features**: The spatial distribution of vegetation matters for biomass estimation
+5. **No fine-tuning**: End-to-end training with SAM optimizer shows benefits in top kernels
+
+**Trajectory**: This is experiment 0 - a solid baseline. The score of 0.7584 is actually quite good for a first attempt. The path to 0.79+ is clear from the kernel research: larger models, patch-based features, ensembling, and post-processing.
+
+## What's Working
+
+1. **Sound validation methodology**: The weighted R² implementation matches the competition metric exactly
+2. **Correct data handling**: Pivoting to image-level, proper CV splits
+3. **Reasonable baseline architecture**: DINOv2 + LightGBM is a proven combination
+4. **Good code practices**: Seeds set, early stopping, non-negative clipping
+
+## Key Concerns
+
+1. **Observation**: Using only CLS token (pooler_output) instead of patch-based features
+   - **Why it matters**: Biomass estimation benefits from spatial information - where the grass is dense vs sparse. CLS token compresses this into a single vector.
+   - **Suggestion**: Extract dense features (last_hidden_state[:,1:,:]) and either average them or use a learned aggregation (MLP per patch).
+
+2. **Observation**: DINOv2-base (768 dims) vs DINOv2-giant (1536 dims)
+   - **Why it matters**: Top kernels consistently use larger models. The 0.66 LB kernel explicitly uses DINOv2-giant.
+   - **Suggestion**: Upgrade to DINOv2-large or giant. The H100 GPU has plenty of memory.
+
+3. **Observation**: No biomass constraint enforcement
+   - **Why it matters**: The targets have physical relationships: GDM = Dry_Green + Dry_Clover, Dry_Total = GDM + Dry_Dead. Enforcing these improves consistency.
+   - **Suggestion**: Implement post-processing from the 0.69 kernel (projection matrix to enforce constraints).
+
+4. **Observation**: Single model type, no ensemble
+   - **Why it matters**: The 0.69 kernel uses 4 different gradient boosting models (GradientBoosting, HistGradientBoosting, CatBoost, LightGBM) plus neural approaches.
+   - **Suggestion**: Add CatBoost and XGBoost to the ensemble.
+
+5. **Observation**: High CV variance (Fold 5 at 0.6710 vs others at 0.73-0.80)
+   - **Why it matters**: This suggests the model may be sensitive to data distribution. Could indicate overfitting or data heterogeneity.
+   - **Suggestion**: Investigate what makes Fold 5 different (State distribution? Species? Date?). Consider stratified CV.
+
+## Top Priority for Next Experiment
+
+**Upgrade to patch-based DINOv2 features with a larger model.** This is the highest-leverage change because:
+
+1. The top kernels (0.66-0.69 LB) all use patch-based features, not just CLS tokens
+2. DINOv2-giant is readily available and the H100 can handle it
+3. This addresses the fundamental limitation of the current approach (spatial information loss)
+
+Specific implementation:
+- Use `model(**inputs).last_hidden_state[:,1:,:]` to get patch tokens
+- Either average them directly, or use a simple MLP per patch and average predictions
+- Consider splitting large images into 520px patches (as in the 0.69 kernel) before embedding
+
+Secondary priorities (for subsequent experiments):
+- Add post-processing to enforce biomass constraints
+- Ensemble multiple gradient boosting models
+- Add TTA for inference
