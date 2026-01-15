@@ -43,51 +43,48 @@
 **Hypothesis**: GNNs capture molecular structure that tabular features miss. The GNN benchmark achieved CV 0.0039 (5x better than our best). GNNs might have a DIFFERENT CV-LB relationship.
 
 **Implementation**:
-- Use PyTorch Geometric or DGL
+- Use PyTorch Geometric with `from_smiles` utility
 - Represent molecules as graphs (atoms as nodes, bonds as edges)
-- Use message-passing neural networks (MPNN)
-- Combine with reaction conditions (temperature, time)
+- Use GCNConv or GATConv for message passing
+- Combine graph embeddings with reaction conditions (temperature, time)
+- Use global_mean_pool for graph-level readout
+
+**Code structure**:
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch_geometric.nn import GCNConv, global_mean_pool
+from torch_geometric.utils import from_smiles
+from torch_geometric.data import Data, Batch
+
+class GNNModel(nn.Module):
+    def __init__(self, node_features=9, hidden_dim=64, output_dim=3):
+        super().__init__()
+        self.conv1 = GCNConv(node_features, hidden_dim)
+        self.conv2 = GCNConv(hidden_dim, hidden_dim)
+        self.conv3 = GCNConv(hidden_dim, hidden_dim)
+        self.fc1 = nn.Linear(hidden_dim + 2, hidden_dim)  # +2 for temp, time
+        self.fc2 = nn.Linear(hidden_dim, output_dim)
+        
+    def forward(self, data, conditions):
+        x, edge_index, batch = data.x, data.edge_index, data.batch
+        x = F.relu(self.conv1(x, edge_index))
+        x = F.relu(self.conv2(x, edge_index))
+        x = F.relu(self.conv3(x, edge_index))
+        x = global_mean_pool(x, batch)  # Graph-level representation
+        x = torch.cat([x, conditions], dim=1)
+        x = F.relu(self.fc1(x))
+        return torch.sigmoid(self.fc2(x))
+```
 
 **Why this might work**:
 - The GNN benchmark achieved CV 0.0039 (5x better than our best CV 0.008194)
 - GNNs capture molecular interactions that tabular features miss
 - Graph structure is more generalizable to unseen molecules
+- This is the most likely path to a different CV-LB relationship
 
-**Code structure**:
-```python
-import torch
-from torch_geometric.nn import GCNConv, global_mean_pool
-from rdkit import Chem
-
-class GNNModel(nn.Module):
-    def __init__(self, node_features=32, hidden_dim=64, output_dim=3):
-        super().__init__()
-        self.conv1 = GCNConv(node_features, hidden_dim)
-        self.conv2 = GCNConv(hidden_dim, hidden_dim)
-        self.fc = nn.Linear(hidden_dim + 2, output_dim)  # +2 for temp, time
-        
-    def forward(self, x, edge_index, batch, conditions):
-        x = F.relu(self.conv1(x, edge_index))
-        x = F.relu(self.conv2(x, edge_index))
-        x = global_mean_pool(x, batch)  # Graph-level representation
-        x = torch.cat([x, conditions], dim=1)
-        return torch.sigmoid(self.fc(x))
-```
-
-### 2. PRE-TRAINED MOLECULAR EMBEDDINGS (MEDIUM PRIORITY)
-**Hypothesis**: Transfer learning from large-scale molecular datasets might capture generalizable patterns.
-
-**Implementation**:
-- Use ChemBERTa or MolBERT embeddings
-- Fine-tune on our dataset
-- Combine with reaction conditions
-
-**Why this might work**:
-- Pre-trained models have seen millions of molecules
-- They capture chemical patterns that our small dataset can't learn
-- Transfer learning reduces overfitting
-
-### 3. UNCERTAINTY-AWARE PREDICTIONS (MEDIUM PRIORITY)
+### 2. UNCERTAINTY-AWARE PREDICTIONS (MEDIUM PRIORITY)
 **Hypothesis**: Being more conservative on novel solvents might reduce the intercept.
 
 **Implementation**:
@@ -95,37 +92,11 @@ class GNNModel(nn.Module):
 - Blend GP predictions with a simple baseline (e.g., mean of training targets)
 - Higher uncertainty → more weight on baseline
 
-**Code structure**:
-```python
-class UncertaintyAwareModel:
-    def __init__(self, data='single'):
-        self.gp = GaussianProcessModel(data=data)
-        self.mlp = MLPModel(data=data)
-        self.baseline = None  # Mean of training targets
-        
-    def train_model(self, X, Y):
-        self.baseline = Y.mean(axis=0)
-        self.gp.train_model(X, Y)
-        self.mlp.train_model(X, Y)
-        
-    def predict(self, X):
-        gp_pred, gp_std = self.gp.predict_with_uncertainty(X)
-        mlp_pred = self.mlp.predict(X)
-        
-        # Blend based on uncertainty
-        # Higher uncertainty → more weight on baseline
-        confidence = 1 / (1 + gp_std)
-        pred = confidence * (0.5 * gp_pred + 0.5 * mlp_pred) + (1 - confidence) * self.baseline
-        return pred
-```
-
-### 4. ADVERSARIAL VALIDATION (LOW PRIORITY)
-**Hypothesis**: The hidden test might have a different distribution that we can identify.
-
-**Implementation**:
-- Train a classifier to distinguish between CV test folds and training data
-- Identify features that drive the distribution shift
-- Adjust model to be more robust to these features
+### 3. SUBMIT exp_032 (FALLBACK)
+**If GNN doesn't work**, submit exp_032 (best CV 0.008194) to:
+- Confirm the CV-LB relationship
+- Get a baseline LB score for comparison
+- Predicted LB: ~0.088 (similar to best LB 0.0877)
 
 ## What NOT to Try
 - Multi-Model Ensemble (MLP+XGB+RF+LGBM): exp_050 showed 15% worse CV
@@ -160,3 +131,12 @@ GNN is the most promising path forward.
 - The GNN benchmark achieved CV 0.0039 - this proves much better performance is possible
 - We need to find an approach with a DIFFERENT CV-LB relationship
 - GNN is the most promising path forward
+
+## IMPORTANT IMPLEMENTATION NOTES
+1. The competition requires the last 3 cells to follow the template structure
+2. Only the model definition line can be changed
+3. The model must have `train_model(X, Y)` and `predict(X)` methods
+4. The model must return predictions as a torch tensor with shape [N, 3]
+5. Use `from_smiles` from PyTorch Geometric to convert SMILES to graphs
+6. Need to handle both single solvent and mixture data
+7. For mixtures, need to combine two solvent graphs somehow (e.g., concatenate embeddings)
