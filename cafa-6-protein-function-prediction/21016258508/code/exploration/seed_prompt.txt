@@ -1,0 +1,123 @@
+# Protein Function Prediction - Techniques Guide
+
+## Data Understanding
+**Reference notebooks for data characteristics:**
+- `exploration/eda.ipynb` - Contains full EDA: protein counts, GO term distributions, sequence lengths, aspect breakdown
+
+**Key data characteristics:**
+- Multi-label classification: Predict Gene Ontology (GO) terms for proteins based on amino acid sequences
+- Three aspects: Biological Process (P), Molecular Function (F), Cellular Component (C)
+- ~82K training proteins, ~26K unique GO terms
+- Average ~6.5 GO terms per protein (highly variable, 1-233)
+- Evaluation: Information-accretion weighted F1-measure averaged across three aspects
+
+## Feature Engineering
+
+### Protein Language Model Embeddings (PRIMARY APPROACH)
+Use pre-trained protein language models to generate embeddings:
+- **ESM2** (1280-dim): Best performing, captures evolutionary and structural information
+- **ProtBERT** (1024-dim): Good alternative, BERT-based
+- **T5** (1024-dim): Another option
+
+Pre-compute embeddings for all proteins and use as input features to downstream classifiers.
+
+### Sequence-Based Features (SUPPLEMENTARY)
+Combine embeddings with traditional sequence features:
+- Amino acid composition (20 features)
+- Dipeptide composition (400 features)
+- Physicochemical properties (molecular weight, isoelectric point, hydrophobicity)
+- Sequence length features
+
+### BLAST/Homology Features
+- Run BLAST against training proteins to find similar sequences
+- Transfer GO terms from similar proteins with confidence based on sequence identity
+- Ensemble BLAST predictions with deep learning predictions
+
+## Model Architecture
+
+### MLP Classifier (RECOMMENDED)
+Train neural network on protein embeddings:
+```
+Architecture: Input -> Linear -> BatchNorm -> ReLU -> Dropout -> Linear -> BatchNorm -> ReLU -> Dropout -> Output
+Hidden dims: [864, 712] or [512, 256]
+Dropout: 0.2-0.3
+Output: Sigmoid for multi-label classification
+Loss: BCELoss or BCEWithLogitsLoss
+```
+
+### Training Strategy
+- Train separate models per aspect (MF, BP, CC) for better specialization
+- Use AdamW optimizer with weight decay (1e-4)
+- Learning rate: 0.001-0.01
+- Scheduler: CosineAnnealingLR or ReduceLROnPlateau
+- Epochs: 10-20
+- Batch size: 64-256
+- Gradient clipping (max_norm=1.0)
+
+### Model Ensemble
+Train 3+ models with different hyperparameters and average predictions:
+- Vary batch size (64, 128, 256)
+- Vary hidden dimensions
+- Vary dropout rates
+- Average sigmoid outputs for final prediction
+
+## Post-Processing (CRITICAL FOR SCORE)
+
+### GO Term Propagation
+**ESSENTIAL**: GO is hierarchical - predictions must be propagated to parent terms:
+1. Parse GO ontology (go-basic.obo) to get parent-child relationships
+2. For each predicted term, propagate score to all ancestors
+3. Parent score = max(parent_score, child_score)
+4. Root terms (GO:0003674, GO:0008150, GO:0005575) should be set to 1.0
+
+### GOA Database Corrections
+Use Gene Ontology Annotation (GOA) database for known annotations:
+1. Add known positive annotations with confidence 1.0
+2. Remove negative annotations (NOT qualifiers) and their descendants
+3. This provides "free" correct predictions for proteins with existing annotations
+
+### Confidence Thresholding
+- Use aspect-specific thresholds: BP=0.05, MF=0.1, CC=0.1
+- Ensure minimum predictions per protein (MIN_PREDS=5-10)
+- Temperature scaling can help calibrate confidences
+
+### Score Normalization
+- If max prediction for a protein is weak (<0.95), scale up predictions
+- This ensures predictions survive thresholding
+
+## Validation Strategy
+
+### Cross-Validation
+- Use stratified K-fold (k=5) based on protein taxonomy or random split
+- 90/10 train/validation split is common
+- Monitor validation F1-score (MultilabelF1Score with threshold=0.1)
+
+### Evaluation Metric
+- Competition uses information-accretion weighted F1-measure
+- IA weights provided in IA.tsv - terms deep in hierarchy have higher weights
+- Final score = arithmetic mean of F1 scores across MF, BP, CC aspects
+
+## Submission Format
+- TSV file: protein_id, GO_term, confidence
+- Confidence between 0 and 1
+- Multiple rows per protein (one per predicted GO term)
+- Include propagated parent terms
+
+## Key Insights from Top Solutions
+
+1. **Embeddings are crucial**: ESM2 embeddings significantly outperform hand-crafted features
+2. **Propagation is mandatory**: Without GO hierarchy propagation, scores will be poor
+3. **GOA corrections boost score**: Using existing annotations from GOA database
+4. **Ensemble helps**: Averaging multiple models improves robustness
+5. **Aspect-specific models**: Training separate models per aspect (MF/BP/CC) works better
+6. **BLAST ensemble**: Combining deep learning with homology-based predictions
+
+## Implementation Priority
+
+1. Generate ESM2 embeddings for all proteins
+2. Train MLP classifier per aspect
+3. Implement GO term propagation
+4. Add GOA corrections
+5. Ensemble multiple models
+6. Add BLAST-based predictions
+7. Tune thresholds per aspect
