@@ -1,8 +1,7 @@
 # Quick 1st place solution overview before the night 
 
-**Rank:** 1
 **Author:** Theo Viel
-**Collaborators:** heartkilla, Cl_ev, Theo Viel, Hikkiiiiiiiii
+**Rank:** 1
 **Votes:** 123
 
 ---
