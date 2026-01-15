@@ -1,91 +1,119 @@
 ## Current Status
-- Best CV score: 0.7584 from exp_000 (DINOv2-base + LightGBM)
-- Best LB score: Not yet submitted
+- Best CV score: 0.7715 from exp_001 (DINOv2-large patch + post-processing)
+- Best LB score: Not yet submitted (0/5 submissions used)
 - Target: 0.79
-- Gap to target: 0.0316 (3.16%)
+- Gap to target: 0.0185 (1.85%)
 
 ## Response to Evaluator
-- Technical verdict was TRUSTWORTHY. The validation methodology is sound.
-- Evaluator's top priority: "Upgrade to patch-based DINOv2 features with a larger model." I AGREE - this is the highest-leverage change based on kernel research.
+- Technical verdict was **TRUSTWORTHY**. The validation methodology is sound and scores are reliable.
+- Evaluator's top priority: "Implement image patching with DINOv2-giant and multi-model ensemble." **I AGREE** - this addresses the three highest-leverage gaps.
 - Key concerns raised:
-  1. CLS token only (missing spatial info) → Will address with patch-based features
-  2. DINOv2-base vs giant → Will upgrade to DINOv2-large (1024 dims) as intermediate step
-  3. No biomass constraints → Will implement post-processing
-  4. Single model type → Will add ensemble after feature improvements
-  5. High CV variance → Analysis shows this is NOT due to state imbalance; inherent data variability
+  1. **Image resizing loses spatial detail** (2000x1000 → 518x518) → Will implement 520px patching
+  2. **DINOv2-large vs giant** → Will upgrade to DINOv2-giant (1536 dims)
+  3. **Single model type** → Will add 4-model ensemble (LightGBM, CatBoost, XGBoost, HistGradientBoosting)
+  4. **Fold 5 underperformance** → Analysis shows this is inherent data variability; ensemble will help
+  5. **No TTA** → Will implement for test predictions
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop1_analysis.ipynb` for analysis
+- Reference notebooks: See `exploration/evolver_loop2_analysis.ipynb` for analysis
 - Key patterns to exploit:
-  1. **Biomass constraints are EXACT**: GDM = Dry_Green + Dry_Clover, Dry_Total = GDM + Dry_Dead
-     - Post-processing with projection matrix will enforce consistency
-  2. **Height is most predictive tabular feature** (r=0.50 with Dry_Total, r=0.58 with GDM)
-  3. **357 training images** - small dataset, so regularization and ensembling are important
-  4. **15 species types** - some rare (2-5 samples), label encoding loses this info
+  1. **Images are 2000x1000 pixels** - resizing to 518x518 loses significant spatial detail
+  2. **520px patches with 16px overlap** yields 8 patches per image (4x2 grid)
+  3. **Biomass constraints are EXACT**: GDM = Dry_Green + Dry_Clover, Dry_Total = GDM + Dry_Dead
+  4. **357 training images** - small dataset, ensemble and regularization are critical
+  5. **Fold variance is inherent** - not due to state/species imbalance
 
 ## Recommended Approaches (Priority Order)
 
-### Priority 1: Upgrade Image Features (HIGHEST IMPACT)
-**Experiment: DINOv2-large with patch-based features**
-- Use `facebook/dinov2-large` (1024 dims vs 768 in base)
-- Extract `last_hidden_state[:,1:,:]` (patch tokens) instead of just CLS
-- Average patch embeddings OR use PCA to reduce dimensionality
-- Expected improvement: +0.02-0.03 based on kernel evidence
+### Priority 1: Image Patching + DINOv2-giant + Multi-Model Ensemble (HIGHEST IMPACT)
+**This is the critical experiment to reach target. Combine all three improvements:**
 
-Implementation:
+1. **Image Patching (520px patches)**:
+```python
+def split_image(image, patch_size=520, overlap=16):
+    h, w, c = image.shape
+    stride = patch_size - overlap
+    patches, coords = [], []
+    for y in range(0, h, stride):
+        for x in range(0, w, stride):
+            patch = image[y:y+patch_size, x:x+patch_size]
+            if patch.shape[0] < patch_size or patch.shape[1] < patch_size:
+                pad_h = patch_size - patch.shape[0]
+                pad_w = patch_size - patch.shape[1]
+                patch = np.pad(patch, ((0,pad_h), (0,pad_w), (0,0)), mode='reflect')
+            patches.append(patch)
+    return patches
+```
+
+2. **DINOv2-giant (1536 dims)**:
 ```python
 from transformers import AutoImageProcessor, AutoModel
-model = AutoModel.from_pretrained('facebook/dinov2-large').cuda().eval()
-outputs = model(**inputs)
-# Use mean of patch tokens instead of CLS
-patch_features = outputs.last_hidden_state[:, 1:, :].mean(dim=1)  # (batch, 1024)
+model = AutoModel.from_pretrained('facebook/dinov2-giant').cuda().eval()
+# For each patch, extract pooler_output (CLS token) - this is what top kernels use
+# Then average across patches
 ```
 
-### Priority 2: Post-Processing for Biomass Constraints
-**Implement projection matrix to enforce physical constraints**
-- Constraints: GDM = Dry_Green + Dry_Clover, Dry_Total = GDM + Dry_Dead
-- Use the exact method from 0.69 kernel:
+3. **4-Model Ensemble**:
 ```python
-def post_process_biomass(df_preds):
-    ordered_cols = ["Dry_Green_g", "Dry_Clover_g", "Dry_Dead_g", "GDM_g", "Dry_Total_g"]
-    Y = df_preds[ordered_cols].values.T
-    C = np.array([[1, 1, 0, -1, 0], [0, 0, 1, 1, -1]])  # Constraint matrix
-    C_T = C.T
-    inv_CCt = np.linalg.inv(C @ C_T)
-    P = np.eye(5) - C_T @ inv_CCt @ C  # Projection matrix
-    Y_reconciled = (P @ Y).T.clip(min=0)
-    df_preds[ordered_cols] = Y_reconciled
-    return df_preds
+from lightgbm import LGBMRegressor
+from catboost import CatBoostRegressor
+from xgboost import XGBRegressor
+from sklearn.ensemble import HistGradientBoostingRegressor
+
+models = [
+    LGBMRegressor(n_estimators=500, learning_rate=0.05, num_leaves=31, verbose=-1),
+    CatBoostRegressor(iterations=500, learning_rate=0.05, verbose=0),
+    XGBRegressor(n_estimators=500, learning_rate=0.05, max_depth=6),
+    HistGradientBoostingRegressor(max_iter=500, learning_rate=0.05)
+]
+# Train each model, average predictions
 ```
-- Expected improvement: +0.005-0.01 (ensures consistency)
 
-### Priority 3: Multi-Model Ensemble
-**After feature improvements, ensemble multiple gradient boosting models**
-- Models to include: LightGBM, CatBoost, XGBoost, HistGradientBoosting
-- Simple averaging first, then try stacking with Ridge meta-learner
-- Expected improvement: +0.01-0.02
+**Expected improvement: +0.02-0.04** (should reach or exceed 0.79 target)
 
-### Priority 4: Test-Time Augmentation (TTA)
-**For inference, average predictions across augmented views**
-- Augmentations: horizontal flip, vertical flip, 90° rotation
-- Apply to test images, average predictions
-- Expected improvement: +0.005-0.01
+### Priority 2: Test-Time Augmentation (TTA)
+**For test predictions, average across augmented views:**
+```python
+augmentations = [
+    lambda x: x,  # Original
+    lambda x: np.fliplr(x),  # Horizontal flip
+    lambda x: np.flipud(x),  # Vertical flip
+    lambda x: np.rot90(x, 1),  # 90° rotation
+]
+# Extract embeddings for each augmented view, average predictions
+```
+**Expected improvement: +0.005-0.01**
 
-## What NOT to Try (Yet)
+### Priority 3: SigLIP Embeddings (if needed)
+**Only if Priority 1 doesn't reach target:**
+- Add SigLIP embeddings as complementary features
+- Concatenate with DINOv2 embeddings
+- Use PCA to reduce dimensionality if needed
+
+## What NOT to Try
 - **Fine-tuning DINOv2**: Too complex for small dataset, risk of overfitting
-- **SigLIP embeddings**: Requires additional model, try DINOv2 improvements first
-- **Neural network head**: LightGBM is working well, focus on features first
+- **Neural network head**: LightGBM ensemble is working well, focus on features
 - **Hyperparameter tuning**: Low ROI until features are improved
+- **Stratified CV**: Analysis shows fold variance is inherent, not due to stratification
 
 ## Validation Notes
-- Use 5-fold CV with random seed 42 (consistent with baseline)
+- Use 5-fold CV with random seed 42 (consistent with previous experiments)
 - Weighted R² metric with weights: Dry_Total=0.5, GDM=0.2, others=0.1
-- Monitor fold variance - if still high, consider stratified CV by State
+- Apply post-processing to enforce biomass constraints (already implemented)
+- Monitor fold variance - ensemble should reduce it
 
 ## Execution Plan for Next Experiment
-1. Extract DINOv2-large patch features (mean of patch tokens)
-2. Train LightGBM with same parameters as baseline
-3. Apply post-processing for biomass constraints
-4. Compare CV score to baseline (0.7584)
+1. Implement image patching (520px patches with 16px overlap)
+2. Load DINOv2-giant model (1536 dims)
+3. Extract patch embeddings for each image (8 patches → average)
+4. Train 4-model ensemble (LightGBM, CatBoost, XGBoost, HistGradientBoosting)
+5. Apply post-processing for biomass constraints
+6. Compare CV score to current best (0.7715)
 
-Target for next experiment: CV ≥ 0.77 (halfway to target)
+**Target for next experiment: CV ≥ 0.79 (at or above target)**
+
+## Memory Considerations
+- DINOv2-giant is ~4.3GB on GPU
+- H100 has 80GB memory - plenty of headroom
+- Process patches in batches of 8-16 to avoid OOM
+- Clear GPU cache between embedding extraction and model training
