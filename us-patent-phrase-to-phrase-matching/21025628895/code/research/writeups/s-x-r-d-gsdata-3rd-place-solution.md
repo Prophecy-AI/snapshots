@@ -1,8 +1,7 @@
 # 3rd place solution
 
-**Rank:** 3
 **Author:** Saber
-**Collaborators:** xia, Decalogue, Rainbow Cat, Saber
+**Rank:** 3
 **Votes:** 46
 
 ---
