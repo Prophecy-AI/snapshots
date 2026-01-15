@@ -1,8 +1,7 @@
 # 4th Place - Stacking Ensemble using XGB only
 
-**Rank:** 4
 **Author:** hahahaj
-**Collaborators:** hahahaj
+**Rank:** 4
 **Votes:** 18
 
 ---
