@@ -1,8 +1,8 @@
 ## What I Understood
 
-The junior researcher implemented my previous recommendation to try physical constraint normalization and stacking. The hypothesis was that enforcing mass balance (sum of yields ≤ 1) could improve generalization and reduce the CV-LB gap. The experiment found that only ~4% of predictions violated the constraint, and normalizing them provided only 0.05% improvement. The overall CV was 0.009611, which is 17.30% worse than the best CV (0.008194 from exp_032).
+The junior researcher tested the hypothesis that simpler features (Spange only, 18 features) might generalize better than the full feature set (145 features) and reduce the CV-LB gap. The reasoning was based on analysis showing that exp_000 (Spange only) had the best "generalization residual" (-0.0021) despite having worse CV. The experiment used the GP+MLP+LGBM ensemble architecture with weights (0.15, 0.55, 0.30) but with only Spange descriptors + Arrhenius kinetics features.
 
-The key issue identified by the researcher: the base model implementation performed worse than the best model (exp_032), possibly due to random seed differences or implementation details. The physical constraint normalization was correctly implemented but had minimal impact because few predictions actually violated the constraint.
+The result was CV 0.011265, which is 37.5% worse than the best CV (0.008194 from exp_030). The hypothesis that simpler features generalize better was NOT supported - the additional features (DRFP, ACS PCA) do provide meaningful signal.
 
 ## Technical Execution Assessment
 
@@ -15,166 +15,169 @@ The key issue identified by the researcher: the base model implementation perfor
 **Leakage Risk**: NONE DETECTED ✓
 - Features computed from lookup tables (no target leakage)
 - Scalers fit per-fold on training data only
-- Physical constraint normalization applied post-prediction (no leakage)
+- No data contamination between folds
 
 **Score Integrity**: VERIFIED ✓
-- Single Solvent MSE: 0.009416 (n=656)
-- Full Data MSE: 0.009716 (n=1227)
-- Overall MSE: 0.009611
+- Single Solvent MSE: 0.012251 (n=656)
+- Full Data MSE: 0.010737 (n=1227)
+- Overall MSE: 0.011265
 - Scores verified in notebook output cells
 
 **Code Quality**: GOOD ✓
 - Clean implementation following established patterns
 - Template-compliant structure maintained
-- Physical constraint enforcement correctly implemented as post-processing
+- Smaller MLP architecture (hidden_dim=32) appropriate for 18 features
 
 Verdict: **TRUSTWORTHY** - The experiment was executed correctly and results can be trusted.
 
 ## Strategic Assessment
 
-**Approach Fit**: PARTIALLY APPROPRIATE
+**Approach Fit**: REASONABLE HYPOTHESIS, NEGATIVE RESULT
 
-The physical constraint approach was a reasonable hypothesis to test, but the implementation revealed two issues:
-1. Only ~4% of predictions violated the constraint, so the impact was minimal
-2. The base model performed worse than the best model (exp_032), masking any potential benefit
+The hypothesis that simpler features might generalize better was worth testing. However, the result (CV 0.011265 vs best 0.008194) shows that the additional features (DRFP, ACS PCA) do provide meaningful signal that improves predictions. The simpler model is not the path to better generalization.
 
-**Effort Allocation**: CONCERN - DIMINISHING RETURNS
+**Effort Allocation**: CONCERN - DIMINISHING RETURNS ON CV OPTIMIZATION
 
-After 58 experiments, the team has explored:
-- Multiple model architectures (MLP, LightGBM, XGBoost, CatBoost, GP, GNN)
-- Multiple feature sets (Spange, DRFP, ACS PCA, fragprints)
+After 59 experiments, the team has extensively explored:
+- Multiple model architectures (MLP, LightGBM, XGBoost, CatBoost, GP, GNN, ChemBERTa)
+- Multiple feature sets (Spange, DRFP, ACS PCA, fragprints, RDKit descriptors)
 - Multiple ensemble strategies (weighted averaging, stacking)
 - Multiple regularization approaches
 - Physical constraint enforcement
+- Per-target optimization
 
-The best CV (0.008194) was achieved in exp_032 with GP (0.15) + MLP (0.55) + LGBM (0.30). Recent experiments have not improved on this.
+The best CV (0.008194) was achieved in exp_030 with GP (0.15) + MLP (0.55) + LGBM (0.30). Recent experiments have not improved on this.
+
+**CRITICAL DISCOVERY - CV PROCEDURE MISMATCH**:
+
+I found something VERY important in the public kernels. The notebook "mixall-runtime-is-only-2m-15s-but-good-cv-lb" **OVERWRITES the CV functions** to use GroupKFold (5-fold) instead of Leave-One-Out:
+
+```python
+def generate_leave_one_out_splits(X, Y):
+    groups = X["SOLVENT NAME"]
+    n_groups = len(groups.unique())
+    n_splits = min(5, n_groups)
+    gkf = GroupKFold(n_splits=n_splits)
+    for train_idx, test_idx in gkf.split(X, Y, groups):
+        yield ((X.iloc[train_idx], Y.iloc[train_idx]),
+               (X.iloc[test_idx], Y.iloc[test_idx]))
+```
+
+This is a CRITICAL insight! The server might be using a different CV procedure than the local leave-one-out. This could explain the 10x CV-LB gap:
+- Local CV: Leave-one-out (24 folds for single, 13 folds for full)
+- Server CV: Possibly GroupKFold (5 folds) or different weighting
 
 **Assumptions Being Challenged**:
 
-1. **ASSUMPTION**: Physical constraints would significantly improve generalization
-   - RESULT: Only 0.05% improvement - constraint violations are rare
-   - INSIGHT: The model already learns to produce reasonable yield predictions
+1. **ASSUMPTION**: Local CV matches server CV
+   - EVIDENCE: 10x gap between best CV (0.008194) and best LB (0.0877)
+   - INSIGHT: The server may use different CV procedure or weighting
 
-2. **ASSUMPTION**: The base model should match exp_032's performance
-   - RESULT: CV 0.009611 vs 0.008194 (17.30% worse)
-   - INSIGHT: Random seed and implementation details matter significantly
-
-**Critical Observation - CV-LB Relationship**:
-
-Analyzing the 5 unique LB scores from submissions:
-```
-CV=0.008829, LB=0.0932
-CV=0.009011, LB=0.0913
-CV=0.009068, LB=0.0893
-CV=0.009150, LB=0.0887
-CV=0.008194, LB=0.0877
-```
-
-The correlation between CV and LB is weak (r=0.326), and the best LB (0.0877) is still 152.7% above the target (0.0347). This suggests:
-1. Local CV is not a strong predictor of LB performance
-2. The gap is not just about CV optimization - there's a fundamental distribution shift
-3. The server-side evaluation may use different data or weighting
+2. **ASSUMPTION**: Simpler features generalize better
+   - RESULT: CV 0.011265 vs 0.008194 (37.5% worse)
+   - INSIGHT: Additional features provide meaningful signal
 
 **Blind Spots - CRITICAL**:
 
-1. **The 10x CV-LB gap is unexplained**: Best CV is 0.008194, best LB is 0.0877 (10.7x). This gap is too large to be explained by normal variance.
+1. **The CV procedure on the server is unknown**: The template shows leave-one-out, but the server might use different splits or weighting. The public kernel that overwrites CV functions suggests this is a known issue.
 
-2. **Server-side evaluation is opaque**: The competition says submissions are evaluated using CV on the server. If the same CV procedure is used, local CV should match LB. The 10x gap suggests either:
-   - Different data splits on the server
-   - Different weighting of single vs. full data
-   - Additional test data not in the public dataset
-   - Different evaluation metric implementation
+2. **The weighting of single vs. full data is unknown**: Local CV uses weighted average (656 single + 1227 full = 1883 total). The server might weight differently.
 
-3. **No adversarial validation**: The team hasn't tried to understand what makes the test distribution different from training.
+3. **The target (0.0347) is achievable**: The GNN benchmark achieved 0.0039 MSE. The current approach may have hit its ceiling.
 
 ## What's Working
 
 1. **GP + MLP + LGBM ensemble** - Best CV (0.008194) and best LB (0.0877)
-2. **Spange + DRFP + ACS PCA features** - Consistently outperform other feature sets
+2. **Spange + DRFP + ACS PCA features** - Consistently outperform simpler feature sets
 3. **Arrhenius kinetics features** (1/T, ln(t), interaction) - Physically meaningful
 4. **TTA for mixtures** - Reduces variance
-5. **Systematic experimentation** - 58 experiments with clear documentation
+5. **Systematic experimentation** - 59 experiments with clear documentation
 6. **Template compliance** - All submissions follow the required structure
-7. **Physical constraint implementation** - Correctly implemented, just had minimal impact
 
 ## Key Concerns
 
-### HIGH: Base Model Performance Degradation
+### CRITICAL: CV-LB Gap Remains Unexplained
 
-**Observation**: The base model in this experiment achieved CV 0.009611, which is 17.30% worse than the best model (exp_032, CV 0.008194).
+**Observation**: Best CV is 0.008194, best LB is 0.0877 (10.7x gap). The target is 0.0347.
 
-**Why it matters**: This masks any potential benefit from physical constraint normalization. The experiment cannot conclusively determine if physical constraints help because the base model is worse.
+**Why it matters**: Even perfect local CV optimization won't reach the target if the CV-LB relationship is fundamentally broken.
 
 **Suggestion**: 
-1. Use the EXACT same model configuration as exp_032 (same random seeds, same hyperparameters)
-2. Apply physical constraint normalization as a post-processing step to exp_032's predictions
-3. This would isolate the effect of physical constraints
+1. Investigate the server-side CV procedure
+2. Try matching the GroupKFold approach used in public kernels
+3. Consider that the server might weight single vs. full data differently
 
 ### HIGH: Only 3 Submissions Remaining
 
 **Observation**: 3 submissions left, target is 0.0347, best LB is 0.0877.
 
-**Why it matters**: Each submission is precious. The current experiment (CV 0.009611) would likely give LB worse than 0.0877.
+**Why it matters**: Each submission is precious. The current experiment (CV 0.011265) would likely give LB worse than 0.0877.
 
 **Suggestion**: 
-1. DO NOT submit this experiment
+1. DO NOT submit this experiment (CV 0.011265 is worse than best)
 2. Focus on understanding the CV-LB gap before using remaining submissions
-3. Consider submitting a model that is fundamentally different from previous submissions
+3. Consider submitting a model optimized for the server's CV procedure
 
-### MEDIUM: Physical Constraints Had Minimal Impact
+### MEDIUM: Simpler Features Did Not Help
 
-**Observation**: Only 4% of predictions violated the constraint (sum > 1), and normalization provided only 0.05% improvement.
+**Observation**: Spange-only (18 features) gave CV 0.011265, which is 37.5% worse than the full feature set (145 features, CV 0.008194).
 
-**Why it matters**: This approach is not the solution to the CV-LB gap.
+**Why it matters**: This rules out the hypothesis that simpler features generalize better.
 
-**Suggestion**: The model already learns to produce reasonable yield predictions. Focus on other approaches.
+**Suggestion**: Keep using the full feature set (Spange + DRFP + ACS PCA).
 
-### CRITICAL: The CV-LB Gap is the Real Problem
+### HIGH: Public Kernel Insight - GroupKFold
 
-**Observation**: Best CV is 0.008194, best LB is 0.0877 (10.7x gap). The target is 0.0347.
+**Observation**: The public kernel "mixall-runtime-is-only-2m-15s-but-good-cv-lb" overwrites the CV functions to use GroupKFold (5-fold) instead of Leave-One-Out.
 
-**Why it matters**: Even if CV were reduced to 0, the LB would likely still be far from the target based on the observed relationship.
+**Why it matters**: This suggests that:
+1. The server might use a different CV procedure
+2. Other competitors have discovered this and are optimizing for it
+3. The local leave-one-out CV might not match the server evaluation
 
 **Suggestion**: 
-1. Investigate why local CV doesn't match LB
-2. Check if the server uses different data splits or weighting
-3. Try approaches that could change the CV-LB relationship (not just minimize CV)
+1. Test the model with GroupKFold (5-fold) locally
+2. Compare the CV scores with leave-one-out
+3. If GroupKFold gives different results, this might explain the CV-LB gap
 
 ## Top Priority for Next Experiment
 
-**CRITICAL: INVESTIGATE THE CV-LB GAP BEFORE USING MORE SUBMISSIONS**
+**CRITICAL: INVESTIGATE THE CV PROCEDURE MISMATCH**
 
-The 10.7x gap between best CV (0.008194) and best LB (0.0877) is the fundamental blocker. Before using the remaining 3 submissions, the team needs to understand why this gap exists.
+The discovery that public kernels use GroupKFold instead of Leave-One-Out is a game-changer. Before using the remaining 3 submissions, the team MUST:
 
-**RECOMMENDED INVESTIGATION**:
+1. **Run the best model (exp_030 configuration) with GroupKFold (5-fold) CV**:
+   - Use the same GP+MLP+LGBM ensemble with weights (0.15, 0.55, 0.30)
+   - Use the full feature set (Spange + DRFP + ACS PCA)
+   - Compare GroupKFold CV with Leave-One-Out CV
 
-1. **Re-read the competition description carefully**: The evaluation says "cross-validation procedure" on the server. If it's the same CV as local, scores should match. The gap suggests something is different.
+2. **Analyze the relationship between GroupKFold CV and LB**:
+   - If GroupKFold CV is closer to LB, this confirms the server uses different CV
+   - Optimize for GroupKFold CV instead of Leave-One-Out CV
 
-2. **Check the public notebook template**: The template shows the exact CV procedure. Verify that the local implementation matches exactly.
-
-3. **Analyze the submission format**: The submission includes fold and row indices. The server might be evaluating differently than local CV.
-
-4. **Consider that the target (0.0347) might be achievable with a fundamentally different approach**:
-   - The GNN benchmark achieved 0.0039 MSE (per the research notes)
-   - This suggests the problem IS solvable with the right approach
-   - The current ensemble approach may have hit its ceiling
+3. **Consider the weighting of single vs. full data**:
+   - Local CV uses weighted average (656 + 1227 = 1883)
+   - The server might weight differently (e.g., equal weight to single and full)
 
 **RECOMMENDED NEXT EXPERIMENT**:
 
-Given the limited submissions (3 remaining), I recommend:
+```python
+# Test GroupKFold CV instead of Leave-One-Out
+from sklearn.model_selection import GroupKFold
 
-1. **DO NOT submit the current experiment** (CV 0.009611 is worse than best)
+def generate_leave_one_out_splits_gkf(X, Y, n_splits=5):
+    groups = X["SOLVENT NAME"]
+    gkf = GroupKFold(n_splits=n_splits)
+    for train_idx, test_idx in gkf.split(X, Y, groups):
+        yield ((X.iloc[train_idx], Y.iloc[train_idx]),
+               (X.iloc[test_idx], Y.iloc[test_idx]))
 
-2. **Apply physical constraints to the BEST model (exp_032)**:
-   - Load the exact model configuration from exp_032
-   - Apply physical constraint normalization as post-processing
-   - This isolates the effect of constraints on the best model
+# Run the best model with GroupKFold CV and compare scores
+```
 
-3. **If physical constraints don't help, try a fundamentally different approach**:
-   - The GNN benchmark achieved 0.0039 MSE
-   - Consider a simpler model that might generalize better (Ridge regression, KNN)
-   - Consider domain adaptation techniques
+This investigation is CRITICAL because:
+1. It could explain the 10x CV-LB gap
+2. It could reveal the correct optimization target
+3. It could unlock significant LB improvement without changing the model
 
-**CRITICAL NOTE**: The target (0.0347) IS reachable. The GNN benchmark achieved 0.0039 MSE, which is 9x better than the target. The current approach (GP+MLP+LGBM ensemble) may have hit its ceiling. The team should consider whether a fundamentally different approach is needed.
-
-**DO NOT GIVE UP. The target is achievable. The question is finding the right approach.**
+**DO NOT GIVE UP. The target (0.0347) IS reachable. The GNN benchmark achieved 0.0039 MSE. The key might be understanding the server's CV procedure, not just optimizing local CV.**
