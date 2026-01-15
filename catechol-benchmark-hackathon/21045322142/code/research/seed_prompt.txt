@@ -1,102 +1,126 @@
 ## Current Status
 - Best CV score: 0.008298 from exp_030 (GP+MLP+LGBM ensemble)
 - Best LB score: 0.0877 from exp_030
-- CV-LB gap: LB = 4.29*CV + 0.0528 (R²=0.95)
-- **CRITICAL**: Intercept (0.0528) is 72% of target (0.073)
-- Target: 0.073 (20.2% gap from best LB)
+- CV-LB gap: LB = 4.31*CV + 0.0525 (R²=0.95)
+- **CRITICAL**: Intercept (0.0525) > Target (0.0347) - current approach CANNOT reach target
+- Target: 0.0347 (60.4% gap from best LB)
 - Remaining submissions: 4
 
 ## Response to Evaluator
 
-**Technical verdict was TRUSTWORTHY.** The hybrid model experiment (exp_044) was well-executed with proper CV methodology.
+**Technical verdict was TRUSTWORTHY.** The mean reversion experiment (exp_045) was well-executed with proper CV methodology.
 
-**Evaluator's top priority:** Systematic bias correction or mean reversion to address the intercept problem. I AGREE - the intercept is the bottleneck, not CV improvement.
+**Evaluator's top priority:** Investigate the validation scheme mismatch (GroupKFold vs Leave-One-Out). I PARTIALLY AGREE - this is an interesting insight, but we CANNOT change the CV scheme in our submission (competition rules require LOO CV).
 
 **Key concerns raised:**
-1. exp_044 (hybrid model) achieved CV 0.008597, which is 4.9% worse than baseline (0.008194)
-2. The mixture CV improvement was only 2%, not the expected 12.5%
-3. The CV-LB relationship has intercept 0.0528, which is 72% of target
-4. Even CV=0 would give LB=0.0528, which is still above target
+1. Mean reversion HURTS CV (alpha=1.0 is best) - predictions are NOT biased away from mean
+2. The CV-LB intercept (0.0525) > Target (0.0347) - current approach CANNOT reach target
+3. Public kernels use GroupKFold (5 splits) instead of LOO (24 folds)
+4. The GNN benchmark achieved MSE 0.0039 - 22x better than our best LB
 
 **How I'm addressing:**
-- DO NOT submit exp_044 (CV is worse than exp_030)
-- Focus on approaches that could change the CV-LB relationship
-- Priority 1: Mean reversion (blend predictions toward training mean)
-- Priority 2: Separate models for single vs mixture (completely different architectures)
-- Priority 3: Target-specific optimization
+- The GroupKFold insight is interesting but we CANNOT use it (competition rules)
+- Focus on approaches that could fundamentally change the CV-LB relationship
+- Priority 1: Focus on hardest solvents (Cyclohexane 35.2%, HFIP 18.6% of error)
+- Priority 2: Robust training with adaptive weighting
+- Priority 3: Uncertainty-weighted predictions
 
 ## Data Understanding
 
 Reference notebooks:
-- `exploration/evolver_loop45_analysis.ipynb`: CV-LB relationship analysis, intercept problem
-- `exploration/evolver_loop44_analysis.ipynb`: HFIP outlier analysis
+- `exploration/evolver_loop46_analysis.ipynb`: CV-LB relationship analysis, per-solvent error analysis
+- `exploration/evolver_loop45_analysis.ipynb`: Mean reversion experiment (FAILED)
 
 Key patterns:
-1. **CV-LB relationship**: LB = 4.29*CV + 0.0528 (R²=0.95)
-2. **Intercept problem**: 0.0528 is 72% of target (0.073)
-3. **Required CV**: 0.004715 to hit target (vs current best 0.008298)
-4. **Best LB**: exp_030 with 0.08772 (GP+MLP+LGBM ensemble)
-5. **HFIP outlier**: Still dominates mixture error (MSE 0.49)
+1. **CV-LB relationship**: LB = 4.31*CV + 0.0525 (R²=0.95)
+2. **Intercept problem**: 0.0525 > Target (0.0347) - CANNOT reach target with current approach
+3. **Top 2 hardest solvents account for 53.8% of error**:
+   - Cyclohexane: MSE 0.198108 (35.2% of total error)
+   - HFIP (1,1,1,3,3,3-Hexafluoropropan-2-ol): MSE 0.096369 (18.6% of total error)
+4. **Top 5 easiest solvents** (MSE < 0.007): Ethyl Acetate, Methyl Propionate, tert-Butanol, THF, Water.TFE
 
 ## Recommended Approaches
 
-### Priority 1: Mean Reversion (HIGHEST PRIORITY - IMPLEMENT THIS)
-**Hypothesis:** The large intercept suggests our predictions are systematically biased away from the mean. Blending predictions toward the training mean could reduce this bias.
+### Priority 1: ROBUST TRAINING WITH ADAPTIVE WEIGHTING (HIGHEST PRIORITY)
+**Hypothesis:** The hardest solvents (Cyclohexane, HFIP) dominate the error. If we can improve predictions for these, we could significantly reduce overall error.
 
 **Implementation:**
-1. Start with exp_030's GP+MLP+LGBM ensemble (best LB model)
-2. Compute training mean for each target: `train_mean = Y_train.mean()`
-3. Blend predictions: `final_pred = alpha * model_pred + (1-alpha) * train_mean`
-4. Try alpha values: 0.7, 0.8, 0.85, 0.9
-5. Select the best alpha based on CV
+1. Identify hard-to-predict solvents based on LOO CV error
+2. Use adaptive weighting during training:
+   - Down-weight easy solvents (Ethyl Acetate, Methyl Propionate, etc.)
+   - Up-weight hard solvents (Cyclohexane, HFIP, TFE, DMA)
+3. Use robust loss (Huber or Tukey) to reduce impact of outliers
+4. Iterate: compute weights → train → re-estimate weights
 
-**Why:** This is the simplest approach that could change the CV-LB relationship. If predictions are systematically too extreme, mean reversion will help.
+**Why:** Research shows that adaptive weighting can reduce the dominance of hard examples. If we can reduce error on Cyclohexane and HFIP by 50%, overall error drops by ~27%.
 
 **Code pattern:**
 ```python
-class MeanReversionModel:
-    def __init__(self, alpha=0.85, data='single'):
-        self.alpha = alpha
-        self.base_model = GPMLPLGBMEnsemble(data=data)  # exp_030's model
-        self.train_mean = None
+class AdaptiveWeightedModel:
+    def __init__(self, data='single'):
+        self.base_model = GPMLPLGBMEnsemble(data=data)
+        self.solvent_weights = {}  # Learned weights per solvent
     
-    def train_model(self, X_train, Y_train):
-        self.train_mean = Y_train.mean().values
+    def compute_weights(self, X_train, Y_train, errors):
+        # Higher weight for solvents with higher error
+        for solvent in X_train['SOLVENT NAME'].unique():
+            mask = X_train['SOLVENT NAME'] == solvent
+            solvent_error = errors[mask].mean()
+            # Adaptive weight: sqrt of error ratio
+            self.solvent_weights[solvent] = np.sqrt(solvent_error / errors.mean())
+    
+    def train_model(self, X_train, Y_train, iterations=3):
+        # Initial training
         self.base_model.train_model(X_train, Y_train)
-    
-    def predict(self, X_test):
-        base_pred = self.base_model.predict(X_test)
-        # Mean reversion: blend toward training mean
-        final_pred = self.alpha * base_pred + (1 - self.alpha) * self.train_mean
-        return torch.tensor(final_pred, dtype=torch.float32)
+        
+        for _ in range(iterations):
+            # Compute errors
+            preds = self.base_model.predict(X_train)
+            errors = np.mean((Y_train.values - preds.numpy())**2, axis=1)
+            
+            # Update weights
+            self.compute_weights(X_train, Y_train, errors)
+            
+            # Re-train with weights
+            sample_weights = np.array([self.solvent_weights[s] for s in X_train['SOLVENT NAME']])
+            self.base_model.train_model(X_train, Y_train, sample_weights=sample_weights)
 ```
 
-### Priority 2: Separate Models for Single vs Mixture (IF MEAN REVERSION FAILS)
-**Hypothesis:** Single solvents and mixtures may have fundamentally different prediction characteristics.
+### Priority 2: SOLVENT-SPECIFIC MODELS
+**Hypothesis:** Different solvents may require different models. Cyclohexane and HFIP are chemically very different from other solvents.
 
 **Implementation:**
-1. Train exp_030's model for single solvents (best LB)
-2. Train a simpler model for mixtures (e.g., Ridge regression)
-3. Combine predictions without any shared parameters
+1. Cluster solvents by Spange descriptors
+2. Train separate models for each cluster
+3. Use the appropriate model based on test solvent's cluster
 
-### Priority 3: Target-Specific Optimization (IF ABOVE FAIL)
-**Hypothesis:** Different targets (SM, Product 2, Product 3) may have different optimal models.
+**Why:** Cyclohexane is non-polar (cyclohexane), HFIP is highly fluorinated. These may need different feature representations.
+
+### Priority 3: UNCERTAINTY-WEIGHTED ENSEMBLE
+**Hypothesis:** Use GP uncertainty to weight predictions. When uncertainty is high (for hard solvents), blend toward a more conservative prediction.
+
+**Implementation:**
+1. Use GP model to estimate prediction uncertainty
+2. For high-uncertainty predictions, blend toward cluster mean (not global mean)
+3. This is different from mean reversion (which failed) because it's targeted
+
+**Why:** Mean reversion failed because it blended ALL predictions toward the mean. Uncertainty-weighted blending only affects high-uncertainty predictions.
 
 ## What NOT to Try
 
-1. **exp_044 hybrid model** - CV 0.008597 is worse than exp_030
-2. **Non-linear features for single solvents** - exp_043 showed 9.8% worse CV
+1. **Mean reversion (exp_045)** - HURTS CV (alpha=1.0 is best)
+2. **GroupKFold CV** - Violates competition rules
 3. **GNN/ChemBERTa/learned embeddings** - All failed in previous experiments
-4. **Stronger regularization** - exp_042 showed 22% worse CV
-5. **Post-hoc calibration** - Can't be used in submission format
+4. **Post-hoc calibration** - Can't be used in submission format
+5. **Stronger regularization** - exp_042 showed 22% worse CV
 6. **Minimal features** - exp_038 showed 19.91% worse
 
 ## Validation Notes
 
 - CV scheme: 24 leave-one-solvent-out folds (single) + 13 leave-one-ramp-out folds (full)
-- CV-LB relationship: LB = 4.29*CV + 0.0528 (R²=0.95)
-- **CRITICAL:** Intercept (0.0528) > Target (0.073) × 0.72
-- Need to find an approach that reduces the intercept
+- CV-LB relationship: LB = 4.31*CV + 0.0525 (R²=0.95)
+- **CRITICAL:** Intercept (0.0525) > Target (0.0347)
+- Need to find an approach that changes the CV-LB relationship
 
 ## Template Compliance
 
@@ -107,36 +131,35 @@ The submission must follow the template structure:
 
 Only the model definition line can be changed:
 ```python
-model = MeanReversionModel(alpha=0.85, data='single')  # CHANGE THIS LINE ONLY
+model = AdaptiveWeightedModel(data='single')  # CHANGE THIS LINE ONLY
 ```
 
 ## Key Strategic Insight
 
-**THE TARGET IS REACHABLE.** The benchmark paper achieved MSE 0.0039 with a GNN. The target (0.073) is 18.7x worse than the benchmark, so there IS a path.
+**THE TARGET IS REACHABLE.** The GNN benchmark achieved MSE 0.0039. The target (0.0347) is 8.9x worse than the benchmark, so there IS a path.
 
 **The fundamental problem is:**
-- The CV-LB relationship has intercept 0.0528
-- This intercept is 72% of the target
-- We need to reduce the intercept, not just improve CV
+- The CV-LB relationship has intercept 0.0525
+- This intercept is larger than the target (0.0347)
+- We need to change the relationship, not just improve CV
 
-**Most promising approach:** Mean reversion. This is the simplest way to reduce systematic bias in predictions.
+**Most promising approach:** Focus on the hardest solvents (Cyclohexane, HFIP) which account for 53.8% of error. If we can reduce their error by 50%, overall error drops by ~27%.
 
 ## Submission Strategy
 
 With only 4 submissions remaining:
-1. **Submission 1 (AFTER THIS EXPERIMENT):** Mean reversion on exp_030 (best alpha)
-   - This tests if reducing prediction variance helps LB
-   - If LB improves, we know the intercept problem is addressable
+1. **Submission 1 (AFTER THIS EXPERIMENT):** Adaptive weighted model
+   - This tests if focusing on hard solvents helps LB
+   - If LB improves, we know the approach is working
 2. **Submission 2:** Based on results of #1
 3. **Save 2 submissions** for final refinements
 
 ## Next Experiment
 
-Create experiment 045: Mean Reversion
-- Start with exp_030's GP+MLP+LGBM ensemble (best LB)
-- Add mean reversion: `final_pred = alpha * model_pred + (1-alpha) * train_mean`
-- Test alpha values: 0.7, 0.8, 0.85, 0.9
-- Select best alpha based on CV
-- Submit to verify if it helps LB
+Create experiment 046: Adaptive Weighted Training
+- Identify hard-to-predict solvents based on LOO CV error
+- Use adaptive weighting during training
+- Use robust loss (Huber) to reduce impact of outliers
+- Test if this improves CV and potentially changes CV-LB relationship
 
-**IMPORTANT:** This is a simple modification that could fundamentally change the CV-LB relationship. Even if CV gets slightly worse, LB could improve due to reduced variance.
+**IMPORTANT:** This approach directly addresses the hardest solvents which dominate the error. Even if CV doesn't improve much, LB could improve if the hard solvents are better predicted.
