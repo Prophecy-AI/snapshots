@@ -3,177 +3,162 @@
 - Best LB score: 0.0877 (exp_030)
 - CV-LB relationship: LB = 4.30*CV + 0.0524 (R²=0.97)
 - **CRITICAL**: Intercept (0.0524) > Target (0.0347)
-- Submissions remaining: 2
+- Submissions remaining: 5
 
 ## Response to Evaluator
-- Technical verdict was CONCERNS due to implementation bug in exp_037 (similarity weighting)
-- Evaluator correctly identified that unnormalized features and wrong sigma caused the failure
-- Evaluator's top priority: Try aggressive simplification OR fix similarity weighting
-- I AGREE with the evaluator's assessment. The similarity weighting concept might work with proper implementation, but the more promising direction is aggressive simplification.
+- Technical verdict was TRUSTWORTHY - results can be relied upon
+- Evaluator correctly identified that exp_038 (minimal features) was a clean test of the hypothesis
+- Evaluator's top priority: Investigate WHY the CV-LB gap exists before more experiments
+- I AGREE with the evaluator's assessment. The negative result (19.91% worse) confirms DRFP features ARE valuable.
+- Key concerns raised: The CV-LB relationship has intercept > target, suggesting systematic difference
+- Addressing by: Trying post-hoc calibration and per-target optimization
 
 ## Data Understanding
-- Reference notebooks: `exploration/eda.ipynb`, `exploration/evolver_loop35_analysis.ipynb`
+- Reference notebooks: `exploration/eda.ipynb`, `exploration/evolver_loop36_analysis.ipynb`
 - Key patterns:
-  - CV-LB gap is STRUCTURAL (intercept > target)
-  - Even perfect CV (0) would give LB ~0.0524
-  - We need to CHANGE the CV-LB relationship, not just improve CV
-  - Simpler models (exp_006, exp_007) had better residuals than complex ones
+  - CV-LB gap is STRUCTURAL (intercept 0.0524 > target 0.0347)
+  - Targets do NOT sum to 1.0 (mean ~0.80), so normalization is NOT appropriate
+  - DRFP features ARE valuable (minimal features made CV 19.91% worse)
+  - All attempts to change CV-LB relationship have failed
 
-## CRITICAL INSIGHT
-The CV-LB relationship has an intercept of 0.0524, which is LARGER than the target (0.0347).
-This means we CANNOT reach the target by improving CV alone. We need to fundamentally change
-the CV-LB relationship by reducing overfitting to solvent-specific patterns.
+## CRITICAL INSIGHT FROM RESEARCH
+Web search revealed: "The most effective way to shrink the validation-vs-leaderboard gap when the 
+model's intercept is noticeably larger than the true target is to treat the intercept as a tunable 
+bias and align it with the test-set distribution."
+
+**Techniques to try:**
+1. **Post-hoc calibration**: Fit a simple linear scaling on predictions
+2. **XGBoost base_score tuning**: Override the automatically estimated intercept
+3. **Stacking with residual correction**: Use base_margin to learn only the residual
 
 ## Recommended Approaches
 
-### PRIORITY 1: Aggressive Simplification with Minimal Features
-**Rationale**: The CV-LB gap suggests overfitting to solvent-specific patterns. By using minimal features, we force the model to learn more general patterns that transfer better to unseen solvents.
+### PRIORITY 1: Post-Hoc Calibration
+**Rationale**: The CV-LB gap might be due to systematic bias in predictions. A simple linear 
+calibration could reduce the intercept.
 
 **Implementation**:
 ```python
-# Use ONLY these features:
-# 1. Arrhenius kinetics: 1/T, ln(t), interaction
-# 2. Top 3 Spange features: dielectric constant, alpha, beta (most physically meaningful)
-# Total: 6 features
+# After getting predictions from ensemble, apply calibration
+# Calibration learned on validation fold
+from sklearn.linear_model import LinearRegression
 
-class MinimalFeaturizer:
-    def __init__(self, mixed=False):
-        self.mixed = mixed
-        # Only use 3 most important Spange features
-        self.spange_cols = ['dielectric constant', 'alpha', 'beta']
-        self.feats_dim = 5 + 3  # kinetics (5) + spange (3)
+class CalibratedEnsemble:
+    def __init__(self, base_model, calibration_alpha=0.8):
+        self.base_model = base_model
+        self.calibration_alpha = calibration_alpha  # Scale predictions toward mean
     
-    def featurize(self, X, flip=False):
-        X_vals = X[INPUT_LABELS_NUMERIC].values.astype(np.float64)
-        temp_c = X_vals[:, 1:2]
-        time_m = X_vals[:, 0:1]
-        temp_k = temp_c + 273.15
-        inv_temp = 1000.0 / temp_k
-        log_time = np.log(time_m + 1e-6)
-        interaction = inv_temp * log_time
-        X_kinetic = np.hstack([X_vals, inv_temp, log_time, interaction])
-        
-        if self.mixed:
-            A_spange = SPANGE_DF.loc[X["SOLVENT A NAME"]][self.spange_cols].values
-            B_spange = SPANGE_DF.loc[X["SOLVENT B NAME"]][self.spange_cols].values
-            pct = X["SolventB%"].values.reshape(-1, 1)
-            if flip:
-                X_spange = B_spange * (1 - (1-pct)) + A_spange * (1-pct)
-            else:
-                X_spange = A_spange * (1 - pct) + B_spange * pct
-        else:
-            X_spange = SPANGE_DF.loc[X["SOLVENT NAME"]][self.spange_cols].values
-        
-        return np.hstack([X_kinetic, X_spange])
-```
-
-**Model**: Simple MLP [16, 8] with high dropout (0.3) and weight decay (1e-3)
-- OR Ridge Regression with alpha=1.0
-
-### PRIORITY 2: Fixed Similarity Weighting (if Priority 1 fails)
-**Rationale**: The evaluator correctly identified the implementation bug. With proper normalization and sigma tuning, similarity weighting might help.
-
-**Implementation**:
-```python
-from sklearn.preprocessing import StandardScaler
-from scipy.spatial.distance import pdist
-
-def compute_solvent_similarity_fixed(train_solvents, test_solvent, sigma=None):
-    # 1. Normalize Spange features
-    scaler = StandardScaler()
-    spange_normalized = scaler.fit_transform(SPANGE_DF.values)
-    spange_normalized_df = pd.DataFrame(spange_normalized, index=SPANGE_DF.index, columns=SPANGE_DF.columns)
-    
-    # 2. Compute appropriate sigma (median distance)
-    if sigma is None:
-        distances = pdist(spange_normalized)
-        sigma = np.median(distances)  # Should be ~1-2 for normalized features
-    
-    # 3. Get test solvent features
-    test_idx = SPANGE_DF.index.get_loc(test_solvent)
-    test_features = spange_normalized[test_idx]
-    
-    # 4. Compute similarity for each unique solvent
-    unique_train_solvents = train_solvents.unique()
-    solvent_similarities = {}
-    for solvent in unique_train_solvents:
-        train_idx = SPANGE_DF.index.get_loc(solvent)
-        train_features = spange_normalized[train_idx]
-        dist = np.sqrt(np.sum((train_features - test_features) ** 2))
-        similarity = np.exp(-dist ** 2 / (2 * sigma ** 2))
-        solvent_similarities[solvent] = similarity
-    
-    # 5. Map to all training samples
-    weights = train_solvents.map(solvent_similarities).values
-    
-    # 6. Normalize to have mean 1
-    weights = weights / weights.mean()
-    
-    return weights
-```
-
-### PRIORITY 3: Pure Ridge Regression (simplest possible)
-**Rationale**: Maximum regularization, minimum overfitting. May sacrifice CV for better LB.
-
-**Implementation**:
-```python
-from sklearn.linear_model import Ridge
-from sklearn.multioutput import MultiOutputRegressor
-
-class RidgeModel:
-    def __init__(self, data='single', alpha=1.0):
-        self.data_type = data
-        self.alpha = alpha
-        self.featurizer = MinimalFeaturizer(mixed=(data=='full'))
-        self.model = None
-        self.scaler = StandardScaler()
-    
-    def train_model(self, X_train, y_train, test_solvent=None):
-        X_std = self.featurizer.featurize(X_train, flip=False)
-        y_vals = y_train.values
-        
-        if self.data_type == 'full':
-            X_flip = self.featurizer.featurize(X_train, flip=True)
-            X_all = np.vstack([X_std, X_flip])
-            y_all = np.vstack([y_vals, y_vals])
-        else:
-            X_all, y_all = X_std, y_vals
-        
-        X_scaled = self.scaler.fit_transform(X_all)
-        self.model = MultiOutputRegressor(Ridge(alpha=self.alpha))
-        self.model.fit(X_scaled, y_all)
+    def train_model(self, X_train, y_train):
+        self.base_model.train_model(X_train, y_train)
+        # Store training target mean for calibration
+        self.target_mean = y_train.mean().values
     
     def predict(self, X_test):
-        X_std = self.featurizer.featurize(X_test, flip=False)
-        X_scaled = self.scaler.transform(X_std)
+        raw_pred = self.base_model.predict(X_test)
+        # Calibrate: scale predictions toward the mean
+        calibrated = self.calibration_alpha * raw_pred + (1 - self.calibration_alpha) * self.target_mean
+        return torch.clamp(calibrated, 0, 1)
+```
+
+### PRIORITY 2: Per-Target Optimization with Different Models
+**Rationale**: SM, Product 2, and Product 3 might have different optimal models/features.
+This is a fundamentally different approach we haven't tried.
+
+**Implementation**:
+```python
+class PerTargetEnsemble:
+    def __init__(self, data='single'):
+        self.data_type = data
+        # Different model for each target
+        self.sm_model = GPEnsemble(data=data)  # GP might be better for SM
+        self.p2_model = MLPEnsemble(data=data)  # MLP for Product 2
+        self.p3_model = LGBMModel(data=data)   # LGBM for Product 3
+    
+    def train_model(self, X_train, y_train):
+        self.sm_model.train_model(X_train, y_train[['SM']])
+        self.p2_model.train_model(X_train, y_train[['Product 2']])
+        self.p3_model.train_model(X_train, y_train[['Product 3']])
+    
+    def predict(self, X_test):
+        sm_pred = self.sm_model.predict(X_test)
+        p2_pred = self.p2_model.predict(X_test)
+        p3_pred = self.p3_model.predict(X_test)
+        return torch.cat([p2_pred, p3_pred, sm_pred], dim=1)  # Order: P2, P3, SM
+```
+
+### PRIORITY 3: XGBoost/CatBoost with Tuned Base Score
+**Rationale**: Tree-based models can have their intercept (base_score) tuned to match test distribution.
+
+**Implementation**:
+```python
+import xgboost as xgb
+import catboost as cb
+
+class TunedXGBModel:
+    def __init__(self, data='single', base_score=0.3):  # Lower base_score
+        self.data_type = data
+        self.base_score = base_score
+        self.featurizer = CombinedFeaturizer(mixed=(data=='full'))
+    
+    def train_model(self, X_train, y_train):
+        X_feat = self.featurizer.featurize(X_train)
+        self.models = []
+        for i in range(3):
+            model = xgb.XGBRegressor(
+                n_estimators=200,
+                max_depth=5,
+                learning_rate=0.05,
+                base_score=self.base_score,  # Tuned intercept
+                random_state=42
+            )
+            model.fit(X_feat, y_train.iloc[:, i])
+            self.models.append(model)
+```
+
+### PRIORITY 4: Stacking with Residual Correction
+**Rationale**: Use first-stage predictions as base_margin, then train second-stage to learn residuals.
+
+**Implementation**:
+```python
+class StackedModel:
+    def __init__(self, data='single'):
+        self.data_type = data
+        self.stage1 = GPMLPLGBMEnsemble(data=data)  # Our best model
+        self.stage2 = xgb.XGBRegressor(n_estimators=50, max_depth=3)
+    
+    def train_model(self, X_train, y_train):
+        # Train stage 1
+        self.stage1.train_model(X_train, y_train)
         
-        if self.data_type == 'full':
-            X_flip = self.featurizer.featurize(X_test, flip=True)
-            X_flip_scaled = self.scaler.transform(X_flip)
-            pred = (self.model.predict(X_scaled) + self.model.predict(X_flip_scaled)) / 2
-        else:
-            pred = self.model.predict(X_scaled)
+        # Get stage 1 predictions (as base_margin for stage 2)
+        stage1_pred = self.stage1.predict(X_train).numpy()
         
-        return torch.clamp(torch.tensor(pred), 0, 1)
+        # Train stage 2 on residuals
+        X_feat = self.featurizer.featurize(X_train)
+        self.stage2.fit(X_feat, y_train.values, base_margin=stage1_pred)
 ```
 
 ## What NOT to Try
-- Complex architectures (deep residual, attention) - increase overfitting
-- More ensemble members - doesn't change CV-LB relationship
-- DRFP features - increase overfitting to solvent-specific patterns
-- Similarity weighting without fixing the implementation bug
+- More feature simplification (exp_038 proved it hurts: 19.91% worse)
+- More regularization (Ridge, Kernel Ridge both much worse)
+- Similarity weighting (implementation too complex, failed)
+- Normalization of predictions (targets don't sum to 1.0)
 
 ## Validation Notes
 - CV scheme: Leave-one-solvent-out (fixed by competition)
 - CV-LB relationship: LB = 4.30*CV + 0.0524
-- To reach target (0.0347), we need to REDUCE the intercept
-- Simpler models may have worse CV but better LB
+- The intercept (0.0524) > target (0.0347) is the key problem
+- We need to REDUCE the intercept, not just improve CV
 
 ## Submission Strategy
-With only 2 submissions remaining:
-1. Try Priority 1 (aggressive simplification) - if CV is reasonable (< 0.015), submit
-2. If Priority 1 fails, try Priority 2 (fixed similarity weighting)
-3. Final submission: best model (either new experiment or exp_030)
+With 5 submissions remaining:
+1. Try Priority 1 (post-hoc calibration) - submit if CV is reasonable
+2. Try Priority 2 (per-target optimization) - submit if different from Priority 1
+3. Try Priority 3 (XGBoost with tuned base_score)
+4. Reserve 2 submissions for best models
 
 ## Key Insight
-The target IS reachable. The problem is not model quality (our CV is excellent), but overfitting to solvent-specific patterns. By using minimal features and simple models, we can force the model to learn more general patterns that transfer better to unseen solvents.
+The target IS reachable. The problem is the systematic bias (intercept) in our predictions.
+By calibrating predictions or using models with tunable intercepts, we can potentially
+reduce the CV-LB gap. The fact that the target (0.0347) exists means someone achieved it -
+we need to find what they did differently.
