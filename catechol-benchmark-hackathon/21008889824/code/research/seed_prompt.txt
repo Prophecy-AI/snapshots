@@ -2,124 +2,148 @@
 - Best CV score: 0.008194 from exp_032 (GP 0.15 + MLP 0.55 + LGBM 0.3)
 - Best LB score: 0.0877 from exp_030
 - Target: 0.0347
-- CV-LB gap: LB = 4.30 × CV + 0.0524 (R² = 0.97)
+- CV-LB gap: LB = 4.27 × CV + 0.0527 (R² = 0.967)
 - Submissions remaining: 5
 
 ## Response to Evaluator
 
-**Technical verdict was CONCERNS** - The evaluator correctly identified a critical bug in the similarity weighting experiments (exp_037, exp_038). Both experiments produced IDENTICAL CV scores (0.022076) because the target weighting `[1.0, 1.0, 2.0]` was dropped from the loss computation. The comparison is invalid.
+**Technical verdict was TRUSTWORTHY** - The feature selection experiment (exp_036) was correctly implemented and the results can be trusted.
 
-**Evaluator's top priority**: Aggressive Feature Selection + Simpler Model to reduce the CV-LB intercept. **I AGREE.** The intercept (0.0524) is 1.51x higher than the target (0.0347), meaning no amount of CV improvement can reach the target with the current approach. We need to fundamentally change the CV-LB relationship.
+**Evaluator's top priority**: Submit exp_036 to test if feature selection reduces the CV-LB intercept. **I AGREE.** However, I want to first try k-NN as a completely different approach that may have a fundamentally different CV-LB relationship.
 
 **Key concerns raised**:
-1. The similarity weighting bug invalidates those experiments - **Acknowledged. Will fix if retrying.**
-2. The CV-LB intercept is the real bottleneck - **Agreed. This is the core problem.**
-3. 5 submissions remaining - **Will be strategic about when to submit.**
+1. GP was removed from the ensemble - **Valid concern. Will consider adding GP back in future experiments.**
+2. Only 5 submissions remaining - **Will be strategic. k-NN is a quick experiment that could reveal a different CV-LB relationship.**
+3. The CV-LB intercept is the bottleneck - **Agreed. This is why we need approaches with different inductive biases.**
 
 ## Data Understanding
 
 Reference notebooks:
-- `exploration/eda.ipynb` - Initial EDA
-- `exploration/evolver_loop34_analysis.ipynb` - CV-LB relationship analysis
-- `exploration/evolver_loop36_analysis.ipynb` - Similarity weighting failure analysis
+- `exploration/evolver_loop37_analysis.ipynb` - CV-LB relationship analysis
+- `exploration/evolver_loop34_analysis.ipynb` - Detailed CV-LB analysis
 
 Key patterns:
-- CV-LB relationship is highly linear (R² = 0.97) - the gap is STRUCTURAL
-- Intercept (0.0524) > Target (0.0347) - current approach cannot reach target
-- 145 features for 656 samples (24 solvents) may be causing overfitting
-- GP component (0.15 weight) improved both CV and LB
+- CV-LB relationship is highly linear (R² = 0.967) - the gap is STRUCTURAL
+- Intercept (0.0527) > Target (0.0347) - current approach cannot reach target
+- All 11 submissions follow the same linear relationship
+- No approach has significantly beaten the linear fit (best residual: -0.00193)
 
 ## Recommended Approaches
 
-### PRIORITY 1: Aggressive Feature Selection + Simpler Model
-**Rationale**: The intercept represents systematic overfitting to training solvents. Fewer features and simpler models should reduce this.
+### PRIORITY 1: k-Nearest Neighbors Regression
+**Rationale**: Research shows k-NN can match neural network performance for chemical property prediction and may generalize better to unseen solvents because:
+1. It doesn't learn a global parametric mapping - just returns average of similar examples
+2. Less prone to overfitting on small datasets
+3. Predictions are anchored to nearby training points, not extrapolated from a fitted surface
+4. May have a fundamentally different CV-LB relationship
 
 **Implementation**:
 ```python
-# Step 1: Get feature importance from LightGBM
-lgbm_model.fit(X_train, y_train)
-importance = lgbm_model.feature_importances_
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.preprocessing import StandardScaler
 
-# Step 2: Select top-k features (try k=25, 30, 35)
-top_k = 25
-selected_idx = np.argsort(importance)[-top_k:]
+class KNNModel:
+    def __init__(self, n_neighbors=5, weights='distance', data='single'):
+        self.data_type = data
+        self.featurizer = FullFeaturizer(mixed=(data=='full'))
+        self.scalers = []
+        self.models = []
+        self.n_neighbors = n_neighbors
+        self.weights = weights
 
-# Step 3: Train simpler ensemble on selected features
-# - GP with Matern kernel (works well with fewer features)
-# - Ridge regression (linear, strong regularization)
-# - Simple MLP [16] with weight_decay=1e-2
+    def train_model(self, X_train, y_train):
+        X_feat = self.featurizer.featurize(X_train)
+        y_vals = y_train.values
+        
+        if self.data_type == 'full':
+            X_flip = self.featurizer.featurize(X_train, flip=True)
+            X_feat = np.vstack([X_feat, X_flip])
+            y_vals = np.vstack([y_vals, y_vals])
+        
+        self.models = []
+        self.scalers = []
+        for i in range(3):
+            scaler = StandardScaler()
+            X_scaled = scaler.fit_transform(X_feat)
+            model = KNeighborsRegressor(n_neighbors=self.n_neighbors, weights=self.weights)
+            model.fit(X_scaled, y_vals[:, i])
+            self.scalers.append(scaler)
+            self.models.append(model)
+
+    def predict(self, X_test):
+        X_feat = self.featurizer.featurize(X_test)
+        
+        if self.data_type == 'full':
+            X_flip = self.featurizer.featurize(X_test, flip=True)
+        
+        preds = []
+        for i, (scaler, model) in enumerate(zip(self.scalers, self.models)):
+            X_scaled = scaler.transform(X_feat)
+            pred = model.predict(X_scaled)
+            if self.data_type == 'full':
+                X_flip_scaled = scaler.transform(X_flip)
+                pred_flip = model.predict(X_flip_scaled)
+                pred = (pred + pred_flip) / 2
+            preds.append(pred)
+        
+        return torch.clamp(torch.tensor(np.column_stack(preds)), 0, 1)
 ```
 
-**Expected outcome**: CV may increase slightly, but LB should improve more (reducing intercept).
+**Try different k values**: k=3, 5, 7, 10
 
-### PRIORITY 2: Fix Similarity Weighting Bug (Apply to LGBM)
-**Rationale**: The idea of weighting samples by solvent similarity was sound, but the implementation was buggy. LGBM handles sample weights natively.
+### PRIORITY 2: k-NN + GP Ensemble
+**Rationale**: If k-NN shows promise, combine it with GP for uncertainty-aware predictions.
 
 **Implementation**:
 ```python
-# Compute inverse similarity weights (high weight for dissimilar solvents)
-def compute_inverse_similarity_weights(train_solvents, test_solvent, sigma=5.0):
-    # Normalize Spange features
-    scaler = StandardScaler()
-    scaler.fit(SPANGE_DF.values)
-    test_features = scaler.transform(SPANGE_DF.loc[test_solvent].values.reshape(1, -1))
-    train_features = scaler.transform(SPANGE_DF.loc[train_solvents].values)
+class KNNGPEnsemble:
+    def __init__(self, data='single'):
+        self.knn = KNNModel(n_neighbors=5, weights='distance', data=data)
+        self.gp = GPWrapper(data=data)
+        self.weights = {'knn': 0.6, 'gp': 0.4}
     
-    # RBF kernel similarity
-    distances = np.sum((train_features - test_features)**2, axis=1)
-    similarity = np.exp(-distances / (2 * sigma**2))
+    def train_model(self, X_train, y_train):
+        self.knn.train_model(X_train, y_train)
+        self.gp.train_model(X_train, y_train)
     
-    # Inverse: high weight for dissimilar solvents
-    weights = 2.0 - similarity
-    return weights / weights.mean()
-
-# Apply to LGBM (native sample weight support)
-lgbm_model.fit(X_train, y_train, sample_weight=weights)
+    def predict(self, X_test):
+        knn_pred = self.knn.predict(X_test)
+        gp_pred = self.gp.predict(X_test)
+        return torch.clamp(self.weights['knn'] * knn_pred + self.weights['gp'] * gp_pred, 0, 1)
 ```
 
-### PRIORITY 3: Stronger Regularization on MLP
-**Rationale**: Current weight_decay=1e-4 may not be strong enough to prevent memorization.
+### PRIORITY 3: Submit exp_036 (Feature Selection)
+**Rationale**: If k-NN doesn't show a different CV-LB relationship, submit exp_036 to test if feature selection reduces the intercept.
 
-**Implementation**:
-```python
-# Try weight_decay=1e-2 or 1e-3
-optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, weight_decay=1e-2)
-
-# Also try dropout=0.2 instead of 0.05
-model = MLPModelInternal(input_dim, [32, 16], 3, dropout=0.2)
-```
-
-### PRIORITY 4: Submit exp_032 (Best CV)
-**Rationale**: We haven't submitted our best CV model yet. This will verify if the CV-LB relationship holds.
-
-**Note**: Only submit if we've exhausted other approaches or need calibration data.
+**Expected outcome**: If LB improves despite worse CV, the hypothesis about simpler models reducing the intercept is validated.
 
 ## What NOT to Try
 
-1. **Similarity weighting on MLP without fixing the bug** - The implementation dropped target weights, causing 169% degradation.
+1. **More complex models** - Deep residual networks (exp_004) failed badly. Complexity hurts generalization.
 
-2. **More complex models** - Deep residual networks (exp_004) failed badly. Complexity hurts generalization.
+2. **Similarity weighting on MLP** - exp_034/035 had bugs and showed 169% degradation.
 
-3. **More features** - We already have 145 features. Adding more will increase overfitting.
+3. **Four-model ensemble** - exp_028 showed adding XGBoost and CatBoost didn't help.
 
-4. **Normalization post-processing** - exp_029 showed targets don't sum to 1.0, so normalization fails.
+4. **Normalization post-processing** - exp_029 showed targets don't sum to 1.0.
 
-5. **Four-model ensemble** - exp_028 showed adding XGBoost and CatBoost didn't help.
+5. **Higher GP weight** - exp_031 showed 10.61% worse CV with GP weight 0.4.
 
 ## Validation Notes
 
 - CV scheme: Leave-one-solvent-out for single solvent (24 folds), leave-one-ramp-out for full data (13 folds)
-- CV-LB relationship: LB = 4.30 × CV + 0.0524 (R² = 0.97)
-- To reach target LB = 0.0347, we need to reduce the intercept from 0.0524 to ~0.02
-- This requires fundamentally different approaches, not just CV improvement
+- CV-LB relationship: LB = 4.27 × CV + 0.0527 (R² = 0.967)
+- To reach target LB = 0.0347, we need to reduce the intercept from 0.0527 to ~0.02
+- k-NN may have a different CV-LB relationship due to its different inductive bias
 
 ## Key Insight
 
-**The target IS reachable.** Our CV (0.008194) is 4.2x BETTER than the target LB (0.0347). The problem is the CV-LB gap, not our model quality. If we can reduce the intercept from 0.0524 to ~0.02, our current CV would translate to LB ≈ 0.055, which is much closer to target.
+**The target IS reachable.** The CV-LB relationship shows that all our approaches follow the same linear pattern. We need an approach with a fundamentally different inductive bias that may have a different CV-LB relationship.
 
-The path forward is:
-1. Reduce model complexity (fewer features, simpler architecture)
-2. Increase regularization (prevent memorization of training solvents)
-3. Use approaches that generalize better to unseen solvents
+k-NN is promising because:
+1. It doesn't learn a global function - just uses nearest neighbors
+2. Research shows it can match neural networks for chemical property prediction
+3. It may generalize differently to unseen solvents
+4. It's fast to train and test
 
 **DO NOT GIVE UP. The target is achievable with the right approach.**
