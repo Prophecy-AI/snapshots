@@ -1,8 +1,7 @@
 # 1st Place - Single Model - Feature Engineering
 
-**Rank:** 1
 **Author:** Chris Deotte
-**Collaborators:** Chris Deotte
+**Rank:** 1
 **Votes:** 175
 
 ---
