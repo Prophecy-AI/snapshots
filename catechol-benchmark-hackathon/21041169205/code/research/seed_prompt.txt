@@ -2,7 +2,7 @@
 - Best CV score: 0.0081 from exp_049/050/053 (CatBoost + XGBoost ensemble)
 - Best LB score: 0.0877 from exp_030 (GP + MLP + LGBM ensemble)
 - Target: 0.0347 | Gap to target: 0.0530 (LB - Target)
-- **CRITICAL: exp_055 is a minimal submission (mean predictor) ready for testing**
+- **exp_055 already submitted - need new experiment**
 
 ## CV-LB Relationship Analysis (CRITICAL)
 - Linear fit: LB = 4.31 * CV + 0.0525 (R² = 0.9505)
@@ -10,15 +10,13 @@
 - Target = 0.0347
 - **CRITICAL: Intercept (0.0525) > Target (0.0347)**
 - Required CV to hit target: -0.0041 (NEGATIVE - IMPOSSIBLE with current approach)
-- Even with CV = 0, predicted LB would be 0.0525
 - **ALL model types fall on the same CV-LB line - this is STRUCTURAL DISTRIBUTION SHIFT**
 
 ## Response to Evaluator
-- Technical verdict was TRUSTWORTHY for exp_055 (minimal submission)
-- Evaluator's top priority: Submit exp_055 to verify format, then implement per-target model selection
-- Evaluator correctly identified that the submission format is now correct (24/13 folds)
-- **AGREE:** We should submit exp_055 first to verify the format works
-- **AGREE:** Per-target model selection is a promising approach not yet tried
+- Technical verdict was TRUSTWORTHY for exp_055
+- Evaluator's top priority: Submit to verify format, then implement per-target model selection
+- **ISSUE:** exp_055 was already submitted with a different model
+- **ACTION:** Create exp_056 with per-target model selection
 
 ## CRITICAL INSIGHT: The Intercept Problem
 
@@ -42,67 +40,71 @@ The CV-LB analysis reveals a fundamental issue:
 
 ## Recommended Approaches
 
-### PRIORITY 1: Submit exp_055 to Verify Format
-exp_055 is a minimal submission (mean predictor) with:
-- Correct CV scheme: 24 folds for single, 13 folds for full
-- Correct format: 1883 rows, proper columns
-- All targets in [0, 1] range
-
-**ACTION:** Submit exp_055 to verify the format is accepted. If it works, we know the format is correct.
-
-### PRIORITY 2: Per-Target Model Selection (NEW APPROACH)
+### PRIORITY 1: Per-Target Model Selection (exp_056)
 The public kernel "catechol-strategy-to-get-0-11161" achieved LB 0.11161 using:
 - Different model types for different targets (HGB for SM, ETR for Products)
 - Weighted ensemble of two feature sets (0.65 * ACS + 0.35 * Spange)
 
 **This approach has NOT been tried yet and could potentially change the CV-LB relationship.**
 
-Implementation:
+Implementation for exp_056:
 ```python
-class PerTargetEnsembleModel:
-    def __init__(self):
+from sklearn.ensemble import HistGradientBoostingRegressor, ExtraTreesRegressor
+
+class PerTargetModel:
+    def __init__(self, data='single'):
+        self.data = data
         self.targets = ["Product 2", "Product 3", "SM"]
         self.models = {}
-        for t in self.targets:
-            if t == "SM":
+        self.scalers = {}
+        
+    def train_model(self, train_X, train_Y, device=None, verbose=False):
+        # Prepare features
+        X_features = self._prepare_features(train_X)
+        
+        for i, target in enumerate(self.targets):
+            y = train_Y.iloc[:, i].values
+            
+            if target == "SM":
                 # SM is hardest - use HistGradientBoostingRegressor
-                self.models[t] = HistGradientBoostingRegressor(max_iter=500, max_depth=5)
+                self.models[target] = HistGradientBoostingRegressor(
+                    max_iter=500, max_depth=5, learning_rate=0.05
+                )
             else:
                 # Products are easier - use ExtraTreesRegressor
-                self.models[t] = ExtraTreesRegressor(n_estimators=200, max_depth=10)
+                self.models[target] = ExtraTreesRegressor(
+                    n_estimators=200, max_depth=10, random_state=42
+                )
+            
+            self.models[target].fit(X_features, y)
+    
+    def predict(self, test_X):
+        X_features = self._prepare_features(test_X)
+        
+        predictions = []
+        for target in self.targets:
+            pred = self.models[target].predict(X_features)
+            predictions.append(pred)
+        
+        # Stack predictions: [N, 3]
+        preds = np.column_stack(predictions)
+        preds = np.clip(preds, 0, 1)
+        return torch.tensor(preds, dtype=torch.double)
 ```
 
-### PRIORITY 3: Intercept Reduction Strategies
-To reduce the intercept (0.0525 → <0.0347):
+### PRIORITY 2: Extrapolation Detection + Conservative Predictions
+Add features measuring solvent distance to training distribution:
+- When extrapolating, blend predictions toward population mean
+- This could reduce the intercept by being more conservative on unseen solvents
 
-1. **Extrapolation Detection:**
-   - Add features measuring solvent distance to training distribution
-   - When extrapolating, blend predictions toward population mean
-   
-2. **Per-Solvent Error Analysis:**
-   - Identify which solvents cause the most error
-   - Handle outlier solvents differently (e.g., Water)
-   
-3. **Uncertainty-Weighted Predictions:**
-   - Use GP with uncertainty estimates
-   - High uncertainty → conservative prediction (closer to mean)
-
-4. **Solvent Clustering:**
-   - Group solvents by chemical class (alcohols, ethers, esters)
-   - Use class-specific models
-
-### PRIORITY 4: Study Top Public Kernels
-Top kernels that work:
-- "Arrhenius Kinetics + TTA" (LB 0.09831) - uses MLP with Arrhenius features
-- "mixall" - uses GroupKFold (5 splits) instead of Leave-One-Out
-- "System Malfunction V1" - simple MLP approach
-
-**Key insight:** The "mixall" kernel uses GroupKFold which produces DIFFERENT fold structure. This might produce a different CV-LB relationship.
+### PRIORITY 3: Solvent Clustering
+Group solvents by chemical class and use class-specific models:
+- Alcohols, ethers, esters, etc.
+- Detect when test solvent is in a known vs novel class
 
 ## What NOT to Try
-- More complex models without first verifying submission format
-- Approaches that just improve CV without addressing the intercept
-- Any variation that falls on the same CV-LB line
+- More variations that just improve CV without addressing the intercept
+- Any approach that falls on the same CV-LB line
 
 ## Validation Notes
 - CV scheme: Leave-one-solvent-out for single (24 folds), leave-one-pair-out for full (13 folds)
@@ -110,19 +112,19 @@ Top kernels that work:
 - The intercept (0.0525) is higher than the target (0.0347)
 
 ## Submission Strategy (5 remaining today)
-1. **SUBMIT exp_055** - Verify format is accepted (mean predictor, CV ~0.054)
-2. **If accepted:** Implement per-target model selection
-3. **If rejected:** Debug format issue further
+1. **Create exp_056** with per-target model selection
+2. **Submit exp_056** to see if it changes the CV-LB relationship
+3. **If no improvement:** Try extrapolation detection
+4. **If still no improvement:** Try solvent clustering
 
 ## THE TARGET IS REACHABLE
 
 The target (0.0347) IS reachable, but NOT through incremental CV improvements.
 
 **The path forward requires:**
-1. Verify submission format works (exp_055)
-2. Find approaches that CHANGE the CV-LB relationship
-3. Reduce the intercept through:
-   - Per-target model selection
+1. Find approaches that CHANGE the CV-LB relationship
+2. Reduce the intercept through:
+   - Per-target model selection (NEXT)
    - Extrapolation detection
    - Uncertainty weighting
    - Solvent clustering
@@ -135,7 +137,7 @@ DO NOT keep optimizing CV if all approaches fall on the same CV-LB line.
 The intercept (0.0525) represents extrapolation error that no amount of model tuning can fix.
 
 **Focus on strategies that could REDUCE THE INTERCEPT:**
-1. Per-target model selection (different models for different targets)
+1. Per-target model selection (different models for different targets) - TRY THIS NEXT
 2. Extrapolation detection + conservative predictions
 3. Solvent clustering + class-specific models
 4. Physics-informed constraints that generalize to unseen solvents
