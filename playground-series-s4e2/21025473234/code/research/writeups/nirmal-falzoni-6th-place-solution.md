@@ -1,8 +1,7 @@
 # 6th place solution
 
-**Rank:** 6
 **Author:** Nirmal Falzoni
-**Collaborators:** Nirmal Falzoni
+**Rank:** 6
 **Votes:** 27
 
 ---
