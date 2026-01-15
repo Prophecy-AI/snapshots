@@ -1,8 +1,7 @@
 # 2nd Place Solution - L3 Ensemble of 100+ OOFs
 
-**Rank:** 2
 **Author:** Masaya Kawamata
-**Collaborators:** Masaya Kawamata
+**Rank:** 2
 **Votes:** 59
 
 ---
