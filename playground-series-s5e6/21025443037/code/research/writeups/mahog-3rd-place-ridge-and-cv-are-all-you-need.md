@@ -1,8 +1,7 @@
 # 3rd place - Ridge and CV are all you need
 
-**Rank:** 3
 **Author:** Mahog
-**Collaborators:** Mahog
+**Rank:** 3
 **Votes:** 19
 
 ---
