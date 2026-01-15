@@ -1,8 +1,7 @@
 # 5th Place Solution - An ensemble of 53 OOFs
 
-**Rank:** 5
 **Author:** Optimistix
-**Collaborators:** Optimistix
+**Rank:** 5
 **Votes:** 24
 
 ---
