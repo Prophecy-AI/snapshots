@@ -1,8 +1,7 @@
 # 4th Place Solution - Ridge Ensemble of 12 Models
 
-**Rank:** 4
 **Author:** AngelosMar
-**Collaborators:** AngelosMar
+**Rank:** 4
 **Votes:** 14
 
 ---
