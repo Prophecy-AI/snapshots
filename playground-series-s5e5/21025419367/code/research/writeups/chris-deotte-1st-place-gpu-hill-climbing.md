@@ -1,8 +1,7 @@
 # 1st Place - GPU Hill Climbing!
 
-**Rank:** 1
 **Author:** Chris Deotte
-**Collaborators:** Chris Deotte
+**Rank:** 1
 **Votes:** 153
 
 ---
