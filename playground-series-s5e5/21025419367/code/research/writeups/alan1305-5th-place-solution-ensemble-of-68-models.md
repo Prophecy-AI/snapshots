@@ -1,8 +1,7 @@
 # 5th Place Solution: Ensemble of 68 models
 
-**Rank:** 5
 **Author:** Alan1305
-**Collaborators:** Alan1305
+**Rank:** 5
 **Votes:** 10
 
 ---
