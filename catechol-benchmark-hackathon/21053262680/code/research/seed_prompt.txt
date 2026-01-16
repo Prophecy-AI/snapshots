@@ -1,129 +1,164 @@
 ## Current Status
 - Best CV score: 0.0083 from exp_030 (GP+MLP+LGBM ensemble)
-- Best LB score: 0.0877 from exp_030
-- Target: 0.0347 | Gap to target: 0.0530 (152.8%)
-- Experiments: 80 | Submissions: 21 (5 remaining)
+- Best LB score: 0.0877 (exp_030)
+- Target: 0.0347 | Gap to target: 152.8%
 
 ## CV-LB Relationship Analysis (CRITICAL)
 - Linear fit: LB = 4.31 * CV + 0.0525 (R² = 0.95)
 - Intercept interpretation: Even at CV=0, expected LB is 0.0525
-- Are all approaches on the same line? **YES - ALL 80 experiments fall on the same line**
-- Required CV for target: (0.0347 - 0.0525) / 4.31 = -0.0041 (IMPOSSIBLE)
-
-**CRITICAL INSIGHT**: The intercept (0.0525) is HIGHER than the target (0.0347). This means:
-- No amount of CV improvement can reach the target with current approaches
-- We need approaches that CHANGE THE CV-LB RELATIONSHIP, not just improve CV
-- The intercept represents STRUCTURAL DISTRIBUTION SHIFT
+- Are all approaches on the same line? **YES - ALL 12 submissions fall on this line**
+- **CRITICAL: Intercept (0.0525) > Target (0.0347)**
+- Required CV for target: (0.0347 - 0.0525) / 4.31 = -0.0041 (IMPOSSIBLE!)
 
 ## Response to Evaluator
-
-**Technical verdict was TRUSTWORTHY.** The GroupKFold(5) experiment was correctly implemented.
-
-**CRITICAL FINDING**: The submission FAILED because GroupKFold(5) produces only 5 folds, but the competition evaluation expects Leave-One-Out structure (24 folds for single solvent, 13 folds for full data). The "mixall" kernel approach is INCOMPATIBLE with this competition's evaluation.
-
-**Evaluator's top priority**: Submit GroupKFold(5) to test CV-LB relationship. **CANNOT DO** - the submission format is incompatible.
-
-**Key concerns raised**: 
-1. GroupKFold(5) might have different CV-LB relationship → **MOOT** - can't submit
-2. "ens-model" kernel techniques not fully replicated → **AGREE** - should try this
+- Technical verdict was TRUSTWORTHY. The ens-model replica was correctly implemented.
+- Evaluator's top priority: Implement a PROPER GNN or submit GroupKFold(5) to test CV-LB relationship.
+- Key concerns raised: (1) All tabular approaches fall on same CV-LB line, (2) GNN/ChemBERTa attempts performed WORSE than tabular.
+- **I AGREE with the evaluator's assessment.** The intercept problem is STRUCTURAL and cannot be fixed by model tuning.
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop80_analysis.ipynb` for failure diagnosis
+- Reference notebooks: See `exploration/evolver_loop81_analysis.ipynb` for CV-LB analysis
 - Key patterns:
-  1. All 80 experiments fall on same CV-LB line (LB = 4.31*CV + 0.0525)
-  2. The intercept (0.0525) > target (0.0347) makes target IMPOSSIBLE with current approaches
-  3. GroupKFold(5) is INCOMPATIBLE with competition evaluation
-  4. Must use Leave-One-Out validation (24 folds single, 13 folds full)
+  - All 81 experiments fall on the same CV-LB line (R²=0.95)
+  - GNN attempts (CV=0.0256, 0.0196) performed 3-6x WORSE than tabular (CV=0.0083)
+  - ChemBERTa attempt (CV=0.0147) also worse than tabular
+  - The benchmark paper achieved MSE 0.0039 with GNN - our implementations have issues
 
-## Recommended Approaches
+## MANDATORY PIVOT: EXTRAPOLATION DETECTION
 
-### PRIORITY 1: Implement "ens-model" Kernel Feature Engineering (HIGH IMPACT)
-The "ens-model" kernel has sophisticated techniques we haven't fully replicated:
+Since all tabular approaches fall on the same CV-LB line with intercept > target, we MUST implement approaches that REDUCE THE INTERCEPT, not just improve CV.
 
-```python
-# 1. Combine ALL feature sources with priority-based filtering
-sources = ["spange_descriptors", "acs_pca_descriptors", "drfps_catechol", "fragprints", "smiles"]
+### Priority 1: Extrapolation Detection + Conservative Predictions
 
-# 2. Filter correlated features (threshold=0.90)
-# Priority: spange > acs > drfps > frag > smiles
-# When two features are correlated, keep the higher priority one
+**Hypothesis**: The high intercept (0.0525) represents extrapolation error when predicting for unseen solvents. By detecting when we're extrapolating and blending toward conservative predictions, we can reduce this error.
 
-# 3. Add numeric features
-# T_inv = 1/T, T_x_RT = T*RT, RT_log = log(RT), RT_scaled = RT/mean(RT)
-
-# 4. Use CatBoost + XGBoost ensemble with task-specific weights
-# Single: CatBoost=7, XGBoost=6 (normalized: 0.538, 0.462)
-# Full: CatBoost=1, XGBoost=2 (normalized: 0.333, 0.667)
-
-# 5. Output normalization
-# Clip to [0, ∞), renormalize so predictions sum to 1
-```
-
-**Why this might help**: The feature engineering and output normalization might change the CV-LB relationship by:
-- Better capturing solvent chemistry through combined features
-- Enforcing domain constraints (yields must be non-negative and sum to 1)
-- Task-specific ensemble weights might better handle distribution shift
-
-### PRIORITY 2: Extrapolation Detection + Conservative Predictions
-Since the problem is DISTRIBUTION SHIFT (predicting for unseen solvents), add features that detect extrapolation:
-
+**Implementation**:
 ```python
 from sklearn.neighbors import NearestNeighbors
+import numpy as np
 
-# Compute distance to nearest training solvents
-nn = NearestNeighbors(n_neighbors=5).fit(train_solvent_features)
-distances, _ = nn.kneighbors(test_solvent_features)
-extrapolation_score = distances.mean(axis=1)
-
-# When extrapolating, blend toward training mean
-weight = np.clip(extrapolation_score / threshold, 0, 1)
-final_pred = (1 - weight) * model_pred + weight * train_mean
+class ExtrapolationAwareModel:
+    def __init__(self, base_model, n_neighbors=5, blend_threshold=0.5):
+        self.base_model = base_model
+        self.n_neighbors = n_neighbors
+        self.blend_threshold = blend_threshold
+        self.nn = None
+        self.train_mean = None
+        
+    def train_model(self, train_X, train_Y):
+        # Train base model
+        self.base_model.train_model(train_X, train_Y)
+        
+        # Fit nearest neighbors on training features
+        X_features = self.featurize(train_X)
+        self.nn = NearestNeighbors(n_neighbors=self.n_neighbors)
+        self.nn.fit(X_features)
+        
+        # Store training mean for blending
+        self.train_mean = train_Y.mean().values
+        
+    def predict(self, test_X):
+        # Get base model predictions
+        base_pred = self.base_model.predict(test_X)
+        
+        # Compute extrapolation score (distance to training distribution)
+        X_features = self.featurize(test_X)
+        distances, _ = self.nn.kneighbors(X_features)
+        extrapolation_score = distances.mean(axis=1)
+        
+        # Normalize extrapolation score
+        extrapolation_score = extrapolation_score / extrapolation_score.max()
+        
+        # Blend toward mean when extrapolating
+        blend_weight = np.clip(extrapolation_score / self.blend_threshold, 0, 1)
+        blend_weight = blend_weight.reshape(-1, 1)
+        
+        final_pred = (1 - blend_weight) * base_pred + blend_weight * self.train_mean
+        
+        return final_pred
 ```
 
-**Why this might help**: Reduces extreme predictions for unseen solvents, potentially lowering the intercept.
+**Why this might work**:
+- The intercept represents error when predicting for solvents far from training distribution
+- By detecting extrapolation and blending toward mean, we reduce extreme predictions
+- This could REDUCE THE INTERCEPT without changing the slope
 
-### PRIORITY 3: Pseudo-labeling with High-Confidence Predictions
-Use confident predictions on test-like samples to augment training:
+### Priority 2: Similarity-Weighted Predictions
 
+**Hypothesis**: Predictions should be weighted by similarity to training solvents.
+
+**Implementation**:
 ```python
-# 1. Train initial model
-# 2. Make predictions on all data
-# 3. Identify high-confidence predictions (low variance across ensemble)
-# 4. Add these to training data with pseudo-labels
-# 5. Retrain model
+class SimilarityWeightedModel:
+    def __init__(self, base_model, similarity_threshold=0.3):
+        self.base_model = base_model
+        self.similarity_threshold = similarity_threshold
+        
+    def train_model(self, train_X, train_Y):
+        self.base_model.train_model(train_X, train_Y)
+        # Store training solvent features for similarity computation
+        self.train_features = self.featurize(train_X)
+        self.train_Y = train_Y.values
+        
+    def predict(self, test_X):
+        base_pred = self.base_model.predict(test_X)
+        test_features = self.featurize(test_X)
+        
+        # Compute similarity to each training sample
+        # Use cosine similarity or Tanimoto similarity for fingerprints
+        from sklearn.metrics.pairwise import cosine_similarity
+        similarities = cosine_similarity(test_features, self.train_features)
+        
+        # For each test sample, compute weighted average of training targets
+        # weighted by similarity
+        max_sim = similarities.max(axis=1)
+        
+        # If max similarity is low, blend toward training mean
+        blend_weight = np.clip((self.similarity_threshold - max_sim) / self.similarity_threshold, 0, 1)
+        blend_weight = blend_weight.reshape(-1, 1)
+        
+        train_mean = self.train_Y.mean(axis=0)
+        final_pred = (1 - blend_weight) * base_pred + blend_weight * train_mean
+        
+        return final_pred
 ```
 
-### PRIORITY 4: Adversarial Validation Features
-Add features that distinguish train/test distributions:
+### Priority 3: Submit Best Pending Experiment
 
-```python
-# Train a classifier to distinguish train vs test solvents
-# Use the classifier's probability as a feature
-# This helps the model know when it's extrapolating
-```
+**Action**: Submit exp_049 or exp_053 (CV=0.0081) to verify CV-LB relationship.
+- Expected LB: 4.31 * 0.0081 + 0.0525 = 0.0874
+- If LB ≈ 0.0874, confirms we're on the same line
+- If LB < 0.085, there might be hope with this approach
 
 ## What NOT to Try
-- ❌ GroupKFold(5) - INCOMPATIBLE with competition evaluation
-- ❌ More MLP/LGBM/XGB variants without feature changes - all fall on same CV-LB line
-- ❌ Multi-seed ensembles - too far from target (152.8% gap)
-- ❌ Hyperparameter tuning - won't change the intercept
+- ❌ More MLP/LightGBM/XGBoost/CatBoost variants - all fall on same CV-LB line
+- ❌ More feature engineering for tabular models - doesn't change the intercept
+- ❌ Multi-seed ensembles - we're 152% from target, not 1-2%
+- ❌ Hyperparameter tuning - doesn't change the CV-LB relationship
 
 ## Validation Notes
-- MUST use Leave-One-Out validation (24 folds single, 13 folds full)
-- Submission must have correct fold structure or evaluation will fail
-- Track both CV and expected LB (using the linear fit) to monitor progress
-- If new approach gives DIFFERENT CV-LB relationship, that's a breakthrough!
+- Use Leave-One-Out validation (24 folds for single, 13 folds for full)
+- GroupKFold(5) is INCOMPATIBLE with competition evaluation
+- Track BOTH CV score AND expected LB based on the line
+- **SUCCESS CRITERION**: LB improves even if CV stays same or gets slightly worse (reduced intercept)
 
-## Implementation Checklist
-1. [ ] Implement "ens-model" feature engineering (combine all sources, priority filtering)
-2. [ ] Add numeric features (T_inv, T_x_RT, RT_log, RT_scaled)
-3. [ ] Use CatBoost + XGBoost with task-specific weights
-4. [ ] Add output normalization (clip + renormalize)
-5. [ ] VERIFY submission cells use correct model class
-6. [ ] VERIFY submission has 24 folds for single, 13 folds for full
+## Key Insight from Research
+From the web search on extrapolation detection:
+1. **Quantify extrapolation risk**: Compute distance to training cloud in descriptor space
+2. **Apply extrapolation gating**: If distance exceeds threshold, blend toward conservative prediction
+3. **Use QM-enhanced models**: Quantum-mechanical descriptors help extrapolation (we don't have these)
+4. **GNN aggregation matters**: Sum/Norm aggregation better for additive properties, Mean/Attention for non-additive
 
-## Key Insight
-The target IS reachable - the benchmark achieved MSE 0.0039. But we need to:
-1. Change the CV-LB RELATIONSHIP, not just improve CV
-2. Reduce the INTERCEPT (0.0525), not just the slope
-3. Try approaches that handle DISTRIBUTION SHIFT to unseen solvents
+## Experiment Structure
+```
+experiments/081_extrapolation_detection/
+├── extrapolation_detection.ipynb
+└── (submission generated)
+```
+
+The notebook MUST:
+1. Implement extrapolation detection using nearest neighbors
+2. Blend predictions toward mean when extrapolation detected
+3. Use the best base model (GP+MLP+LGBM ensemble from exp_030)
+4. Verify submission cells use the SAME model class as CV
+5. Track both CV and expected LB based on the line
