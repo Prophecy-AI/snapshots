@@ -34,68 +34,69 @@ DATA_PATH = '/home/data'
 # Load data
 full_data = pd.read_csv(f'{DATA_PATH}/catechol_full_data_yields.csv')
 single_data = pd.read_csv(f'{DATA_PATH}/catechol_single_solvent_yields.csv')
-spange = pd.read_csv(f'{DATA_PATH}/spange_descriptors_lookup.csv', index_col=0)
-drfp = pd.read_csv(f'{DATA_PATH}/drfps_catechol_lookup.csv', index_col=0)
-acs_pca = pd.read_csv(f'{DATA_PATH}/acs_pca_descriptors_lookup.csv', index_col=0)
+spange = pd.read_csv(f'{DATA_PATH}/spange_descriptors_lookup.csv')
+drfp = pd.read_csv(f'{DATA_PATH}/drfps_catechol_lookup.csv')
+acs_pca = pd.read_csv(f'{DATA_PATH}/acs_pca_descriptors_lookup.csv')
 
 print(f"Full data: {full_data.shape}")
 print(f"Single solvent data: {single_data.shape}")
 
+# Rename solvent column for consistency
+spange = spange.rename(columns={'SOLVENT NAME': 'Solvent'})
+drfp = drfp.rename(columns={'SOLVENT NAME': 'Solvent'})
+acs_pca = acs_pca.rename(columns={'SOLVENT NAME': 'Solvent'})
+
 # Filter DRFP to high-variance columns (CRITICAL FIX!)
-drfp_variance = drfp.var()
+drfp_feature_cols = [c for c in drfp.columns if c != 'Solvent']
+drfp_variance = drfp[drfp_feature_cols].var()
 nonzero_variance_cols = drfp_variance[drfp_variance > 0].index.tolist()
-drfp_filtered = drfp[nonzero_variance_cols]
+drfp_filtered_cols = nonzero_variance_cols
 
 print(f"Spange: {spange.shape}")
-print(f"DRFP filtered: {drfp_filtered.shape} (from {drfp.shape[1]} original)")
+print(f"DRFP filtered: {len(drfp_filtered_cols)} features (from {len(drfp_feature_cols)} original)")
 print(f"ACS PCA: {acs_pca.shape}")
+
+# Get column names
+spange_cols = [c for c in spange.columns if c != 'Solvent']
+acs_cols = [c for c in acs_pca.columns if c != 'Solvent']
 
 # Prepare single solvent data
 single_data['Solvent'] = single_data['SOLVENT NAME']
 
-# Merge features
-spange_cols = spange.columns.tolist()
-drfp_cols = drfp_filtered.columns.tolist()
-acs_cols = acs_pca.columns.tolist()
-
-# Reset index for merging
-spange_reset = spange.reset_index().rename(columns={'index': 'Solvent'})
-drfp_reset = drfp_filtered.reset_index().rename(columns={'index': 'Solvent'})
-acs_reset = acs_pca.reset_index().rename(columns={'index': 'Solvent'})
-
-single_merged = single_data.merge(spange_reset, on='Solvent', how='left')
-single_merged = single_merged.merge(drfp_reset, on='Solvent', how='left')
-single_merged = single_merged.merge(acs_reset, on='Solvent', how='left')
+single_merged = single_data.merge(spange, on='Solvent', how='left')
+single_merged = single_merged.merge(drfp[['Solvent'] + drfp_filtered_cols], on='Solvent', how='left')
+single_merged = single_merged.merge(acs_pca, on='Solvent', how='left')
 
 # Add Arrhenius features
 single_merged['inv_temp'] = 1.0 / (single_merged['Temperature'] + 273.15)
 single_merged['log_time'] = np.log1p(single_merged['Residence Time'])
 
-feature_cols = spange_cols + drfp_cols + acs_cols + ['inv_temp', 'log_time']
+feature_cols = spange_cols + drfp_filtered_cols + acs_cols + ['inv_temp', 'log_time']
 X_single = single_merged[feature_cols].values
 Y_single = single_merged[['SM', 'Product 2', 'Product 3']].values
 
 print(f"\nSingle solvent features: {X_single.shape}")
-print(f"Number of features: {len(feature_cols)} (13 Spange + {len(drfp_cols)} DRFP + {len(acs_cols)} ACS + 2 Arrhenius)")
+print(f"Number of features: {len(feature_cols)} (13 Spange + {len(drfp_filtered_cols)} DRFP + {len(acs_cols)} ACS + 2 Arrhenius)")
 
 # Prepare mixture data
 full_data_mix = full_data[full_data['SolventB%'] > 0].copy()
 full_data_mix['Solvent'] = full_data_mix['SOLVENT A NAME'] + '.' + full_data_mix['SOLVENT B NAME']
 
 # Get features for solvent A and B
-spange_a = spange_reset.copy()
+spange_a = spange.copy()
 spange_a.columns = ['SOLVENT A NAME'] + [f'{c}_A' for c in spange_cols]
-spange_b = spange_reset.copy()
+spange_b = spange.copy()
 spange_b.columns = ['SOLVENT B NAME'] + [f'{c}_B' for c in spange_cols]
 
-drfp_a = drfp_reset.copy()
-drfp_a.columns = ['SOLVENT A NAME'] + [f'{c}_A' for c in drfp_cols]
-drfp_b = drfp_reset.copy()
-drfp_b.columns = ['SOLVENT B NAME'] + [f'{c}_B' for c in drfp_cols]
+drfp_for_merge = drfp[['Solvent'] + drfp_filtered_cols]
+drfp_a = drfp_for_merge.copy()
+drfp_a.columns = ['SOLVENT A NAME'] + [f'{c}_A' for c in drfp_filtered_cols]
+drfp_b = drfp_for_merge.copy()
+drfp_b.columns = ['SOLVENT B NAME'] + [f'{c}_B' for c in drfp_filtered_cols]
 
-acs_a = acs_reset.copy()
+acs_a = acs_pca.copy()
 acs_a.columns = ['SOLVENT A NAME'] + [f'{c}_A' for c in acs_cols]
-acs_b = acs_reset.copy()
+acs_b = acs_pca.copy()
 acs_b.columns = ['SOLVENT B NAME'] + [f'{c}_B' for c in acs_cols]
 
 mix_merged = full_data_mix.merge(spange_a, on='SOLVENT A NAME', how='left')
@@ -112,7 +113,7 @@ ratio_a = 1.0 - ratio_b
 for col in spange_cols:
     mix_merged[col] = ratio_a * mix_merged[f'{col}_A'].values + ratio_b * mix_merged[f'{col}_B'].values
 
-for col in drfp_cols:
+for col in drfp_filtered_cols:
     mix_merged[col] = ratio_a * mix_merged[f'{col}_A'].values + ratio_b * mix_merged[f'{col}_B'].values
 
 for col in acs_cols:
