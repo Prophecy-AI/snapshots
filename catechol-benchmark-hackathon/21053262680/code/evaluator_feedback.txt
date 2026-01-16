@@ -1,10 +1,10 @@
 ## What I Understood
 
-The junior researcher completed two experiments in this cycle:
-1. **exp_108**: Chemical Similarity-Based Extrapolation Detection - implemented Tanimoto similarity on Morgan fingerprints to detect when predicting for solvents very different from training. When similarity < threshold, blends predictions toward training mean. Achieved CV=0.0092 (marginal 0.25% improvement over baseline 0.009223).
-2. **exp_109**: EnsembleModel with CORRECT Submission Format - adapted the ens-model kernel (CatBoost + XGBoost) with the correct submission format. Achieved CV=0.011988.
+The junior researcher attempted to fix a critical submission format issue while preserving the chemical similarity-based extrapolation detection approach. The goal was to combine:
+1. The SimilarityAwareModel from exp_108 (CV=0.0092) which uses Tanimoto similarity on Morgan fingerprints
+2. The correct submission format from exp_109 (columns: id, task, fold, row, target_1, target_2, target_3)
 
-The researcher correctly identified the CV-LB relationship problem (LB = 4.29 × CV + 0.0528) and attempted to address it with chemical similarity-based conservative predictions. However, the submission format issue from exp_108 was fixed in exp_109, but exp_109 uses a different model (EnsembleModel) rather than the SimilarityAwareModel.
+The hypothesis was that chemical similarity-based conservative predictions could change the CV-LB relationship (currently LB ≈ 4.29 × CV + 0.053).
 
 ---
 
@@ -20,130 +20,130 @@ The researcher correctly identified the CV-LB relationship problem (LB = 4.29 ×
 - Similarity computed only to training solvents (not test)
 - Blending uses training mean (not test data)
 
-**Score Integrity**: VERIFIED ✓
-- exp_108: CV=0.0092 (from metrics.json)
-- exp_109: CV=0.011988 (from metrics.json)
-- Both scores are consistent with previous experiments
+**Score Integrity**: VERIFIED but CONCERNING
+- exp_110 (SimilarityAwareModel with correct format): CV=0.012912
+- exp_108 (SimilarityAwareModel with wrong format): CV=0.0092
+- **CV DEGRADED by 40%** (0.0092 → 0.012912)
 
-**Code Quality**: MIXED
-- exp_108: Good implementation of chemical similarity, BUT submission format is WRONG (uses DataFrame with test_Y.columns instead of template format)
-- exp_109: Correct submission format, but uses different model (EnsembleModel instead of SimilarityAwareModel)
+**Code Quality**: CRITICAL BUG IDENTIFIED ⚠️
 
-**Submission Format Check**:
-- Current /home/submission/submission.csv: ✅ CORRECT FORMAT (from exp_109)
-- Columns: ['id', 'task', 'fold', 'row', 'target_1', 'target_2', 'target_3']
-- Shape: (1883, 7)
-- This submission is from exp_109 (EnsembleModel), NOT exp_108 (SimilarityAwareModel)
+**Verdict: CONCERNS - CV degradation due to featurization change**
 
-**Verdict: TRUSTWORTHY CV, BUT MODEL MISMATCH**
+---
 
-The current submission uses EnsembleModel (CV=0.011988), not the SimilarityAwareModel (CV=0.0092) that was the focus of the experiment. This is a significant issue because:
-1. The chemical similarity approach was the hypothesis being tested
-2. The submission doesn't test that hypothesis
-3. The EnsembleModel has worse CV (0.011988 vs 0.0092)
+## CRITICAL FINDING: Featurization Mismatch
+
+I identified the root cause of the CV degradation:
+
+### exp_108 (CV=0.0092) - Mixture Featurization:
+```python
+# Uses weighted average - physically meaningful
+A = self.featurizer.loc[X["SOLVENT A NAME"]].values
+B = self.featurizer.loc[X["SOLVENT B NAME"]].values
+frac_B = X["SolventB%"].values.reshape(-1, 1)
+frac_A = 1 - frac_B
+mixed = A * frac_A + B * frac_B  # ← WEIGHTED AVERAGE
+X_out = np.concatenate([X_numeric.values, mixed], axis=1)
+```
+
+### exp_110 (CV=0.012912) - Mixture Featurization:
+```python
+# Concatenates features - loses physical meaning
+X_solvent_A = self.featurizer.loc[X["SOLVENT A NAME"]].values
+X_solvent_B = self.featurizer.loc[X["SOLVENT B NAME"]].values
+X_solvent_B_pct = X["SolventB%"].values.reshape(-1, 1)
+X_out = np.concatenate([X_numeric.values, X_solvent_A, X_solvent_B, X_solvent_B_pct], axis=1)  # ← CONCATENATION
+```
+
+**Impact**: The weighted average approach is more physically meaningful (solvent properties blend linearly with composition) and performs significantly better. The concatenation approach doubles the feature dimension and loses this physical insight.
 
 ---
 
 ## Strategic Assessment
 
-### CV-LB Relationship Analysis (CRITICAL)
+### CV-LB Relationship Analysis
 
-Based on 12 valid submissions (excluding exp_073 outlier):
+Based on historical submissions:
+- **Linear fit**: LB ≈ 4.29 × CV + 0.0528
+- **R-squared**: ~0.95 (very strong linear relationship)
+- **Intercept**: 0.0528 (HIGHER than target 0.0347)
+- **Best LB achieved**: 0.0877 (exp_030, CV=0.0083)
 
-| Metric | Value |
-|--------|-------|
-| Linear fit | LB = 4.29 × CV + 0.0528 |
-| R-squared | 0.9523 (very strong linear relationship) |
-| Intercept | 0.0528 |
-| Target LB | 0.0347 |
-| Best LB achieved | 0.0877 (exp_030, CV=0.0083) |
-| Gap to target | 152.8% |
+**Critical Insight**: The intercept (0.0528) exceeds the target (0.0347). This means:
+- Even with CV=0, expected LB would be 0.0528
+- The target is mathematically unreachable with approaches on this line
+- We need approaches that CHANGE the CV-LB relationship
 
-**⚠️ CRITICAL INSIGHT**: The intercept (0.0528) is HIGHER than the target (0.0347). This means:
-- Even with CV=0, the expected LB would be 0.0528
-- The target is mathematically unreachable with approaches that follow this line
-- We need approaches that CHANGE the CV-LB relationship, not just improve CV
-
-### Approach Fit: CORRECT DIRECTION, BUT EXECUTION INCOMPLETE
+### Approach Fit: CORRECT DIRECTION, EXECUTION FLAWED
 
 The chemical similarity approach is the RIGHT direction because:
-1. It addresses the distribution shift problem directly
-2. It's a fundamentally different strategy from model tuning
+1. It addresses distribution shift directly
+2. It's fundamentally different from model tuning
 3. It could potentially change the CV-LB intercept
 
-However, the execution is incomplete:
-1. The SimilarityAwareModel was never submitted to LB
-2. We don't know if it changes the CV-LB relationship
-3. The current submission uses a different model
+However, the execution introduced a regression:
+- The correct format was achieved
+- But the featurization was inadvertently changed
+- This resulted in 40% worse CV
 
 ### Effort Allocation: MISALLOCATED
 
-The researcher spent time on:
-1. ✓ Implementing chemical similarity approach (good)
-2. ✓ Testing multiple configurations (good)
-3. ✓ Fixing submission format (good)
-4. ✗ BUT the fixed submission uses a DIFFERENT model
-5. ✗ The SimilarityAwareModel was never properly submitted
+The researcher correctly identified the format issue but:
+1. ✓ Fixed the submission format
+2. ✗ Inadvertently changed the featurization
+3. ✗ Did not verify CV matched the original experiment
+4. ✗ The submission now uses a worse model
 
 ### Blind Spots
 
-**1. Model Mismatch in Submission**
-The current submission uses EnsembleModel (CV=0.011988), not SimilarityAwareModel (CV=0.0092). This means:
-- We cannot test if chemical similarity changes the CV-LB relationship
-- We're submitting a worse model (by CV)
-- The hypothesis remains untested
+**1. Featurization Verification**
+The researcher should have verified that the featurization matched exp_108 before running the full experiment.
 
-**2. Conservative Parameters May Not Be Enough**
-The best configuration (st=0.3, bw=0.2) is very conservative:
-- Only blends when similarity < 30%
-- Only shifts 20% toward training mean
-- Most test solvents have at least one moderately similar training solvent
+**2. CV Comparison**
+The CV of 0.012912 should have been flagged as a regression from 0.0092.
 
-**3. Many Failed Submissions Not Investigated**
-Looking at submission history:
-- exp_049 through exp_063: Many failed with empty LB scores
-- This pattern suggests systematic format issues that were only recently fixed
+**3. Submission Not Yet Made**
+Despite having 4 submissions remaining, no submission has been made to test the chemical similarity hypothesis on LB.
 
 ---
 
 ## What's Working
 
-1. **Correct identification of the problem**: The researcher correctly identified the CV-LB relationship and the need to change the intercept
-2. **Chemical similarity approach**: Using Tanimoto similarity on Morgan fingerprints is a principled, domain-specific approach
-3. **Systematic testing**: Testing multiple configurations (5 combinations of threshold and blend weight)
-4. **Submission format finally fixed**: exp_109 has the correct format
-5. **Marginal CV improvement**: The SimilarityAwareModel achieved CV=0.0092 vs baseline 0.009223
+1. **Correct identification of the problem**: The CV-LB relationship and need to change the intercept
+2. **Chemical similarity approach**: Using Tanimoto similarity on Morgan fingerprints is principled
+3. **Submission format fixed**: The format is now correct
+4. **Systematic testing**: Multiple configurations tested in exp_108
 
 ---
 
 ## Key Concerns
 
-### CRITICAL: Model Mismatch in Current Submission
+### CRITICAL: Featurization Regression
 
-**Observation**: The current submission (/home/submission/submission.csv) is from exp_109 (EnsembleModel, CV=0.011988), NOT from exp_108 (SimilarityAwareModel, CV=0.0092).
+**Observation**: The mixture featurization in exp_110 uses concatenation instead of weighted averaging.
 
 **Why it matters:**
-- The chemical similarity hypothesis remains UNTESTED on LB
-- We're submitting a model with WORSE CV (0.011988 vs 0.0092)
+- CV degraded from 0.0092 to 0.012912 (40% worse)
+- The current submission uses the worse model
+- The chemical similarity hypothesis remains untested with the correct featurization
+
+**Suggestion:**
+Create a new experiment that:
+1. Uses the EXACT featurization from exp_108 (weighted average for mixtures)
+2. Uses the correct submission format from exp_110
+3. Verifies CV matches exp_108 before generating submission
+
+### HIGH: Need to Submit to Test Hypothesis
+
+**Observation**: 4 submissions remain but no submission has been made to test chemical similarity.
+
+**Why it matters:**
 - We cannot learn whether chemical similarity changes the CV-LB relationship
-- This is a wasted opportunity
+- Each submission is valuable data about the CV-LB relationship
+- Time is being wasted on fixing issues instead of testing hypotheses
 
 **Suggestion:**
-Create a new experiment that combines:
-1. The SimilarityAwareModel from exp_108
-2. The correct submission format from exp_109
-
-### HIGH: Need to Test Chemical Similarity on LB
-
-**Observation**: The SimilarityAwareModel achieved CV=0.0092, which is better than the EnsembleModel's CV=0.011988.
-
-**Why it matters:**
-- If LB follows the same line: LB ≈ 4.29 × 0.0092 + 0.0528 ≈ 0.0923
-- If LB is BETTER than expected: We've found a way to reduce the intercept
-- If LB is WORSE than expected: We learn that chemical similarity doesn't help
-
-**Suggestion:**
-Submit the SimilarityAwareModel with correct format to test the hypothesis.
+After fixing the featurization, submit immediately to test the hypothesis.
 
 ### MEDIUM: Consider More Aggressive Blending
 
@@ -163,59 +163,51 @@ After testing the current approach on LB, try more aggressive configurations:
 
 ## Top Priority for Next Experiment
 
-### IMMEDIATE: Submit SimilarityAwareModel with Correct Format
+### IMMEDIATE: Fix Featurization and Submit
 
-The most important thing is to test the chemical similarity hypothesis on LB. Create a new notebook that:
+Create a new notebook that:
 
-1. **Uses the SimilarityAwareModel class from exp_108**
-2. **Uses the correct submission format from exp_109**
-
-Here's the key change needed in the submission cells:
-
+1. **Copy the EXACT PrecomputedFeaturizerMixed from exp_108:**
 ```python
-########### DO NOT CHANGE ANYTHING IN THIS CELL OTHER THAN THE MODEL #################
-import tqdm
+class PrecomputedFeaturizerMixed(SmilesFeaturizer):
+    def __init__(self):
+        self.featurizer = build_solvent_feature_table()
+        dummy_num = pd.DataFrame([[0] * len(INPUT_LABELS_NUMERIC)], columns=INPUT_LABELS_NUMERIC)
+        numeric_dim = add_numeric_features(dummy_num).shape[1]
+        self.feats_dim = numeric_dim + self.featurizer.shape[1]  # SAME as single
 
-X, Y = load_data("single_solvent")
-split_generator = generate_leave_one_out_splits(X, Y)
-all_predictions = []
-
-for fold_idx, split in tqdm.tqdm(enumerate(split_generator)):
-    (train_X, train_Y), (test_X, test_Y) = split
-
-    # USE SimilarityAwareModel, NOT EnsembleModel
-    model = SimilarityAwareModel(data='single', similarity_threshold=0.3, blend_weight=0.2)
-    model.train_model(train_X, train_Y)
-    predictions = model.predict(test_X)
-
-    # CORRECT FORMAT - NOT DataFrame with test_Y.columns
-    predictions_np = predictions.detach().cpu().numpy()
-    for row_idx, row in enumerate(predictions_np):
-        all_predictions.append({
-            "task": 0,
-            "fold": fold_idx,
-            "row": row_idx,
-            "target_1": row[0],
-            "target_2": row[1],
-            "target_3": row[2]
-        })
-
-submission_single_solvent = pd.DataFrame(all_predictions)
+    def featurize(self, X):
+        X_numeric = add_numeric_features(X[INPUT_LABELS_NUMERIC].copy())
+        A = self.featurizer.loc[X["SOLVENT A NAME"]].values
+        B = self.featurizer.loc[X["SOLVENT B NAME"]].values
+        frac_B = X["SolventB%"].values.reshape(-1, 1)
+        frac_A = 1 - frac_B
+        mixed = A * frac_A + B * frac_B  # WEIGHTED AVERAGE
+        X_out = np.concatenate([X_numeric.values, mixed], axis=1)
+        return torch.tensor(X_out, dtype=torch.double)
 ```
 
-**Why this is critical:**
-- We have 4 submissions remaining today
-- The chemical similarity approach is a fundamentally different strategy
-- Even if LB is similar, we learn valuable information about the CV-LB relationship
-- If LB is better than expected (relative to CV), we've found a way to break the line
+2. **Use the correct submission format from exp_110:**
+```python
+for row_idx, row in enumerate(predictions_np):
+    all_predictions.append({
+        "task": 0,  # or 1 for full data
+        "fold": fold_idx,
+        "row": row_idx,
+        "target_1": row[0],
+        "target_2": row[1],
+        "target_3": row[2]
+    })
+```
 
-### ALTERNATIVE: If Chemical Similarity Doesn't Help LB
+3. **Verify CV matches exp_108 (~0.0092) before generating submission**
 
-If the fixed submission gives LB on the same line (LB ≈ 4.29 × 0.0092 + 0.0528 ≈ 0.0923), try:
+4. **Submit to LB immediately**
 
-1. **More aggressive blending**: st=0.5, bw=0.5
-2. **Blend toward Ridge predictions**: Use Ridge regression as fallback instead of training mean
-3. **Combine with GNN features**: Use GNN embeddings to detect extrapolation
+**Expected outcome:**
+- If LB ≈ 4.29 × 0.0092 + 0.0528 ≈ 0.092: Chemical similarity doesn't change the relationship
+- If LB < 0.092: We've found a way to reduce the intercept!
+- If LB > 0.092: Something else is wrong
 
 ---
 
@@ -223,30 +215,31 @@ If the fixed submission gives LB on the same line (LB ≈ 4.29 × 0.0092 + 0.052
 
 | Dimension | Assessment |
 |-----------|------------|
-| Technical Execution | ✅ TRUSTWORTHY CV |
-| Strategic Direction | ✅ CORRECT APPROACH |
-| Key Issue | ❌ MODEL MISMATCH - Current submission uses EnsembleModel, not SimilarityAwareModel |
-| Top Priority | **Submit SimilarityAwareModel with correct format to test hypothesis** |
+| Technical Execution | ⚠️ CONCERNS - Featurization changed, CV degraded |
+| Strategic Direction | ✅ CORRECT APPROACH - Chemical similarity is right direction |
+| Key Issue | ❌ FEATURIZATION MISMATCH - Weighted average → concatenation |
+| Top Priority | **Fix featurization to match exp_108, verify CV, then submit** |
 
 ## Confidence Levels
 
-- **Very High (99%)**: The current submission uses EnsembleModel (CV=0.011988), not SimilarityAwareModel (CV=0.0092)
-- **Very High (99%)**: The submission format is now correct
-- **High (90%)**: Chemical similarity is a reasonable proxy for extrapolation difficulty
-- **Medium (60%)**: More aggressive blending parameters might help LB even if they hurt CV
-- **Medium (50%)**: The chemical similarity approach will change the CV-LB relationship
+- **Very High (99%)**: The featurization changed between exp_108 and exp_110
+- **Very High (99%)**: This explains the CV degradation (0.0092 → 0.012912)
+- **High (90%)**: Fixing the featurization will restore CV to ~0.0092
+- **Medium (60%)**: Chemical similarity approach might change the CV-LB relationship
+- **Medium (50%)**: More aggressive blending might help LB even if it hurts CV
 
 ## THE TARGET IS REACHABLE
 
 The benchmark paper achieved MSE 0.0039. The current best LB is 0.0877. The target (0.0347) is between these values.
 
 **The key insight**: We need to find an approach that CHANGES the CV-LB relationship. The chemical similarity approach is a step in the right direction, but we MUST:
-1. **Submit the SimilarityAwareModel** with correct format to test the hypothesis
-2. **Analyze the LB result** to see if it changes the relationship
+1. **Fix the featurization** to restore CV to 0.0092
+2. **Submit to LB** to test if chemical similarity changes the relationship
 3. **Iterate** based on what we learn
 
 **IMMEDIATE ACTION:**
-1. Create a new notebook combining SimilarityAwareModel + correct submission format
-2. Submit to LB
-3. Analyze if the CV-LB relationship changes
-4. If not, try more aggressive parameters or different approaches
+1. Create new notebook with EXACT featurization from exp_108
+2. Use correct submission format from exp_110
+3. Verify CV ≈ 0.0092
+4. Submit to LB
+5. Analyze if the CV-LB relationship changes
