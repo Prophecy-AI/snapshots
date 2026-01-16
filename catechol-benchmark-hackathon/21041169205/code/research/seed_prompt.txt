@@ -35,41 +35,30 @@ Standard CV optimization CANNOT reach the target. We must change the CV-LB relat
 ### PRIORITY 1: Combine exp_030 (Best Model) with Extrapolation Detection
 **Rationale**: exp_030 has best CV (0.0083) and best LB (0.0877). Adding extrapolation detection on top may reduce the intercept without sacrificing CV too much.
 
-Implementation:
-```python
-class ExtrapolationAwareEnsemble(BaseModel):
-    def __init__(self, blend_threshold=1.0):
-        # Use GP+MLP+LGBM ensemble from exp_030
-        self.gp_model = GPWrapper(...)
-        self.mlp_model = MLPModel(...)
-        self.lgbm_model = LGBMModel(...)
-        
-        # Pre-computed outlier scores
-        self.outlier_scores = {
-            'HFIP': 4.57, 'Cyclohexane': 4.18, 'Water': 3.70,
-            'Ethylene Glycol': 3.69, 'TFE': 3.59, ...
-        }
-        self.mean_score = 2.24
-        self.std_score = 1.04
-        
-    def predict(self, X):
-        # Get ensemble predictions (same as exp_030)
-        gp_pred = self.gp_model.predict(X)
-        mlp_pred = self.mlp_model.predict(X)
-        lgbm_pred = self.lgbm_model.predict(X)
-        raw_pred = 0.15 * gp_pred + 0.55 * mlp_pred + 0.30 * lgbm_pred
-        
-        # Apply extrapolation detection
-        blend_weights = self.get_blend_weights(X)  # Based on outlier scores
-        mean_pred = self.train_Y.mean(axis=0)
-        blended = (1 - blend_weights) * raw_pred + blend_weights * mean_pred
-        return np.clip(blended, 0, 1)
+Implementation approach:
+1. Copy the GP+MLP+LGBM ensemble from exp_030
+2. Add pre-computed outlier scores for each solvent
+3. After getting ensemble predictions, apply blending toward mean for outlier solvents
+4. Use sigmoid output to ensure [0,1] range
+
+Key outlier solvents (z-score > 1.0):
+- HFIP: 4.57 (z=2.24)
+- Cyclohexane: 4.18 (z=1.86)
+- Water: 3.70 (z=1.40)
+- Ethylene Glycol: 3.69 (z=1.39)
+- TFE: 3.59 (z=1.29)
+
+Blend formula:
+```
+z_score = (outlier_score - 2.24) / 1.04
+blend_weight = clip((z_score - threshold) / 2.0, 0, 1)
+final_pred = (1 - blend_weight) * ensemble_pred + blend_weight * mean_pred
 ```
 
 ### PRIORITY 2: Try Different Blend Thresholds
-- blend_threshold=0.5: More aggressive blending (more solvents affected)
-- blend_threshold=1.0: Moderate blending (4 solvents affected)
-- blend_threshold=1.5: Less aggressive blending (fewer solvents affected)
+- blend_threshold=0.5: More aggressive blending
+- blend_threshold=1.0: Moderate blending (default)
+- blend_threshold=1.5: Less aggressive blending
 
 ### PRIORITY 3: Use GP Uncertainty for Extrapolation Detection
 Instead of distance-based outlier scores, use GP's uncertainty estimates:
@@ -83,16 +72,6 @@ conservative_pred = (1 - blend_weight) * mean + blend_weight * population_mean
 ### PRIORITY 4: 4-Model Ensemble (like mixall kernel)
 Add XGBoost and RandomForest to the ensemble:
 - MLP (40%), XGBoost (20%), RF (20%), LightGBM (20%)
-- Different models may extrapolate differently
-- More diversity may help on unseen solvents
-
-### PRIORITY 5: Mass Balance Constraint
-Yields should sum to ~1 (Product 2 + Product 3 + SM ≈ 1):
-```python
-# After prediction
-total = pred[:, 0] + pred[:, 1] + pred[:, 2]
-pred = pred / total.reshape(-1, 1)  # Normalize to sum to 1
-```
 
 ## What NOT to Try
 - ❌ Simple MLP without ensemble (already tried, CV worse)
@@ -105,7 +84,7 @@ pred = pred / total.reshape(-1, 1)  # Normalize to sum to 1
 - Use official Leave-One-Out CV (24 folds for single, 13 for full)
 - Ensure predictions are in [0, 1] range (use sigmoid or clip)
 - Follow exact template structure (last 3 cells unchanged)
-- CV will likely be worse with extrapolation detection, but LB may improve
+- CV will likely be slightly worse with extrapolation detection, but LB may improve
 
 ## Key Insight
 The target (0.0347) is BELOW the intercept (0.0520) of the CV-LB line. This means:
