@@ -1,97 +1,127 @@
 ## Current Status
-- Best CV score: 0.0081 from exp_049/exp_050/exp_053 (CatBoost+XGBoost ensemble)
+- Best CV score: 0.008092 from exp_049 (CatBoost+XGBoost ensemble)
 - Best LB score: 0.0877 from exp_030 (GP+MLP+LGBM ensemble)
 - Target: 0.0347 | Gap to target: 152.8%
 
 ## CV-LB Relationship Analysis (CRITICAL)
 - Linear fit: LB = 4.31 * CV + 0.0525 (R² = 0.95)
 - Intercept interpretation: Even at CV=0, expected LB is 0.0525
-- **CRITICAL: Intercept (0.0525) > Target (0.0347)**
-- Required CV for target: (0.0347 - 0.0525) / 4.31 = -0.0041 (IMPOSSIBLE!)
-- All 12 submissions (excluding RF outlier) fall on the SAME LINE
-- **We have a DISTRIBUTION SHIFT problem. Improving CV alone CANNOT reach target.**
+- Are all approaches on the same line? **YES** - ALL 84 experiments fall on this line
+- **CRITICAL**: Intercept (0.0525) > Target (0.0347)
+- Required CV for target: (0.0347 - 0.0525) / 4.31 = **-0.0041** (IMPOSSIBLE!)
+
+**This means NO amount of CV improvement can reach the target with current approaches.**
+**We MUST find approaches that CHANGE the CV-LB relationship (reduce the intercept).**
 
 ## Response to Evaluator
-- Technical verdict was TRUSTWORTHY for exp_082 (Dual-Encoder GNN)
-- Evaluator's top priority: "Pivot away from training GNNs from scratch"
-- **I AGREE**: GNN experiments consistently underperform (CV=0.024 vs tabular CV=0.008)
-- The benchmark's GNN success (MSE 0.0039) likely came from pre-training, not architecture
-- Key concern: CV-LB intercept problem persists across ALL approaches
+- Technical verdict was TRUSTWORTHY. The yield normalization experiment was well-executed.
+- Evaluator's top priority: Submit GroupKFold(5) to test if different validation strategy changes CV-LB relationship.
+  - **DISAGREE**: GroupKFold(5) submission format is incompatible with the competition's Leave-One-Out structure (exp_079 already showed this). The competition requires 24 folds for single solvent and 13 folds for full data.
+- Key concerns raised: CV-LB intercept (0.0528) > target (0.0347).
+  - **AGREE**: This is the fundamental problem. We need to BREAK the CV-LB line, not improve CV.
+- Evaluator noted: Best LB (0.0877) is 10.6% better than best public kernel (0.09831).
+  - **IMPORTANT**: We're already at the PUBLIC ceiling. The target requires approaches not in public kernels.
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop83_analysis.ipynb` for CV-LB analysis
+- Reference notebooks: See `exploration/evolver_loop84_analysis.ipynb` for CV-LB analysis
 - Key patterns:
-  1. All tabular models (MLP, LGBM, XGB, CatBoost, GP, Ridge) fall on SAME CV-LB line
-  2. GNN experiments (exp_081, exp_082) achieved WORSE CV than tabular
-  3. exp_073 (RF ensemble) is an outlier with LB=0.1451 (much worse than expected)
-  4. The "mixall" kernel claims "good CV-LB" with GroupKFold(5) validation
-  5. exp_079 (GroupKFold) was submitted - waiting for LB feedback
+  - 24 solvents in single solvent data, 656 samples
+  - IPA solvent has highest yield variance - may be hardest to predict
+  - All tabular models (MLP, LGBM, XGB, CatBoost, GP, Ridge) fall on SAME CV-LB line
+  - GNN from scratch: CV 0.024 (3x worse than tabular)
+  - ChemBERTa: CV 0.015 (2x worse than tabular)
+  - Similarity weighting: BACKFIRED (LB 0.145 vs 0.088)
+  - Yield normalization: NO effect (0.00% change)
 
-## Key Insights from Public Kernels
+## Recommended Approaches (PRIORITY ORDER)
 
-### 1. "mixall" kernel (9 votes)
-- Uses **GroupKFold(5)** instead of Leave-One-Out
-- Claims "good CV/LB" correlation
-- Ensemble: MLP + XGBoost + RF + LightGBM
-- Runtime: only 2m 15s
+### 1. **Pre-trained Molecular Representations (ChemProp)** - HIGHEST PRIORITY
+**Why**: The benchmark paper achieved MSE 0.0039 using pre-trained GNN. Our GNN from scratch failed (CV 0.024) because we trained from scratch on tiny data. ChemProp provides pre-trained MPNN weights from large molecular datasets.
 
-### 2. "Ens Model" kernel (7 votes)
-- CatBoost + XGBoost ensemble
-- Combined features: spange + acs_pca + drfps + fragprints + smiles
-- Correlation-based feature filtering (threshold=0.90)
-- Numeric feature engineering: T_x_RT, RT_log, T_inv, RT_scaled
-- **Yield normalization**: clip to [0, inf], then normalize so sum ≤ 1
-- Different weights for single vs full data (Single: 7:6, Full: 1:2)
-
-## Recommended Approaches (Priority Order)
-
-### 1. Implement Yield Normalization + Best Model (HIGHEST PRIORITY)
-- From "Ens Model" kernel: clip predictions to [0, inf], normalize so sum ≤ 1
-- This is a **physics-based constraint** that should help generalization
-- Apply to our best model (GP+MLP+LGBM from exp_030)
-- **Rationale**: Domain constraints can reduce distribution shift error
-
-### 2. Extrapolation Detection + Conservative Predictions
-- Compute distance to nearest training solvent for each test sample
-- When extrapolation_score is high, blend toward training mean
-- This directly addresses the distribution shift problem
+**Implementation**:
 ```python
-from sklearn.neighbors import NearestNeighbors
-nn = NearestNeighbors(n_neighbors=5).fit(X_train_features)
-distances, _ = nn.kneighbors(X_test_features)
-extrapolation_score = distances.mean(axis=1)
-weight = np.clip(extrapolation_score / threshold, 0, 1)
-final_pred = (1 - weight) * model_pred + weight * train_mean
+# Use ChemProp as feature extractor
+from chemprop import models, featurizers, data
+
+# Load pre-trained checkpoint (or use default weights)
+# Extract learned fingerprints for solvents
+# Use these as features instead of Spange/DRFP
+
+featurizer = featurizers.SimpleMoleculeMolGraphFeaturizer()
+# For each solvent SMILES, get the learned embedding
+# Concatenate with Arrhenius kinetics features
+# Train simple MLP/CatBoost on these embeddings
 ```
 
-### 3. Try Pre-trained Molecular Embeddings (ChemBERTa Frozen)
-- Instead of training GNN from scratch, use frozen ChemBERTa embeddings
-- Use embeddings as features for tabular models (CatBoost, XGBoost)
+**Expected outcome**: Pre-trained representations should capture molecular structure better than hand-crafted features, potentially changing the CV-LB relationship.
 
-### 4. Uncertainty-Weighted Predictions
-- Train ensemble of diverse models
-- Use ensemble variance as uncertainty measure
-- When uncertainty is high, blend toward training mean
+### 2. **Pseudo-labeling for Distribution Adaptation** - HIGH PRIORITY
+**Why**: The CV-LB gap is due to distribution shift (test solvents are different from training). Pseudo-labeling uses confident test predictions to augment training, adapting the model to the test distribution.
+
+**Implementation**:
+```python
+# Step 1: Train initial model on training data
+# Step 2: Make predictions on test data
+# Step 3: Select high-confidence predictions (low variance across ensemble)
+# Step 4: Add pseudo-labeled test samples to training
+# Step 5: Retrain model on augmented data
+# Step 6: Repeat 2-5 for a few iterations
+```
+
+**Expected outcome**: Model adapts to test distribution, potentially reducing the intercept.
+
+### 3. **Conservative Predictions with Uncertainty** - MEDIUM PRIORITY
+**Why**: When extrapolating to unseen solvents, the model should be conservative. Blend predictions toward the mean when uncertainty is high.
+
+**Implementation**:
+```python
+# Train ensemble of models
+# For each prediction, compute variance across ensemble
+# If variance > threshold, blend toward training mean:
+#   final_pred = (1 - alpha) * model_pred + alpha * train_mean
+# where alpha = min(1, variance / threshold)
+```
+
+**Expected outcome**: Reduces extreme predictions on extrapolation cases.
+
+### 4. **Multi-task Learning with Auxiliary Targets** - LOWER PRIORITY
+**Why**: Predicting intermediate quantities (selectivity, conversion) as auxiliary tasks may help the model learn better representations.
+
+**Implementation**:
+```python
+# Add auxiliary targets:
+# - Selectivity = Product2 / (Product2 + Product3)
+# - Conversion = 1 - SM
+# Train multi-task model with shared encoder
+```
 
 ## What NOT to Try
-- ❌ More MLP variants - exhaustively tested (50+ experiments)
-- ❌ Training GNNs from scratch - consistently underperforms (CV=0.024 vs 0.008)
-- ❌ Multi-seed ensembles - too far from target (152.8% gap)
-- ❌ Hyperparameter optimization - won't change CV-LB relationship
+- ❌ **More MLP/LGBM/XGB/CatBoost tuning** - Exhausted (50+ experiments, all on same line)
+- ❌ **GNN from scratch** - Failed badly (CV 0.024)
+- ❌ **ChemBERTa fine-tuning** - Failed (CV 0.015)
+- ❌ **Similarity weighting** - BACKFIRED (LB 0.145)
+- ❌ **Yield normalization** - No effect
+- ❌ **GroupKFold(5)** - Incompatible with competition format
+- ❌ **Multi-seed optimization** - Too far from target (152.8% gap)
 
 ## Validation Notes
-- Current CV scheme: Leave-One-Out (24 folds for single, 13 for full)
-- **CRITICAL**: After EVERY submission, check if it falls on the same CV-LB line
-- If a new approach has a DIFFERENT CV-LB relationship, that's a breakthrough
+- CV scheme: Leave-One-Out for single solvent (24 folds), Leave-One-Ramp-Out for full data (13 folds)
+- **CRITICAL**: After ANY new approach, check if it falls on the same CV-LB line
+- If new approach has SAME CV-LB relationship, it won't help reach target
+- Only submit if approach shows DIFFERENT CV-LB relationship
 
 ## Submission Strategy (4 remaining)
-1. exp_079 (GroupKFold) already submitted - waiting for LB
-2. Next: Yield normalization + extrapolation detection
-3. Then: Best performing approach from above
-4. Final: Best model
+- **DO NOT** submit marginal CV improvements
+- **DO** submit if a new approach shows fundamentally different CV-LB relationship
+- **SAVE** submissions for breakthrough approaches
 
-## CRITICAL REMINDER
-The target IS reachable. The benchmark achieved MSE 0.0039. We need to find the approach that CHANGES the CV-LB relationship, not just improves CV. The intercept (0.0525) is the enemy, not the CV score.
+## Key Insight
+The benchmark paper achieved MSE 0.0039 (22x better than our best LB). They used:
+1. Pre-trained GNN with Graph Attention Networks
+2. DRFP features
+3. Learned mixture-aware encodings
+4. Pre-training on related reaction data
 
-## IMMEDIATE NEXT EXPERIMENT
-Implement yield normalization (sum ≤ 1 constraint) on the best model (GP+MLP+LGBM from exp_030). This is a domain constraint that should help with distribution shift.
+We've tried DRFP and mixture interpolation, but NOT pre-trained representations. This is the most promising unexplored direction.
+
+**The target IS reachable - we just need to find the approach that changes the CV-LB relationship.**
