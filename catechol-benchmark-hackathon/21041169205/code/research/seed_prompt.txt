@@ -13,12 +13,12 @@
 
 ## Response to Evaluator
 - Technical verdict was TRUSTWORTHY. The exp_096 conservative blending experiment was sound but CV degraded 34%.
-- Evaluator's top priority: Refine conservative blending with GP uncertainty. I AGREE this is the right direction but we need a different approach.
+- Evaluator's top priority: Refine conservative blending with GP uncertainty and lower blend_strength. I AGREE this is the right direction.
 - Key concerns raised: blend_strength=0.3 too aggressive, k-NN distance not optimal. I AGREE - the implementation needs refinement.
-- However, with only 4 submissions remaining, we should also try approaches from TOP PUBLIC KERNELS that have proven LB scores.
+- The evaluator correctly identified that we need to REDUCE THE INTERCEPT, not just improve CV.
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop100_analysis.ipynb` for CV-LB analysis
+- Reference notebooks: See `exploration/evolver_loop101_analysis.ipynb` for CV-LB analysis
 - Key patterns:
   1. All model types (MLP, LGBM, XGB, CatBoost, GP) fall on the SAME CV-LB line
   2. The intercept (0.052) represents STRUCTURAL distribution shift to unseen solvents
@@ -38,6 +38,7 @@ Features used:
 - Combines ALL feature sources: spange + acs_pca + drfps + fragprints + smiles
 - Uses correlation-based feature filtering (threshold=0.90)
 - Adds numeric features: T_x_RT, RT_log, T_inv, RT_scaled
+- Clips predictions to [0, 1] and renormalizes
 
 ### 2. mixall kernel (lishellliang) - 9 votes
 Uses 4-model ensemble: MLP + XGBoost + RF + LightGBM with weighted averaging.
@@ -45,48 +46,88 @@ Claims "good CV/LB ratio" - may have different CV-LB relationship.
 
 ## Recommended Approaches
 
-### PRIORITY 1: Implement ens-model approach with task-specific weights
-**Rationale**: The ens-model kernel uses different weights for single vs full data. This is a KEY difference from our approach. The different weights may help with the distribution shift problem.
+### PRIORITY 1: Refined Conservative Blending with GP Uncertainty
+**Rationale**: The evaluator correctly identified that conservative blending is the right direction, but the implementation needs refinement.
+
+Key changes from exp_096:
+1. **Use GP uncertainty instead of k-NN distance** - GP already provides uncertainty estimates
+2. **Lower blend_strength to 0.1** (instead of 0.3) - less aggressive blending
+3. **Only blend for high-uncertainty samples** (top 20-30%) - preserve good predictions
+4. **Use global mean instead of training mean** - more stable conservative target
 
 ```python
-# Single solvent: CatBoost dominant
-if data == "single":
-    cat_weight = 7.0 / 13.0  # 0.538
-    xgb_weight = 6.0 / 13.0  # 0.462
-# Full data: XGBoost dominant  
-else:
-    cat_weight = 1.0 / 3.0   # 0.333
-    xgb_weight = 2.0 / 3.0   # 0.667
+class ConservativeEnsemble(BaseModel):
+    def __init__(self, blend_strength=0.1, uncertainty_threshold=0.7):
+        self.blend_strength = blend_strength
+        self.uncertainty_threshold = uncertainty_threshold
+        self.gp = GPModel()
+        self.mlp = MLPModel()
+        self.lgbm = LGBMModel()
+        
+    def predict(self, X):
+        # Get GP predictions with uncertainty
+        gp_pred, gp_std = self.gp.predict(X, return_std=True)
+        mlp_pred = self.mlp.predict(X)
+        lgbm_pred = self.lgbm.predict(X)
+        
+        # Base ensemble prediction
+        base_pred = 0.4 * gp_pred + 0.3 * mlp_pred + 0.3 * lgbm_pred
+        
+        # Normalize uncertainty to [0, 1]
+        uncertainty = gp_std / gp_std.max()
+        
+        # Only blend for high-uncertainty samples
+        blend_mask = uncertainty > self.uncertainty_threshold
+        blend_weight = np.where(blend_mask, 
+                                self.blend_strength * (uncertainty - self.uncertainty_threshold) / (1 - self.uncertainty_threshold),
+                                0)
+        
+        # Blend toward global mean for high-uncertainty samples
+        global_mean = np.array([0.33, 0.33, 0.33])  # Or use training mean
+        final_pred = (1 - blend_weight.reshape(-1, 1)) * base_pred + blend_weight.reshape(-1, 1) * global_mean
+        
+        return final_pred
+```
+
+### PRIORITY 2: Implement ens-model approach with task-specific weights
+**Rationale**: The ens-model kernel uses different weights for single vs full data. This is a KEY difference from our approach.
+
+```python
+class EnsembleModel(BaseModel):
+    def __init__(self, data='single'):
+        self.data_mode = data
+        
+        # Task-specific weights from ens-model kernel
+        if data == 'single':
+            self.cat_weight = 7.0 / 13.0  # 0.538
+            self.xgb_weight = 6.0 / 13.0  # 0.462
+        else:
+            self.cat_weight = 1.0 / 3.0   # 0.333
+            self.xgb_weight = 2.0 / 3.0   # 0.667
+        
+        self.cat_model = CatBoostModel(data=data)
+        self.xgb_model = XGBModel(data=data)
 ```
 
 Also implement their feature engineering:
-- Correlation-based feature filtering
+- Combine ALL feature sources: spange + acs_pca + drfps + fragprints
+- Correlation-based feature filtering (threshold=0.90)
 - Numeric features: T_x_RT, RT_log, T_inv, RT_scaled
 
-### PRIORITY 2: Submit exp_049 (CatBoost+XGBoost, CV=0.0081)
+### PRIORITY 3: Submit exp_049 (CatBoost+XGBoost, CV=0.0081)
 **Rationale**: This is our best CV score. Even if predicted LB is ~0.087, it may have a different CV-LB relationship than GP+MLP+LGBM. Worth testing with 4 submissions remaining.
 
-### PRIORITY 3: Try 5-model ensemble with task-specific weights
-Combine our best approaches:
-- GP (for uncertainty)
-- MLP (for non-linear patterns)
-- LightGBM (for tree-based patterns)
-- CatBoost (for categorical handling)
-- XGBoost (for gradient boosting)
-
-With DIFFERENT weights for single vs full data.
-
-### PRIORITY 4: Refined conservative blending
-If time permits, try conservative blending with:
-- Lower blend_strength (0.1 instead of 0.3)
-- GP uncertainty instead of k-NN distance
-- Only blend for high-uncertainty samples
+### PRIORITY 4: Try mixall approach (4-model ensemble)
+If other approaches fail, try the mixall approach:
+- 4-model ensemble: MLP + XGBoost + RF + LightGBM
+- Claims "good CV/LB ratio" - may have different CV-LB relationship
 
 ## What NOT to Try
 - Ridge regression (exp_095 showed 89% worse CV)
-- Aggressive conservative blending (exp_096 showed 34% worse CV)
+- Aggressive conservative blending with blend_strength > 0.2 (exp_096 showed 34% worse CV)
 - GNN/ChemBERTa (performed worse than tabular models)
 - Deep residual networks (exp_004 failed)
+- k-NN distance for extrapolation detection (GP uncertainty is better)
 
 ## Validation Notes
 - Use official Leave-One-Out CV functions (unmodified)
@@ -99,4 +140,14 @@ The target (0.0347) IS reachable - the leaderboard shows scores below this.
 The CV-LB intercept (0.0520) is the bottleneck.
 We need approaches that REDUCE THE INTERCEPT, not just improve CV.
 
-The ens-model kernel's task-specific weights may be the key insight we're missing.
+**Key insight from analysis:**
+- 1st place (0.0347) is 103% better than 2nd place (0.0707)
+- This huge gap suggests 1st place found a fundamentally different approach
+- They likely found a way to reduce the intercept, not just improve CV
+- Possible approaches: domain constraints, uncertainty weighting, solvent clustering
+
+**With 4 submissions remaining:**
+1. Try refined conservative blending with GP uncertainty (Priority 1)
+2. If CV is competitive (<=0.009), submit to test intercept reduction
+3. If not, try task-specific weights from ens-model kernel (Priority 2)
+4. Consider submitting exp_049 to verify best CV model's LB (Priority 3)
