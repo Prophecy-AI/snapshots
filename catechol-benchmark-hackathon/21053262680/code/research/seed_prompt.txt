@@ -1,77 +1,42 @@
 ## Current Status
-- Best CV score: 0.0081 from exp_049/050/053 (CatBoost+XGBoost ensemble)
-- Best LB score: 0.0877 (exp_030)
-- Target: 0.0347 | Gap to target: 153%
+- Best CV score: 0.0081 from exp_049/050/053 (CatBoost/XGBoost variants)
+- Best LB score: 0.0877 from exp_030 (GP ensemble)
+- Target: 0.0347 | Gap to target: 0.0530 (153%)
 
 ## CV-LB Relationship Analysis (CRITICAL)
-- Linear fit: LB = 4.31 * CV + 0.0525 (R² = 0.95)
+- Linear fit: LB = 4.31 × CV + 0.0525 (R² = 0.95)
 - Intercept interpretation: Even at CV=0, expected LB is 0.0525
-- Are all approaches on the same line? YES
-- CRITICAL: Intercept (0.0525) > Target (0.0347)
-- Required CV for target: (0.0347 - 0.0525) / 4.31 = -0.0041 (IMPOSSIBLE)
+- Are all approaches on the same line? **YES** - All 12 valid submissions fall on this line
+- **CRITICAL**: Intercept (0.0525) > Target (0.0347)
+- Required CV for target: (0.0347 - 0.0525) / 4.31 = -0.0041 (IMPOSSIBLE - negative)
 
-**This means the target is mathematically unreachable with current approaches that fall on this line.**
+**THE TARGET IS MATHEMATICALLY UNREACHABLE WITH CURRENT APPROACHES.**
+We MUST find approaches that CHANGE the CV-LB relationship (reduce intercept or change slope).
 
 ## Response to Evaluator
-- Technical verdict was TRUSTWORTHY. The ChemBERTa implementation was correct but failed due to dimensionality (786 features for ~600 samples).
-- Evaluator's top priority: PCA-reduced ChemBERTa (768 → 20 dim) + domain constraints. **AGREE** - this addresses the dimensionality problem.
+- Technical verdict was TRUSTWORTHY. The exp_098 implementation was correct.
+- Evaluator's top priority: Try conservative blending or domain constraints to reduce intercept. **AGREE** - this is the right direction.
 - Key concerns raised: 
-  1. ChemBERTa 768-dim is too high-dimensional → **Addressing with PCA reduction**
-  2. CV-LB intercept problem unsolved → **Need approaches that CHANGE the relationship, not just improve CV**
-  3. exp_073 similarity weighting was a disaster (LB 0.1451) → **AVOID similarity-based approaches**
+  1. ChemBERTa embeddings don't help (even with PCA). **AGREE** - stop trying ChemBERTa variants.
+  2. The CV-LB intercept (0.0525) is the fundamental blocker. **AGREE** - this is the core problem.
+  3. Similarity-based approaches fail catastrophically (exp_073). **AGREE** - avoid similarity weighting.
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop98_analysis.ipynb` for CV-LB analysis
+- Reference notebooks: See `exploration/evolver_loop99_analysis.ipynb` for CV-LB analysis
 - Key patterns:
-  1. ALL tabular models (MLP, LGBM, XGB, CatBoost, GP, Ridge) fall on the SAME CV-LB line
-  2. GNN attempts ALL failed with worse CV than tabular models
-  3. ChemBERTa (768-dim) failed due to dimensionality (CV 0.028 vs baseline 0.0081)
-  4. Similarity-based approaches made things WORSE (exp_073: LB 0.1451)
-  5. The test solvents are VERY different from training solvents
+  1. All tabular models (MLP, LGBM, XGB, CatBoost, GP, Ridge) fall on the SAME CV-LB line
+  2. GNNs and ChemBERTa fail worse than tabular models (CV 2-5x worse)
+  3. Similarity-based approaches cause catastrophic LB failure (exp_073: CV=0.0084, LB=0.1451)
+  4. The test solvents are fundamentally different from training solvents
 
-## Recommended Approaches (Priority Order)
+## Recommended Approaches (PRIORITY ORDER)
 
-### 1. PCA-Reduced ChemBERTa (HIGH PRIORITY)
-**Rationale**: ChemBERTa embeddings (768-dim) failed due to dimensionality. Reducing to 10-20 components should help.
-
-```python
-from sklearn.decomposition import PCA
-
-# Pre-compute reduced embeddings for all solvents
-pca = PCA(n_components=20)
-chemberta_reduced = pca.fit_transform(chemberta_768dim)
-
-# Total features: 20 (ChemBERTa PCA) + 13 (Spange) + 5 (Arrhenius) = 38
-# This is comparable to best model's 18 features
-```
-
-**Expected outcome**: If CV improves below 0.0081, submit to check if it changes the CV-LB relationship.
-
-### 2. Yield Normalization / Mass Balance Constraint (MEDIUM PRIORITY)
-**Rationale**: The Ens Model kernel uses yield normalization (clip to 0, normalize if sum > 1). This is a domain constraint that should generalize to unseen solvents.
-
-```python
-def enforce_mass_balance(predictions):
-    """Post-process predictions to satisfy mass balance."""
-    # Clip to [0, 1]
-    predictions = np.clip(predictions, 0, 1)
-    
-    # Ensure sum doesn't exceed 1 (yields can't exceed 100% total)
-    row_sums = predictions.sum(axis=1, keepdims=True)
-    mask = row_sums > 1
-    predictions[mask.squeeze()] = predictions[mask.squeeze()] / row_sums[mask]
-    
-    return predictions
-```
-
-**Expected outcome**: May reduce extreme predictions that hurt LB.
-
-### 3. Conservative Blending Toward Training Mean (MEDIUM PRIORITY)
-**Rationale**: If test solvents are fundamentally different, blending ALL predictions toward training mean may reduce the intercept.
+### 1. CONSERVATIVE BLENDING TOWARD MEAN (HIGHEST PRIORITY)
+**Rationale**: If test solvents are fundamentally different, extreme predictions hurt LB. Blending toward training mean may reduce the intercept.
 
 ```python
 class ConservativeModel:
-    def __init__(self, base_model, blend_factor=0.2):
+    def __init__(self, base_model, blend_factor=0.3):
         self.base_model = base_model
         self.blend_factor = blend_factor
         self.train_mean = None
@@ -86,57 +51,76 @@ class ConservativeModel:
         return (1 - self.blend_factor) * base_pred + self.blend_factor * self.train_mean
 ```
 
-**Expected outcome**: May reduce the CV-LB intercept by making predictions more conservative.
+**Try blend factors**: 0.1, 0.2, 0.3, 0.4, 0.5
+**Use with**: Best model (GP ensemble from exp_030)
 
-### 4. Cost-Sensitive Re-weighting (MEDIUM PRIORITY)
-**Rationale**: Research shows yield prediction is an imbalanced regression problem. High-yield reactions are underrepresented.
+### 2. STRICT PREDICTION CLIPPING
+**Rationale**: Extreme predictions (near 0 or 1) are likely wrong for unseen solvents.
 
 ```python
-# Weight samples by inverse frequency of their yield bin
-def compute_sample_weights(y):
-    # Bin yields into 10 bins
-    bins = np.linspace(0, 1, 11)
-    bin_indices = np.digitize(y.mean(axis=1), bins)
-    bin_counts = np.bincount(bin_indices, minlength=11)
-    weights = 1.0 / (bin_counts[bin_indices] + 1)
-    return weights / weights.sum() * len(weights)
+def clip_predictions(predictions, lower=0.05, upper=0.95):
+    return np.clip(predictions, lower, upper)
 ```
 
-**Expected outcome**: May improve predictions for underrepresented yield regions.
+**Try clipping ranges**: [0.05, 0.95], [0.10, 0.90], [0.15, 0.85]
 
-### 5. Exact Ens Model Replica (FALLBACK)
-**Rationale**: The Ens Model kernel uses ALL feature sources with correlation-based filtering. We haven't exactly replicated this.
+### 3. GROUPKFOLD VALIDATION (MIXALL KERNEL APPROACH)
+**Rationale**: The mixall kernel uses GroupKFold (5 splits) instead of Leave-One-Out. This may give a DIFFERENT CV-LB relationship.
 
-Key features:
-- ALL feature sources: spange, acs_pca, drfps, fragprints, smiles
-- Correlation-based filtering with priority (spange > acs > drfps > frag > smiles)
-- CatBoost + XGBoost ensemble with different weights for single vs full data
-- Yield normalization (clip to 0, normalize if sum > 1)
+**Key insight from mixall kernel**:
+- Uses GroupKFold with 5 splits instead of Leave-One-Out
+- Uses ensemble of MLP + XGBoost + RF + LightGBM
+- Runtime is only 2m 15s but claims "good CV/LB"
+
+**Implementation**:
+```python
+from sklearn.model_selection import GroupKFold
+
+def generate_leave_one_out_splits(X, Y):
+    groups = X["SOLVENT NAME"]
+    n_splits = min(5, len(groups.unique()))
+    gkf = GroupKFold(n_splits=n_splits)
+    for train_idx, test_idx in gkf.split(X, Y, groups):
+        yield (X.iloc[train_idx], Y.iloc[train_idx]), (X.iloc[test_idx], Y.iloc[test_idx])
+```
+
+**IMPORTANT**: This changes the validation scheme, so CV scores won't be directly comparable. But if it gives a DIFFERENT CV-LB relationship with lower intercept, it's worth trying.
+
+### 4. UNCERTAINTY-WEIGHTED PREDICTIONS
+**Rationale**: Use GP or ensemble variance to detect high-uncertainty predictions and blend them toward mean.
+
+```python
+# Train GP ensemble
+gp_preds, gp_stds = gp_model.predict(X_test, return_std=True)
+
+# Blend high-uncertainty predictions toward mean
+uncertainty_threshold = np.percentile(gp_stds, 75)
+blend_weights = np.clip(gp_stds / uncertainty_threshold, 0, 1)
+final_preds = (1 - blend_weights) * gp_preds + blend_weights * train_mean
+```
 
 ## What NOT to Try
-- ❌ More raw ChemBERTa embeddings (768-dim is too large)
-- ❌ More GNNs trained from scratch (they fail on small data)
-- ❌ More similarity-based approaches (exp_073 disaster)
-- ❌ More tabular model variants (they all fall on the same CV-LB line)
-- ❌ Multi-seed ensembles or hyperparameter sweeps (too far from target)
+- ❌ More ChemBERTa variants (exp_097, exp_098 both failed)
+- ❌ More GNN variants (7+ attempts, all failed with CV 2-5x worse)
+- ❌ Similarity-based approaches (exp_073 catastrophic failure)
+- ❌ More tabular model variants without changing the CV-LB relationship
+- ❌ Multi-seed ensembles (we're 153% away from target - optimization is premature)
+- ❌ Hyperparameter tuning (won't change the intercept)
 
 ## Validation Notes
 - CV scheme: Leave-One-Out for single solvent (24 folds), Leave-One-Ramp-Out for full data (13 folds)
-- Combined CV = (single_cv + full_cv) / 2
-- CRITICAL: Verify submission cell model class matches CV model class before logging
+- CV-LB gap: LB ≈ 4.31 × CV + 0.0525
+- **CRITICAL**: Any approach that doesn't change this relationship is USELESS for reaching target
+- After implementing conservative blending, SUBMIT to check if intercept changes
 
-## Submission Strategy (4 remaining)
-1. Only submit experiments that show promise for CHANGING the CV-LB relationship
-2. If CV improves AND the approach is fundamentally different, submit to check LB
-3. If nothing improves, submit best CV (exp_049/050/053) as fallback
-4. Save at least 1 submission for final attempt
+## Experiment Priority
+1. **exp_099**: Conservative blending (blend_factor=0.3) with GP ensemble
+2. **exp_100**: Strict prediction clipping [0.05, 0.95] with GP ensemble
+3. **exp_101**: GroupKFold validation with MLP+XGB+RF+LGBM ensemble (mixall approach)
+4. **exp_102**: Uncertainty-weighted predictions with GP variance
 
-## Key Insight from Research
-The web search revealed that the CV-LB gap in chemical yield prediction can be reduced by:
-1. **Data augmentation** - permuting reactant-product pairs
-2. **Test-time augmentation** - average predictions from multiple augmented views
-3. **Pre-training on large molecular databases** - then fine-tuning
-4. **Cost-sensitive re-weighting** - higher importance to underrepresented regions
-5. **Imbalanced regression** - treat yield prediction as an imbalanced problem
-
-The target IS reachable. The benchmark paper achieved MSE 0.0039. We just haven't found the right approach yet.
+## CRITICAL REMINDER
+- We have 4 submissions remaining
+- Only submit experiments that show promise for CHANGING the CV-LB relationship
+- If CV is similar but approach is fundamentally different, submit to check intercept
+- The goal is to REDUCE THE INTERCEPT, not improve CV
