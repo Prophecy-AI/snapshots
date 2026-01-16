@@ -1,93 +1,144 @@
 ## Current Status
-- Best CV score: 0.0081 from exp_049 (CatBoost+XGBoost)
-- Best LB score: 0.0877 from exp_030 (GP Ensemble)
+- Best CV score: 0.0081 from exp_030 (GP+MLP+LGBM ensemble)
+- Best LB score: 0.0877 (exp_030)
 - Target: 0.0347 | Gap to target: 152.8%
+- Experiments: 105 | Submissions: 23/5 used, 4 remaining
 
 ## CV-LB Relationship Analysis (CRITICAL)
-- Linear fit: LB = 4.29 × CV + 0.0528 (R² = 0.9523)
-- Intercept interpretation: Even at CV=0, expected LB is 0.0528
-- Are all approaches on the same line? **YES** (12/13 submissions)
-- **CRITICAL**: Intercept (0.0528) > Target (0.0347)
-- Required CV for target: (0.0347 - 0.0528) / 4.29 = -0.0042 (IMPOSSIBLE)
+- Linear fit: LB = 4.315 × CV + 0.0525 (R² = 0.9505)
+- Intercept interpretation: Even at CV=0, expected LB is 0.0525
+- Are all approaches on the same line? **YES** (all 12 valid submissions)
+- **CRITICAL**: Intercept (0.0525) > Target (0.0347)
+- Required CV for target: (0.0347 - 0.0525) / 4.315 = **-0.0041 (IMPOSSIBLE)**
+
+**This means the target is UNREACHABLE with current approaches that follow this line.**
+**We MUST find approaches that CHANGE the CV-LB relationship (reduce the intercept).**
 
 ## Response to Evaluator
-- Technical verdict was **TRUSTWORTHY**. The SolventB% bug fix was correct.
-- Evaluator's top priority: **SUBMIT exp_103 to check CV-LB relationship**. I partially agree - but exp_103 has higher CV (0.01124) than best (0.0081), so predicted LB would be worse. Instead, I recommend implementing bias correction first.
-- Key concerns raised: CV (0.01124) is higher than best CV (0.0083), predicted LB ≈ 0.10 (worse than best). This is expected since GroupKFold (5 splits) is an easier validation task than leave-one-out (24 folds).
-- **My synthesis**: Rather than submit exp_103 (which will likely give worse LB), implement bias correction on the best model first. This addresses the ROOT CAUSE (intercept) rather than just checking the relationship.
+- Technical verdict was TRUSTWORTHY. The bias correction experiment was correctly implemented.
+- Evaluator's top priority: Implement extrapolation-aware conservative predictions. **AGREE** - this directly targets the intercept problem.
+- Key concerns raised: 
+  1. In-sample bias correction doesn't help because bias differs between train/test. **Correct diagnosis.**
+  2. GNN/ChemBERTa experiments failed on submission. **Need to debug model class mismatch.**
+  3. The intercept problem remains unsolved. **This is THE problem to solve.**
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop104_analysis.ipynb` for CV-LB analysis
+- Reference notebooks: See `exploration/evolver_loop105_analysis.ipynb` for CV-LB analysis
 - Key patterns:
-  1. ALL tabular models (MLP, LGBM, XGB, CatBoost, GP, Ridge) fall on the SAME CV-LB line
-  2. The intercept (0.0528) represents STRUCTURAL extrapolation error
-  3. Test solvents are fundamentally different from training solvents
-  4. No amount of CV improvement can reach target if intercept > target
+  1. All tabular models (MLP, LGBM, XGB, CatBoost, GP, Ridge) fall on the SAME CV-LB line
+  2. The intercept (0.0525) represents structural extrapolation error
+  3. Similarity weighting (exp_073) was an outlier with LB=0.1451 (much worse)
+  4. Bias correction made CV worse (0.0089 vs 0.0081)
 
-## Recommended Approaches
+## Recommended Approaches (PRIORITY ORDER)
 
-### PRIORITY 1: Post-hoc Bias Correction (NEW - from web research)
-**Rationale**: Web research revealed that post-hoc intercept-bias correction is a standard technique for reducing systematic offset when deploying models on unseen chemicals.
-
-**Implementation**:
-```python
-# After training, compute average residual on validation set
-preds = model.predict(X_val)
-bias = preds.mean() - y_val.mean()
-
-# Apply correction to test predictions
-corrected_pred = model.predict(X_test) - bias
-```
-
-This directly addresses the intercept problem by calibrating predictions based on validation residuals.
-
-**Key insight from web research**:
-> "Apply a post‑hoc intercept‑bias correction – after fitting, compute the average residual on a small validation set of known compounds and subtract that mean bias from all future predictions."
-
-### PRIORITY 2: Implement Bias Correction on Best Model (exp_030 approach)
-**Rationale**: exp_030 achieved best LB (0.0877). Implement bias correction on the same model architecture.
-
-**Steps**:
-1. Replicate exp_030 model (GP Ensemble with MLP, LGBM, XGB, GP)
-2. During CV, compute per-fold bias: `bias = preds.mean() - y_val.mean()`
-3. Store average bias across folds
-4. Apply bias correction to test predictions: `corrected = preds - avg_bias`
-
-### PRIORITY 3: Per-Target Bias Correction
-**Rationale**: Different targets (Product 2, Product 3, SM) may have different biases.
+### 1. EXTRAPOLATION-AWARE CONSERVATIVE PREDICTIONS (HIGHEST PRIORITY)
+**Rationale**: Directly targets the intercept problem by making predictions more conservative when extrapolating.
 
 **Implementation**:
 ```python
-# Compute per-target bias
-for target_idx in range(3):
-    bias[target_idx] = preds[:, target_idx].mean() - y_val[:, target_idx].mean()
+class ExtrapolationAwareModel(BaseModel):
+    def __init__(self, base_model, blend_weight=0.3):
+        self.base_model = base_model
+        self.blend_weight = blend_weight
+        
+    def train_model(self, train_X, train_Y):
+        # Train base model
+        self.base_model.train_model(train_X, train_Y)
+        
+        # Store training statistics
+        self.train_mean = train_Y.values.mean(axis=0)
+        
+        # Fit nearest neighbor model for extrapolation detection
+        X_features = self.featurizer.featurize(train_X)
+        self.nn = NearestNeighbors(n_neighbors=5).fit(X_features)
+        
+        # Compute training distances for threshold calibration
+        train_distances, _ = self.nn.kneighbors(X_features)
+        self.distance_threshold = np.percentile(train_distances.mean(axis=1), 90)
+        
+    def predict(self, test_X):
+        # Get base predictions
+        base_preds = self.base_model.predict(test_X)
+        
+        # Compute extrapolation score
+        X_features = self.featurizer.featurize(test_X)
+        distances, _ = self.nn.kneighbors(X_features)
+        extrapolation_score = distances.mean(axis=1) / self.distance_threshold
+        
+        # Blend toward training mean when extrapolating
+        weight = np.clip(extrapolation_score * self.blend_weight, 0, 0.5)
+        weight = weight.reshape(-1, 1)
+        
+        final_preds = (1 - weight) * base_preds + weight * self.train_mean
+        
+        return final_preds
 ```
 
-### PRIORITY 4: Fold-Specific Bias Correction
-**Rationale**: Different folds (solvents) may have different biases. Apply fold-specific correction.
+**Why this might work**:
+- It doesn't try to improve the model's predictions on training-like data
+- It specifically targets the extrapolation problem
+- It makes predictions more conservative when we're uncertain
+- The training mean is a reasonable fallback when extrapolating
+- **This could change the CV-LB relationship (lower intercept)**
 
-### PRIORITY 5: Submit Best Bias-Corrected Model
-**Rationale**: After implementing bias correction, submit to check if it reduces the intercept.
+### 2. PROPER GNN IMPLEMENTATION (HIGH PRIORITY)
+**Rationale**: GNN operates on molecular graphs, not tabular features. This is a fundamentally different representation that might give a different CV-LB relationship.
+
+**CRITICAL**: Previous GNN experiments failed on submission due to model class mismatch.
+- CV was computed with `HybridGNNModelWrapper`
+- Submission cells used `GNNModelWrapper` (DIFFERENT CLASS!)
+
+**Implementation requirements**:
+1. Define a single model class (e.g., `GNNModel`)
+2. Use the SAME class for CV computation AND submission cells
+3. Verify before running submission cells
+
+### 3. UNCERTAINTY-WEIGHTED PREDICTIONS (MEDIUM PRIORITY)
+**Rationale**: Use ensemble disagreement to identify uncertain predictions and make them more conservative.
+
+**Implementation**:
+```python
+# Train multiple models with different seeds
+models = [train_model(seed=i) for i in range(5)]
+
+# Get predictions from each model
+all_preds = [m.predict(X) for m in models]
+
+# Compute mean and variance
+mean_pred = np.mean(all_preds, axis=0)
+var_pred = np.var(all_preds, axis=0)
+
+# Blend toward training mean when variance is high
+weight = np.clip(var_pred / var_threshold, 0, 0.5)
+final_pred = (1 - weight) * mean_pred + weight * train_mean
+```
+
+### 4. PSEUDO-LABELING (MEDIUM PRIORITY)
+**Rationale**: Use confident predictions on test set to augment training. Could help with distribution shift.
+
+**Implementation**:
+1. Train model on training data
+2. Predict on test data
+3. Select confident predictions (low variance across ensemble)
+4. Add confident predictions to training data
+5. Retrain model
 
 ## What NOT to Try
-- ❌ Submit exp_103 without bias correction (higher CV, predicted worse LB)
-- ❌ More MLP/LGBM/XGB variants without bias correction (all fall on same line)
-- ❌ GNN/ChemBERTa without proper model class verification (previous attempts had issues)
-- ❌ Multi-seed ensembles (optimization is forbidden when gap > 5%)
-- ❌ Hyperparameter tuning (doesn't change the intercept)
+- ❌ More MLP/LGBM/XGB/CatBoost variants (all fall on the same CV-LB line)
+- ❌ In-sample bias correction (doesn't help, exp_104 showed this)
+- ❌ Similarity weighting without careful implementation (exp_073 was much worse)
+- ❌ Multi-seed ensembles for variance reduction (we're 152% from target, not 1-2%)
+- ❌ Hyperparameter tuning (won't change the intercept)
 
 ## Validation Notes
-- CV scheme: Leave-One-Out (24 folds for single, 13 for full)
-- Key insight: Bias correction should reduce the intercept, not just improve CV
-- After submission, plot (CV, LB) point to check if it's BELOW the line
+- CV scheme: Leave-One-Out (24 folds single, 13 folds full) - REQUIRED by competition
+- The CV-LB relationship is LB = 4.315 × CV + 0.0525
+- Any approach that improves CV but stays on this line will NOT reach target
+- We need approaches that CHANGE the relationship (reduce intercept)
 
-## Immediate Action Plan
-1. **First**: Implement bias correction on the best model architecture (from exp_030)
-2. **Second**: Compute CV with bias correction
-3. **Third**: Generate submission with bias-corrected predictions
-4. **Fourth**: Submit to check if bias correction reduces the intercept
-
-## Template Compliance
-- MUST follow the official template structure (last 3 cells)
-- Model class in submission cells MUST match CV computation class
-- Predictions must be clipped to [0, 1] and renormalized if sum > 1
+## CRITICAL REMINDERS
+1. **VERIFY MODEL CLASS CONSISTENCY**: Before logging ANY experiment, verify that submission cells use the EXACT same model class as CV computation.
+2. **FOCUS ON INTERCEPT REDUCTION**: Don't just improve CV. We need to change the CV-LB relationship.
+3. **4 SUBMISSIONS REMAINING**: Use them wisely to test approaches that might change the relationship.
+4. **TARGET IS REACHABLE**: The benchmark paper achieved MSE 0.0039. The target (0.0347) is between this and our best LB (0.0877). We need to find the right approach.
