@@ -1,125 +1,174 @@
 ## Current Status
-- Best CV score: 0.0081 from exp_049/050/053 (CatBoost + XGBoost ensemble)
+- Best CV score: 0.0081 from exp_049/050/053 (pending LB)
 - Best LB score: 0.0877 from exp_030 (CV=0.0083)
-- Target: 0.0347 | Gap to target: 0.0530 (152.8%)
+- Target: 0.0347 | Gap to target: 0.0530 (152.7%)
 - Remaining submissions: 3
 
 ## CV-LB Relationship Analysis (CRITICAL)
-- Linear fit: LB = 4.07 × CV + 0.0548 (R² = 0.96)
-- Intercept interpretation: Even at CV=0, expected LB is 0.0548
-- Are all approaches on the same line? **YES** (13 valid submissions, R²=0.96)
-- **CRITICAL: Intercept (0.0548) > Target (0.0347)**
-- Required CV for target: (0.0347 - 0.0548) / 4.07 = -0.0049 (IMPOSSIBLE)
+- Linear fit: LB = 4.09 × CV + 0.0546 (R² = 0.96)
+- Intercept interpretation: Even at CV=0, expected LB is 0.0546
+- Are all approaches on the same line? **YES** - all 13 valid submissions
+- **CRITICAL**: Intercept (0.0546) > Target (0.0347)
+- Required CV for target: (0.0347 - 0.0546) / 4.09 = -0.0049 (IMPOSSIBLE)
+
+**The target is MATHEMATICALLY UNREACHABLE with current approaches.**
+We MUST find an approach that CHANGES the CV-LB relationship, not just improves CV.
 
 ## Response to Evaluator
-- Technical verdict was TRUSTWORTHY (but experiment FAILED). Agreed - the domain-adversarial approach was correctly implemented but conceptually flawed.
-- Evaluator's top priority: **PIVOT to physics-constrained or conservative blending**. I AGREE - domain-adversarial removes essential solvent information.
+- Technical verdict was TRUSTWORTHY. Calibration experiment was correctly implemented.
+- Evaluator's top priority: **PIVOT to physics-constrained predictions**. I AGREE.
 - Key concerns raised: 
-  1. Domain-adversarial removes solvent info (AGREED - this is why CV was 20x worse)
-  2. Only 3 submissions remaining (CRITICAL - must be strategic)
-  3. Target may be structurally unreachable (ACKNOWLEDGED but we MUST NOT GIVE UP)
+  1. Calibration (shrinking toward mean) is conceptually flawed - it doesn't address distribution shift
+  2. Only 3 submissions remaining - each is precious
+  3. The intercept problem means we need to CHANGE the relationship, not improve CV
+- How I'm addressing: Recommending physics-constrained approaches and proper GNN implementation
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop115_analysis.ipynb` for CV-LB analysis
+- Reference notebooks: See `exploration/evolver_loop116_analysis.ipynb` for CV-LB analysis
 - Key patterns:
-  1. ALL tabular models (MLP, LGBM, XGB, CatBoost, GP, Ridge) fall on SAME CV-LB line
-  2. GNN/ChemBERTa/Domain-Adversarial all performed 2-20x worse
-  3. Best public kernels (mixall, ens-model) achieve ~0.09 LB - same line
-  4. The intercept (0.0548) represents STRUCTURAL extrapolation error
+  1. ALL tabular models (MLP, LGBM, XGB, CatBoost, GP, Ridge) fall on the SAME CV-LB line
+  2. GNN/ChemBERTa attempts had model class mismatch issues (CV model ≠ submission model)
+  3. Calibration (shrinking toward mean) made CV WORSE, not better
+  4. The benchmark paper achieved MSE 0.0039 using GNN with DRFP features
 
-## Recommended Approaches (Priority Order)
+## Recommended Approaches (PRIORITY ORDER)
 
-### PRIORITY 1: Prediction Calibration / Bias Correction (HIGH PRIORITY)
-The CV-LB relationship shows a consistent bias. Try to correct for this:
+### 1. PROPERLY IMPLEMENTED GNN (HIGH PRIORITY)
+The benchmark paper achieved MSE 0.0039 using GNN. Our GNN attempts had model class mismatch issues.
+
+**CRITICAL CHECKLIST:**
+- [ ] Define GNN model class (e.g., `SimpleGNN`)
+- [ ] Use SAME class name in CV computation AND submission cells
+- [ ] Verify: `model = SimpleGNN(data='single')` in BOTH places
+- [ ] Use PyTorch Geometric with GCNConv or GATConv
+- [ ] Use DRFP or Morgan fingerprints as node features
+
+**Simple GNN Architecture:**
 ```python
-# If LB = 4.07 * CV + 0.0548, and we want to reduce LB
-# We need to reduce the predictions by some factor
-# The bias is in the PREDICTIONS, not just the score
+import torch
+import torch.nn as nn
+from torch_geometric.nn import GCNConv, global_mean_pool
 
-# Approach 1: Scale predictions toward training mean
-calibrated_pred = alpha * raw_pred + (1 - alpha) * train_mean
-
-# Approach 2: Shrink predictions toward 0.5 (middle of yield range)
-calibrated_pred = alpha * raw_pred + (1 - alpha) * 0.5
-
-# Approach 3: Apply a learned calibration function
-# Train a calibration model on OOF predictions
+class SimpleGNN(nn.Module):
+    def __init__(self, data='single', hidden_dim=64, num_layers=3):
+        super().__init__()
+        self.data_mode = data
+        # Node embedding from atom features
+        self.node_embed = nn.Linear(atom_feat_dim, hidden_dim)
+        # GCN layers
+        self.convs = nn.ModuleList([
+            GCNConv(hidden_dim, hidden_dim) for _ in range(num_layers)
+        ])
+        # Output head
+        self.head = nn.Sequential(
+            nn.Linear(hidden_dim + 2, 64),  # +2 for T, RT
+            nn.ReLU(),
+            nn.Linear(64, 3),
+            nn.Sigmoid()
+        )
+    
+    def forward(self, data):
+        x, edge_index, batch = data.x, data.edge_index, data.batch
+        x = self.node_embed(x)
+        for conv in self.convs:
+            x = conv(x, edge_index).relu()
+        x = global_mean_pool(x, batch)  # Graph-level embedding
+        # Concatenate with process conditions
+        x = torch.cat([x, data.process_features], dim=1)
+        return self.head(x)
 ```
 
-### PRIORITY 2: Aggressive Physics Constraints
-Go beyond simple normalization:
+### 2. PHYSICS-CONSTRAINED PREDICTIONS (HIGH PRIORITY)
+Physics constraints that generalize to ANY solvent:
+
+**a) Mass Balance Normalization:**
 ```python
-# Constraint 1: Yields must sum to exactly 1 (not just <= 1)
-pred = pred / pred.sum(axis=1, keepdims=True)
+# Yields should sum to ~1 (mass balance)
+def constrained_predict(raw_preds):
+    # Normalize predictions to sum to 1
+    return raw_preds / raw_preds.sum(axis=1, keepdims=True)
+```
+This is already done in current models, but verify it's applied correctly.
 
-# Constraint 2: Arrhenius temperature dependence
-# Higher temperature should increase reaction rate
-# Enforce monotonicity with temperature
+**b) Arrhenius Temperature Dependence:**
+```python
+# k = A * exp(-Ea / RT)
+# Add features: 1/T, ln(RT), T*RT
+# These capture the physics of temperature-dependent reactions
+```
+This is already done. Consider making predictions more conservative at extreme temperatures.
 
-# Constraint 3: Residence time dependence
-# Longer time should approach equilibrium
-# Enforce convergence behavior
+**c) Conservative Predictions for Extrapolation:**
+```python
+# Detect extrapolation using nearest neighbor distance
+from sklearn.neighbors import NearestNeighbors
+nn = NearestNeighbors(n_neighbors=5).fit(X_train_features)
+distances, _ = nn.kneighbors(X_test_features)
+extrapolation_score = distances.mean(axis=1)
+
+# Blend toward training mean when extrapolating
+threshold = np.percentile(train_distances, 90)
+weight = np.clip(extrapolation_score / threshold, 0, 1)
+final_pred = (1 - weight) * model_pred + weight * train_mean
 ```
 
-### PRIORITY 3: Ensemble with Diverse Representations
-Current best models use similar features. Try:
-```python
-# Ensemble 1: CatBoost + XGBoost (current best, CV=0.0081)
-# Ensemble 2: MLP with different features
-# Ensemble 3: GP with uncertainty weighting
+### 3. SOLVENT SIMILARITY-BASED WEIGHTING (MEDIUM PRIORITY)
+Use Tanimoto similarity to weight predictions:
 
-# Combine with learned weights based on extrapolation score
+```python
+from rdkit import Chem
+from rdkit.Chem import AllChem, DataStructs
+
+def compute_similarity(smiles1, smiles2):
+    mol1 = Chem.MolFromSmiles(smiles1)
+    mol2 = Chem.MolFromSmiles(smiles2)
+    fp1 = AllChem.GetMorganFingerprintAsBitVect(mol1, 2, nBits=2048)
+    fp2 = AllChem.GetMorganFingerprintAsBitVect(mol2, 2, nBits=2048)
+    return DataStructs.TanimotoSimilarity(fp1, fp2)
+
+# For each test solvent, find most similar training solvents
+# Weight predictions by similarity
 ```
 
-### PRIORITY 4: Test-Time Adaptation
-Use the structure of test data to adapt predictions:
-```python
-# Idea: If test solvents are similar to some training solvents,
-# use those training solvents' predictions as a guide
+### 4. DOMAIN-ADVERSARIAL TRAINING (LOWER PRIORITY)
+Train a model that can't distinguish between training and test solvents:
 
-# Step 1: Compute similarity between test and training solvents
-# Step 2: For each test sample, find most similar training samples
-# Step 3: Blend prediction toward similar training samples' true values
+```python
+# Add a domain classifier that predicts train vs test
+# Use gradient reversal to make features domain-invariant
+# This could help with distribution shift
 ```
 
 ## What NOT to Try
-- ❌ Domain-adversarial variants (removes essential solvent information)
-- ❌ GNN/ChemBERTa (3-4x worse CV, already tried extensively)
-- ❌ More tabular model variants without calibration (all on same CV-LB line)
-- ❌ Hyperparameter tuning (won't change the intercept)
-- ❌ Multi-seed ensembles (optimization forbidden when >1% from target)
+- ❌ More tabular model variants (MLP, LGBM, XGB, CatBoost) - all on same line
+- ❌ Calibration/shrinkage toward mean - made CV worse
+- ❌ Hyperparameter tuning - won't change the intercept
+- ❌ Multi-seed ensembles - optimization is forbidden when 152% from target
+- ❌ Any approach that just improves CV without changing the CV-LB relationship
 
 ## Validation Notes
-- CV scheme: Leave-One-Out (24 folds single, 13 folds full) - REQUIRED by competition
-- CV-LB gap: ~4x multiplier + 0.055 intercept
-- All 13 valid submissions fall on the same line (R²=0.96)
+- CV scheme: Leave-One-Out for single solvents (24 folds), Leave-One-Ramp-Out for full data (13 folds)
+- **CRITICAL**: Verify model class consistency between CV and submission cells
+- After EVERY submission, update CV-LB analysis to check if relationship changed
 
-## Strategic Recommendation for 3 Remaining Submissions
+## Submission Strategy (3 remaining)
+1. **Submission 1**: Best pending experiment (exp_049/050/053 with CV=0.0081) to verify CV-LB line
+2. **Submission 2**: Properly implemented GNN (if CV is competitive)
+3. **Submission 3**: Best approach that shows DIFFERENT CV-LB relationship
 
-Given the structural CV-LB relationship and 3 remaining submissions:
+## Key Insight
+The benchmark paper achieved MSE 0.0039. Our best LB is 0.0877. The target is 0.0347.
+The benchmark used GNN with DRFP features. Our GNN attempts had model class mismatch issues.
 
-1. **DO NOT** submit experiments that are expected to fall on the same line
-2. **ONLY** submit if there's evidence the approach changes the relationship
-3. Focus on approaches that CHANGE THE INTERCEPT, not just improve CV
+**The path forward is to properly implement a GNN that:**
+1. Uses the SAME model class in CV and submission cells
+2. Operates on molecular graphs, not tabular features
+3. Captures structural information that tabular models miss
+4. Potentially changes the CV-LB relationship
 
-## The Hard Truth
-
-After 115 experiments and 24 submissions:
-- ALL approaches fall on the SAME CV-LB line (R²=0.96)
-- The intercept (0.0548) > target (0.0347)
-- Required CV to hit target is NEGATIVE (impossible)
-
-**BUT WE MUST NOT GIVE UP.**
-
-The target IS reachable. The benchmark paper achieved MSE=0.0039. We need to find an approach that:
-1. CHANGES the CV-LB relationship (different intercept or slope)
-2. OR achieves CV so low that even on the current line, LB approaches target
-
-## Immediate Next Steps
-
-1. **Try prediction calibration** - Shrink predictions toward training mean or 0.5
-2. **Try aggressive physics constraints** - Enforce exact mass balance
-3. **Try test-time adaptation** - Use similarity to training solvents
-4. **Verify exp_049 submission format** - Ensure it's valid before considering submission
-
-The key insight is that we need to CHANGE THE RELATIONSHIP, not just improve CV. All our efforts to improve CV have just moved us along the same line. We need a breakthrough that changes the intercept.
+## MANDATORY CHECKS BEFORE LOGGING ANY EXPERIMENT
+1. What model class did you use for CV computation?
+2. Open the submission cells (last 3 cells)
+3. Verify BOTH `model = YourModel(data='single')` AND `model = YourModel(data='full')` use the SAME class
+4. If they don't match, FIX THEM before running submission cells
+5. If you can't fix them, DO NOT LOG the experiment
