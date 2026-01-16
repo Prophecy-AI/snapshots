@@ -1,8 +1,13 @@
 ## What I Understood
 
-The junior researcher implemented a **Stacking Ensemble with Meta-Learner** (exp_089 / 087_stacking). The hypothesis was that proper stacking - using out-of-fold predictions from diverse base models (CatBoost, XGBoost, LightGBM, GP, MLP) as features for a Ridge meta-learner - might change the CV-LB relationship by learning optimal model combinations for different input regions.
+The junior researcher implemented **exp_090 (088_ens_model_renorm)** - an attempt to replicate techniques from the "Ens Model" public kernel. The hypothesis was that domain-specific techniques from a successful kernel might change the CV-LB relationship:
 
-The approach is well-motivated: instead of simple weighted averaging, let the meta-learner learn when to trust each base model. This could theoretically help with distribution shift if different models extrapolate differently.
+1. **Correlation-based feature filtering** (threshold=0.90) - reduced 4199 features to 85
+2. **Yield renormalization** (clip to [0,inf], normalize so sum ≤ 1)
+3. **Different ensemble weights** for single vs full data (7:6 vs 1:2 for CatBoost:XGBoost)
+4. **Combined ALL feature sources**: spange + acs_pca + drfps + fragprints
+
+The result was CV=0.009537, which is **14.93% WORSE** than the best baseline (0.008298).
 
 ## Technical Execution Assessment
 
@@ -13,55 +18,55 @@ The approach is well-motivated: instead of simple weighted averaging, let the me
 
 **Leakage Risk**: None detected ✓
 - Scalers fitted on training data only per fold
-- Base model predictions generated via internal 3-fold CV within each outer fold
-- Meta-learner trained only on OOF predictions from training data
+- Feature filtering applied consistently
 - No information leakage between folds
 
 **Score Integrity**: VERIFIED ✓
-- Single Solvent MSE: 0.010338
-- Full Data MSE: 0.008021
-- Overall MSE: 0.008828
+- Single Solvent MSE: 0.010107
+- Full Data MSE: 0.009231
+- Overall MSE: 0.009537
 - Scores verified in notebook output and metrics.json
 
 **Code Quality**: GOOD ✓
-- Model class in submission cells (`StackingEnsemble`) MATCHES the CV computation ✓
+- Model class in submission cells (`EnsModelRenorm`) MATCHES the CV computation ✓
 - Last 3 cells follow template exactly ✓
 - Seeds set for reproducibility
-- Clean implementation with proper stacking methodology
+- Clean implementation
 
 **Verdict: TRUSTWORTHY** - The implementation is correct and the results can be trusted.
 
 ## Strategic Assessment
 
-### Results Analysis
+### Key Finding: Aggressive Feature Filtering Hurt Performance
 
-| Metric | exp_089 (Stacking) | Best Baseline (exp_030) | Difference |
-|--------|-------------------|------------------------|------------|
-| Single Solvent MSE | 0.010338 | 0.009217 | +12.2% worse |
-| Full Data MSE | 0.008021 | 0.007841 | +2.3% worse |
-| Overall MSE | 0.008828 | 0.008298 | +6.4% worse |
+The experiment revealed that:
+1. **Correlation filtering was too aggressive**: 4199 → 85 features (98% reduction!)
+2. **Yield renormalization had essentially NO effect**: 0.17% difference
+3. **The original 145-feature set works better** than the filtered combined set
 
-**Key Finding**: Stacking performed **worse** than the simple weighted ensemble baseline.
+This is a valuable negative result - it tells us that more features ≠ better, and that aggressive filtering removes useful information.
 
-### Why Stacking Underperformed
+### CV-LB Relationship Analysis (CRITICAL)
 
-1. **Overfitting in Meta-Learner**: With only 24 solvents (single) and 13 ramps (full), the meta-learner has very few samples to learn from. The 3-fold internal CV for generating OOF predictions further reduces effective training data.
+I analyzed all 22 submissions with valid LB scores (excluding one outlier with LB=0.14507):
 
-2. **Noise Amplification**: When base models make correlated errors (which they do on this small dataset), the meta-learner can amplify rather than correct these errors.
+| CV Score | LB Score | Model |
+|----------|----------|-------|
+| 0.008298 | 0.08772 | GP+MLP+LGBM Ensemble (BEST) |
+| 0.008465 | 0.08875 | Weighted Loss Joint Model |
+| 0.008689 | 0.08929 | ACS PCA Fixed Compliant |
+| ... | ... | ... |
+| 0.012297 | 0.10649 | LightGBM Baseline |
 
-3. **Insufficient Diversity**: All base models are trained on the same features (Spange + DRFP + ACS PCA + Arrhenius). True stacking benefits from diverse feature representations, not just diverse algorithms.
+**Linear fit: LB = 4.29 × CV + 0.0528** (R² = 0.9523)
 
-### CV-LB Relationship Analysis
+**CRITICAL INSIGHT**: The intercept (0.0528) is ALREADY ABOVE the target (0.0347)!
 
-Looking at actual submissions with valid LB scores:
-- **Best LB achieved**: 0.0877 (multiple experiments)
-- **Best CV achieved**: 0.008092-0.008298
-- **Target LB**: 0.0347
-
-**Critical Observation**: Multiple experiments with different CVs (0.008092 to 0.011171) all achieved the SAME LB of 0.0877. This suggests:
-1. The LB evaluation may have some quantization or rounding
-2. The CV-LB relationship is not as linear as previously assumed
-3. There may be a "floor" around LB 0.0877 that current approaches cannot break through
+This means:
+- Even with CV = 0, the expected LB would be 0.0528
+- The target LB of 0.0347 is **BELOW the intercept**
+- No amount of CV improvement can reach the target with current approaches
+- This is STRUCTURAL DISTRIBUTION SHIFT, not a modeling problem
 
 ### Effort Allocation Assessment
 
@@ -72,131 +77,143 @@ Looking at actual submissions with valid LB scores:
 - ✅ GNN from scratch (5 experiments, all failed)
 - ✅ ChemBERTa embeddings (failed)
 - ✅ ChemProp features (failed)
-- ✅ Stacking ensembles (this experiment - worse than baseline)
+- ✅ Stacking ensembles (worse than baseline)
+- ✅ Ens Model kernel techniques (this experiment - worse)
 
 **Pattern Recognition**: 
 - All tabular approaches converge to CV ~0.008-0.009
 - All GNN approaches perform 2-3x worse (CV ~0.018-0.026)
-- LB appears stuck at ~0.0877 regardless of CV improvements
+- LB appears stuck at ~0.0877 regardless of CV improvements below 0.009
 
 ### Blind Spots - CRITICAL
 
-1. **GroupKFold Alternative**: The "mixall" public kernel uses **GroupKFold with 5 splits** instead of Leave-One-Out. This is a fundamentally different validation scheme that:
-   - Reduces variance in CV estimates
-   - May better correlate with LB
-   - Has NOT been tried by the team
+1. **The intercept problem is unsolved**: The CV-LB line has intercept 0.0528, which is above target 0.0347. This means the problem is NOT about improving CV - it's about changing the CV-LB relationship itself.
 
-2. **Feature Diversity for Stacking**: Current stacking uses same features for all base models. True stacking benefits from:
-   - Different feature subsets per model
-   - Different featurization approaches (e.g., one model on Spange, another on DRFP)
-   - This could improve ensemble diversity
+2. **Only 4 submissions remaining**: With limited submissions, the team cannot afford to submit experiments that are worse than the current best.
 
-3. **Pre-training Gap**: The benchmark paper achieved MSE 0.0039, but we don't know their pre-training strategy. All our approaches are trained from scratch on ~1800 samples.
+3. **Similarity weighting catastrophe**: exp_073 (similarity_weighting) achieved CV=0.00839 but LB=0.14507 - a massive outlier. This suggests that some approaches can BREAK the CV-LB relationship in the WRONG direction.
 
-4. **Only 4 Submissions Remaining**: With limited submissions, the team cannot afford to submit experiments that are worse than the current best.
+4. **Multiple submission errors**: 10 submissions resulted in "Evaluation metric raised an unexpected error" - this is wasting precious submissions.
 
 ## What's Working
 
-1. **Technical Implementation**: The stacking ensemble is correctly implemented with proper OOF prediction generation
-2. **Model Class Consistency**: Submission cells use the same model class as CV computation
-3. **Understanding Deepening**: The team now has evidence that stacking doesn't help on this small dataset
-4. **Tabular Baseline**: GP + MLP + LGBM ensemble (CV 0.008298, LB 0.0877) remains the best approach
+1. **Technical Implementation**: The experiment is correctly implemented with proper validation
+2. **Negative Result Value**: The team learned that aggressive feature filtering hurts performance
+3. **Yield Renormalization Insight**: Confirmed that this technique has negligible effect (0.17%)
+4. **Best Baseline Preserved**: GP+MLP+LGBM ensemble (CV=0.008298, LB=0.0877) remains the best
 
 ## Key Concerns
 
-### CRITICAL: exp_089 Should NOT Be Submitted
+### CRITICAL: exp_090 Should NOT Be Submitted
 
-**Observation**: exp_089 has CV=0.008828, which is 6.4% worse than the best baseline (0.008298).
+**Observation**: exp_090 has CV=0.009537, which is 14.93% worse than the best baseline (0.008298).
 
 **Why it matters**: 
-- The stacking approach performed worse than simple weighted averaging
+- The experiment performed significantly worse than baseline
 - Submitting would waste one of only 4 remaining submissions
 - No theoretical reason to expect this to beat LB 0.0877
 
-**Suggestion**: DO NOT submit exp_089.
+**Suggestion**: DO NOT submit exp_090.
 
-### HIGH: Try GroupKFold Validation Scheme
+### CRITICAL: The Intercept Problem
 
-**Observation**: The "mixall" public kernel uses GroupKFold(n_splits=5) instead of Leave-One-Out. This is a different validation approach that hasn't been tried.
+**Observation**: The CV-LB relationship is LB = 4.29 × CV + 0.0528 with R² = 0.9523. The intercept (0.0528) is above the target (0.0347).
 
 **Why it matters**: 
-- GroupKFold may have different CV-LB correlation
-- It's faster to iterate (5 folds vs 24/13 folds)
-- The kernel claims "good CV/LB" relationship
+- This is a STRUCTURAL problem, not a modeling problem
+- Improving CV will NOT reach the target
+- The team needs to change the CV-LB relationship, not improve CV
 
 **Suggestion**: 
-- Implement the best model (GP+MLP+LGBM ensemble) with GroupKFold validation
-- Compare CV scores and see if the relationship to LB changes
-- This could reveal whether the validation scheme is part of the problem
+- Focus on approaches that could REDUCE THE INTERCEPT
+- This requires fundamentally different representations or validation strategies
+- Consider: What makes the test solvents "harder" than training solvents?
 
-### MEDIUM: Feature Diversity for Better Stacking
+### HIGH: Submission Errors Are Wasting Resources
 
-**Observation**: Current stacking uses identical features for all base models.
+**Observation**: 10 out of 22 submissions resulted in "Evaluation metric raised an unexpected error".
 
 **Why it matters**: 
-- Stacking works best when base models have diverse error patterns
-- Using same features leads to correlated errors
-- This may explain why stacking underperformed
+- Each failed submission wastes a precious submission slot
+- The team has only 4 submissions remaining
+- This suggests notebook structure or output format issues
 
-**Suggestion**: If trying stacking again:
-- Train MLP on Spange features only
-- Train LGBM on DRFP features only
-- Train GP on ACS PCA features only
-- Use meta-learner to combine diverse predictions
+**Suggestion**: 
+- Before submitting, verify the notebook runs completely without errors
+- Check that submission.csv has the correct format
+- Test locally that all cells execute properly
 
-### LOW: Consider Simpler Approaches
+### MEDIUM: Feature Filtering Was Too Aggressive
 
-**Observation**: The best LB (0.0877) was achieved by relatively simple ensembles.
+**Observation**: Correlation filtering reduced 4199 features to 85 (98% reduction).
 
-**Suggestion**:
-- Focus on robustness over complexity
-- Consider that the target (0.0347) may require fundamentally different data or features
-- The benchmark paper's success may not be reproducible with current data alone
+**Why it matters**: 
+- The original 145-feature set works better
+- Aggressive filtering removed useful information
+- The "Ens Model" kernel's approach doesn't transfer well
+
+**Suggestion**: 
+- If trying feature filtering again, use a higher threshold (e.g., 0.98 instead of 0.90)
+- Or use feature importance from gradient boosting to select features
+- The current 145-feature set is well-tuned
 
 ## Top Priority for Next Experiment
 
-### DO NOT SUBMIT exp_089
+### DO NOT SUBMIT exp_090
 
-The CV (0.008828) is 6.4% worse than baseline. There is no reason to expect this to improve LB.
+The CV (0.009537) is 14.93% worse than baseline. There is no reason to expect this to improve LB.
 
 ### RECOMMENDED NEXT STEPS (in priority order)
 
-1. **Try GroupKFold Validation Scheme** (HIGH PRIORITY)
-   - The "mixall" kernel uses GroupKFold(n_splits=5) instead of Leave-One-Out
-   - This is a fundamentally different validation approach
-   - Implement the best model (GP+MLP+LGBM) with GroupKFold
-   - Compare CV scores and see if CV-LB relationship changes
-   
-   ```python
-   from sklearn.model_selection import GroupKFold
-   
-   def generate_leave_one_out_splits(X, Y):
-       groups = X["SOLVENT NAME"]
-       gkf = GroupKFold(n_splits=5)
-       for train_idx, test_idx in gkf.split(X, Y, groups):
-           yield (X.iloc[train_idx], Y.iloc[train_idx]), (X.iloc[test_idx], Y.iloc[test_idx])
-   ```
+**1. UNDERSTAND THE INTERCEPT PROBLEM (HIGHEST PRIORITY)**
 
-2. **Analyze What Makes LB 0.0877 a Floor**
-   - Multiple experiments with different CVs all achieved LB 0.0877
-   - What's special about this score? Is it a quantization artifact?
-   - Study the test set distribution vs training set
+The CV-LB relationship has intercept 0.0528, which is above target 0.0347. This means:
+- The problem is DISTRIBUTION SHIFT between training and test solvents
+- Test solvents are systematically "harder" than training solvents
+- No amount of CV improvement can reach the target
 
-3. **Feature Diversity Stacking** (if trying stacking again)
-   - Train different models on different feature subsets
-   - MLP on Spange, LGBM on DRFP, GP on ACS PCA
-   - This could improve ensemble diversity
+**Questions to investigate:**
+- What makes test solvents different from training solvents?
+- Are test solvents more structurally diverse?
+- Are test solvents in a different region of chemical space?
 
-4. **Conservative Predictions for Extrapolation**
-   - Detect when predicting for "far" solvents
-   - Blend toward training mean for high-uncertainty cases
-   - This could reduce LB error on unseen solvents
+**2. TRY APPROACHES THAT COULD REDUCE THE INTERCEPT**
+
+The intercept represents the "extrapolation error" - the error when predicting for solvents very different from training. To reduce it:
+
+a) **Conservative predictions for extrapolation**:
+```python
+# Detect when predicting for "far" solvents
+from sklearn.neighbors import NearestNeighbors
+nn = NearestNeighbors(n_neighbors=5).fit(X_train_features)
+distances, _ = nn.kneighbors(X_test_features)
+extrapolation_score = distances.mean(axis=1)
+
+# Blend toward training mean for high-uncertainty cases
+weight = np.clip(extrapolation_score / threshold, 0, 1)
+final_pred = (1 - weight) * model_pred + weight * train_mean
+```
+
+b) **Domain-aware regularization**:
+- Penalize predictions that are far from training distribution
+- Use uncertainty quantification to identify extrapolation
+
+c) **Solvent similarity features**:
+- Add features that capture similarity to training solvents
+- Use Tanimoto similarity to nearest training solvents
+
+**3. PRESERVE REMAINING SUBMISSIONS**
+
+With only 4 submissions remaining:
+- Only submit experiments that show CLEAR improvement over baseline
+- Verify notebook runs completely before submitting
+- Consider that the target may require fundamentally different data or features
 
 ### DO NOT DO:
-- ❌ Submit exp_089 (CV 6.4% worse than baseline)
+- ❌ Submit exp_090 (CV 14.93% worse than baseline)
+- ❌ More aggressive feature filtering (just demonstrated to fail)
 - ❌ More GNN variants without pre-training (5 consecutive failures)
-- ❌ More ChemBERTa/ChemProp experiments (already failed)
-- ❌ Complex stacking with same features (just demonstrated to fail)
+- ❌ Experiments that are worse than CV=0.008298
 
 ---
 
@@ -205,25 +222,29 @@ The CV (0.008828) is 6.4% worse than baseline. There is no reason to expect this
 | Dimension | Assessment |
 |-----------|------------|
 | Technical Execution | ✅ TRUSTWORTHY - Implementation is correct |
-| Strategic Direction | ⚠️ MARGINAL - Stacking didn't help, but hypothesis was reasonable |
-| Key Finding | Stacking with meta-learner performed 6.4% worse than simple weighted ensemble |
-| Critical Problem | Small dataset (24 solvents) insufficient for meta-learner to learn effectively |
-| Top Priority | **Try GroupKFold validation scheme from "mixall" kernel - this is an unexplored approach** |
+| Strategic Direction | ⚠️ NEGATIVE RESULT - Ens Model techniques don't help |
+| Key Finding | Aggressive feature filtering (4199→85) hurt performance by 14.93% |
+| Critical Problem | CV-LB intercept (0.0528) is ABOVE target (0.0347) |
+| Top Priority | **Understand and address the intercept problem - this is DISTRIBUTION SHIFT** |
 
 ## Confidence Levels
 
-- **Very High (99%)**: exp_089 should NOT be submitted (CV 6.4% worse)
-- **High (90%)**: Stacking doesn't help on this small dataset
-- **High (85%)**: GroupKFold validation scheme is worth trying
-- **Medium (70%)**: The LB 0.0877 "floor" may be related to validation scheme mismatch
-- **Medium (60%)**: Feature diversity could improve stacking performance
+- **Very High (99%)**: exp_090 should NOT be submitted (CV 14.93% worse)
+- **Very High (95%)**: Aggressive feature filtering hurts performance
+- **High (90%)**: Yield renormalization has negligible effect
+- **High (85%)**: The CV-LB intercept problem is the fundamental blocker
+- **Medium (70%)**: Conservative predictions for extrapolation could help
 
 ## THE TARGET IS REACHABLE
 
-The benchmark paper achieved MSE 0.0039. The current best LB is 0.0877. The gap is large but NOT insurmountable. Key unexplored directions:
+The benchmark paper achieved MSE 0.0039. The current best LB is 0.0877. The gap is large but NOT insurmountable. 
 
-1. **GroupKFold validation** - Different validation scheme may have different CV-LB relationship
-2. **Pre-training on large molecular datasets** - The benchmark paper likely used this
-3. **Feature diversity in ensembles** - Not yet properly explored
+**The key insight**: The problem is NOT about improving CV. The problem is about CHANGING THE CV-LB RELATIONSHIP. The intercept (0.0528) represents structural distribution shift that current approaches cannot address.
 
-The target IS reachable - but the path requires exploring validation schemes and potentially pre-training, not more model complexity on the same features.
+**Potential paths forward:**
+1. Pre-training on large molecular datasets (the benchmark paper likely used this)
+2. Conservative predictions for extrapolation (reduce error on "hard" solvents)
+3. Solvent similarity features (detect when extrapolating)
+4. Domain-aware regularization (penalize predictions far from training distribution)
+
+The target IS reachable - but the path requires addressing distribution shift, not more model tuning.
