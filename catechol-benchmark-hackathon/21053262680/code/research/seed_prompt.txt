@@ -13,103 +13,150 @@
 **CRITICAL INSIGHT**: The target is MATHEMATICALLY UNREACHABLE with any approach that falls on this line. We need an approach that CHANGES the CV-LB relationship.
 
 ## Response to Evaluator
-- Technical verdict was TRUSTWORTHY - exp_111 was correctly implemented
-- Evaluator's top priority was to SUBMIT to test the hypothesis - DONE
-- Key finding: exp_111 (SimilarityAwareModel) LB=0.1063 vs expected 0.1074 - ON THE LINE
-- Chemical similarity approach did NOT change the CV-LB relationship
-- Evaluator was correct that we needed to test this hypothesis
+- Technical verdict was TRUSTWORTHY - exp_112 (pseudo-labeling) was correctly implemented
+- Evaluator's top priority: Submit exp_112 to test hypothesis, then pivot if on line
+- Key finding: exp_112 has CV=0.0096 (WORSE than best CV=0.0081), expected LB=0.094 (on the line)
+- **I DISAGREE with submitting exp_112** - it has worse CV and will waste a submission
+- Evaluator correctly identified that pseudo-labeling doesn't address distribution shift
+- The approach smooths labels on TRAINING data, not on unseen solvents
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop113_lb_feedback.ipynb` for CV-LB analysis
+- Reference notebooks: See `exploration/evolver_loop114_analysis.ipynb` for CV-LB analysis
 - Key patterns:
   1. ALL tabular approaches (MLP, LGBM, XGBoost, CatBoost, GP, Ridge) fall on the SAME CV-LB line
   2. GNN experiments (exp_079) have CV=0.026 (3x worse than tabular) - NOT promising
   3. ChemBERTa experiments (exp_097) have CV=0.028 (3.5x worse than tabular) - NOT promising
   4. The intercept (0.0546) represents STRUCTURAL extrapolation error
   5. Test solvents are fundamentally different from training solvents
+  6. exp_112 (pseudo-labeling) has CV=0.0096 (worse than best) - NOT worth submitting
 
-## MANDATORY PIVOT: Try Pseudo-Labeling
+## CRITICAL: What We've Learned from 114 Experiments
 
-Since all standard approaches fall on the same CV-LB line, we MUST try something fundamentally different.
+### The Core Problem
+- The CV-LB relationship is TIGHT (R²=0.96) with intercept > target
+- This means NO amount of CV improvement will reach the target
+- We need to CHANGE THE RELATIONSHIP, not improve CV
 
-### Pseudo-Labeling Strategy
-The idea is to use confident predictions on the test set to augment training data, which could help the model adapt to the test distribution.
+### What Doesn't Work
+- ❌ MLP variants (all on same line)
+- ❌ LightGBM/XGBoost/CatBoost (all on same line)
+- ❌ GNN (3x worse CV)
+- ❌ ChemBERTa (3.5x worse CV)
+- ❌ Chemical similarity blending (exp_111 - on the line)
+- ❌ Pseudo-labeling (exp_112 - worse CV, likely on line)
 
-**Implementation:**
-```python
-# Step 1: Train initial model
-model = EnsembleModel(data='single')
-model.train_model(X_train, y_train)
-
-# Step 2: Get predictions on ALL data (including test-like samples)
-# For this competition, we can use the validation fold as "test-like"
-val_preds = model.predict(X_val)
-
-# Step 3: Compute ensemble variance to identify confident predictions
-# Train multiple models with different seeds
-models = [EnsembleModel(data='single', random_state=seed) for seed in range(5)]
-for m in models:
-    m.train_model(X_train, y_train)
-
-# Get predictions from all models
-all_preds = [m.predict(X_val) for m in models]
-ensemble_mean = np.mean(all_preds, axis=0)
-ensemble_var = np.var(all_preds, axis=0)
-
-# Step 4: Select confident predictions (low variance)
-confidence_threshold = np.percentile(ensemble_var.mean(axis=1), 50)  # Top 50% most confident
-confident_mask = ensemble_var.mean(axis=1) < confidence_threshold
-
-# Step 5: Augment training with confident pseudo-labels
-X_augmented = pd.concat([X_train, X_val[confident_mask]])
-y_augmented = pd.concat([y_train, pd.DataFrame(ensemble_mean[confident_mask], columns=y_train.columns)])
-
-# Step 6: Retrain on augmented data
-final_model = EnsembleModel(data='single')
-final_model.train_model(X_augmented, y_augmented)
-```
-
-### Why This Might Work
-1. The test solvents are different from training solvents
-2. By using confident predictions on validation folds (which contain unseen solvents), we're effectively adapting to the test distribution
-3. This could reduce the extrapolation error (intercept) by making the model more robust to unseen solvents
-
-### Alternative: Direct Calibration
-If pseudo-labeling doesn't work, try direct calibration:
-```python
-# Use the CV-LB relationship to calibrate predictions
-# LB = 4.09 × CV + 0.0546
-# If we want LB = 0.0347, we need to SUBTRACT the intercept from predictions
-# This is a post-hoc calibration that might help
-
-# Calibration factor: target_lb / expected_lb
-calibration_factor = 0.0347 / 0.0877  # = 0.396
-
-# Apply calibration to predictions
-calibrated_preds = raw_preds * calibration_factor
-```
+### What Might Work (UNTRIED)
+1. **Domain-Adversarial Training** - Learn solvent-invariant features
+2. **Conformal Prediction** - Uncertainty quantification with coverage guarantees
+3. **Physics-Informed Constraints** - Arrhenius, mass balance that generalize
+4. **Scaffold-Based Splitting** - Better CV-LB alignment
+5. **Direct Calibration** - Post-hoc adjustment based on CV-LB relationship
 
 ## Recommended Approaches (PRIORITY ORDER)
 
-### 1. PSEUDO-LABELING (HIGH PRIORITY)
-- Use confident predictions on validation folds to augment training
-- This could adapt the model to unseen solvents
-- Implementation: See above
+### 1. DOMAIN-ADVERSARIAL TRAINING (HIGH PRIORITY)
+The idea is to learn features that are invariant to the solvent identity, so the model generalizes better to unseen solvents.
 
-### 2. MULTI-SEED ENSEMBLE WITH VARIANCE-BASED WEIGHTING
-- Train 10+ models with different seeds
-- Weight predictions by inverse variance (more confident = higher weight)
-- This could reduce extrapolation error
+**Implementation:**
+```python
+class DomainAdversarialModel(BaseModel):
+    """
+    Uses domain-adversarial training to learn solvent-invariant features.
+    
+    Architecture:
+    - Feature extractor: Shared MLP that extracts features
+    - Predictor: Predicts yields from features
+    - Domain discriminator: Predicts which solvent the sample came from
+    
+    Training:
+    - Predictor is trained to minimize yield prediction loss
+    - Discriminator is trained to predict solvent identity
+    - Feature extractor is trained to FOOL the discriminator (gradient reversal)
+    
+    Why this might work:
+    - Forces the model to learn features that don't depend on solvent identity
+    - These features should generalize better to unseen solvents
+    """
+    def __init__(self, data="single"):
+        # Feature extractor
+        self.feature_extractor = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
+            nn.ReLU()
+        )
+        
+        # Yield predictor
+        self.predictor = nn.Sequential(
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, 3),
+            nn.Sigmoid()
+        )
+        
+        # Domain discriminator (predicts solvent)
+        self.discriminator = nn.Sequential(
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, n_solvents)
+        )
+```
+
+### 2. CONFORMAL PREDICTION (MEDIUM PRIORITY)
+Use conformal prediction to get prediction intervals with coverage guarantees.
+
+**Implementation:**
+```python
+class ConformalModel(BaseModel):
+    """
+    Uses conformal prediction for uncertainty quantification.
+    
+    Strategy:
+    1. Train base model on training data
+    2. Compute nonconformity scores on calibration set
+    3. At test time, use scores to get prediction intervals
+    4. If interval is wide (high uncertainty), blend toward mean
+    """
+    def predict(self, X):
+        base_pred = self.base_model.predict(X)
+        
+        # Compute nonconformity score (distance to nearest training sample)
+        distances = compute_distances(X, self.X_train)
+        uncertainty = distances.min(axis=1)
+        
+        # Blend toward mean for high uncertainty
+        weight = np.clip(uncertainty / threshold, 0, 1)
+        final_pred = (1 - weight) * base_pred + weight * train_mean
+        
+        return final_pred
+```
 
 ### 3. DIRECT CALIBRATION (LAST RESORT)
-- Apply a calibration factor based on CV-LB relationship
-- This is a heuristic but might help
+Apply a calibration factor based on the CV-LB relationship.
+
+**Implementation:**
+```python
+# The CV-LB relationship is: LB = 4.09 × CV + 0.0546
+# If we want to reduce LB, we need to reduce predictions
+
+# Option 1: Scale predictions
+calibration_factor = target / expected_lb  # = 0.0347 / 0.0877 = 0.396
+calibrated_preds = raw_preds * calibration_factor
+
+# Option 2: Blend toward mean
+# If predictions are too extreme, blend toward training mean
+blend_factor = 0.3  # Tune this
+calibrated_preds = (1 - blend_factor) * raw_preds + blend_factor * train_mean
+```
 
 ## What NOT to Try
 - ❌ More tabular model variants (all on same line)
 - ❌ GNN (3x worse CV)
 - ❌ ChemBERTa (3.5x worse CV)
 - ❌ Chemical similarity blending (already tried, on the line)
+- ❌ Pseudo-labeling (worse CV, likely on line)
+- ❌ Multi-seed ensembles (optimization when far from target)
+- ❌ Hyperparameter tuning (won't change the intercept)
 
 ## Validation Notes
 - CV scheme: Leave-One-Out by solvent (24 folds single, 13 folds full)
@@ -118,8 +165,32 @@ calibrated_preds = raw_preds * calibration_factor
 
 ## CRITICAL: Submission Strategy
 With only 3 submissions remaining:
-1. **Submission 1**: Try pseudo-labeling approach
-2. **Submission 2**: Try variance-weighted ensemble if pseudo-labeling doesn't work
-3. **Submission 3**: Final attempt with best approach
 
-The target IS reachable. We just need to find the right approach that CHANGES the CV-LB relationship.
+1. **DO NOT submit exp_112** - CV is worse (0.0096 vs 0.0081), will waste a submission
+
+2. **Try Domain-Adversarial Training** - This is the most promising approach
+   - If CV is similar to best (~0.008) AND LB is better than expected from line, we've found something!
+   - If LB is on the line, pivot to next approach
+
+3. **Try Conformal Prediction** - Uncertainty-weighted predictions
+   - Blend toward mean when extrapolating
+   - Could reduce the intercept
+
+4. **Last resort: Direct Calibration** - Post-hoc adjustment
+   - Scale predictions by calibration factor
+   - This is a heuristic but might help
+
+## THE TARGET IS REACHABLE
+
+The benchmark paper achieved MSE 0.0039. The current best LB is 0.0877. The target (0.0347) is between these values.
+
+**The key insight**: We need to find an approach that CHANGES the CV-LB relationship. The intercept (0.0546) represents extrapolation error that no amount of model tuning can fix. We need approaches that:
+1. Learn solvent-invariant features (domain-adversarial)
+2. Detect extrapolation and make conservative predictions (conformal)
+3. Apply post-hoc calibration (direct calibration)
+
+**IMMEDIATE ACTIONS:**
+1. Implement domain-adversarial training
+2. If CV is good (~0.008), submit to test if it changes the CV-LB relationship
+3. If on the line, try conformal prediction
+4. Save last submission for best approach
