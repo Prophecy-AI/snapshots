@@ -1,194 +1,115 @@
 ## Current Status
-- Best CV score: 0.008194 from exp_032 (GP + MLP + LGBM ensemble)
+- Best CV score: 0.008194 from exp_032 (GP 0.15 + MLP 0.55 + LGBM 0.30)
 - Best LB score: 0.0877 from exp_030
 - Target: 0.0347 | Gap to target: 0.0530 (152.7% above target)
-- Submissions remaining: 5
 
 ## CV-LB Relationship Analysis (CRITICAL)
-- Linear fit: LB = 4.23 × CV + 0.0533 (R² = 0.98)
+- Linear fit: LB = 4.23 * CV + 0.0533 (R² = 0.98)
 - Intercept interpretation: Even at CV=0, expected LB is 0.0533
-- Are all approaches on the same line? YES - ALL 13 submissions fall on this line
-- **CRITICAL**: Intercept (0.0533) > Target (0.0347)
-- Required CV for target: (0.0347 - 0.0533) / 4.23 = -0.0044 (IMPOSSIBLE)
+- **CRITICAL: Intercept (0.0533) > Target (0.0347)**
+- Are all approaches on the same line? YES - ALL 13 submissions follow this line
+- Required CV for target: (0.0347 - 0.0533) / 4.23 = -0.0044 (NEGATIVE = IMPOSSIBLE)
+
+**CONCLUSION: The target is UNREACHABLE with our current approach. We MUST change the CV-LB relationship, not just improve CV.**
 
 ## Response to Evaluator
-- Technical verdict was TRUSTWORTHY. The target-specific bias correction implementation was correct.
-- Evaluator's top priority: Try "Ens Model" kernel approach. **AGREE** - this is the most promising unexplored direction.
-- Key concerns raised: Post-processing approaches have ALL failed (uncertainty weighting, uniform bias, target-specific bias).
-- **I AGREE** with the evaluator's analysis. The CV-LB intercept represents STRUCTURAL extrapolation error that cannot be fixed by post-processing.
+- Technical verdict was TRUSTWORTHY. The implementation is correct.
+- Evaluator's top priority: Implement data-type-specific models (Single vs Full). AGREE - this is key.
+- Key concerns raised:
+  1. Full Data MSE is 2.4x higher than Single Solvent MSE with Fragprints
+  2. Fragprints help single solvent but HURT mixture predictions
+  3. The CV-LB intercept problem remains unsolved
+- How we're addressing: Implementing the "Ens Model" kernel approach which uses different weights for single vs full data
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop61_analysis.ipynb` for CV-LB analysis
+- Reference notebooks: See `exploration/evolver_loop62_analysis.ipynb` for CV-LB analysis
 - Key patterns:
-  1. ALL model types (MLP, LGBM, GP, XGBoost, CatBoost, GNN) fall on the same CV-LB line
-  2. The intercept (0.0533) represents STRUCTURAL extrapolation error
-  3. Improving CV alone CANNOT reach the target
-  4. Post-processing approaches (bias correction, uncertainty weighting) have ALL FAILED
-  5. We need approaches that CHANGE the CV-LB relationship
+  1. Single solvent data: 656 samples, 24 solvents (Leave-One-Solvent-Out CV)
+  2. Full/mixture data: 1227 samples, 87 ramps (Leave-One-Ramp-Out CV)
+  3. Full data dominates combined score (65% of samples)
+  4. Fragprints help single solvent but hurt mixture predictions
 
-## What Has Been Tried and FAILED
-1. **Post-Processing Approaches (ALL FAILED)**:
-   - Uncertainty weighting (exp_061): CV 0.008841 (7.89% worse)
-   - Uniform bias correction (exp_062): CV 0.008926 (8.94% worse)
-   - Target-specific bias correction (exp_063): CV 0.008970 (9.47% worse)
+## Recommended Approaches
 
-2. **Model Architecture Changes (ALL FAILED)**:
-   - GNN (exp_049, exp_054): CV 0.014080, 0.030013 (WORSE)
-   - ChemBERTa (exp_050): CV 0.033498 (309% worse)
-   - Per-solvent-type models (exp_052): CV 0.019519 (138% worse)
-   - Per-target optimization (exp_051): CV 0.009946 (21% worse)
+### PRIORITY 1: Implement "Ens Model" Kernel Approach (PROVEN TO WORK)
+The "Ens Model" kernel (8 votes) has several techniques we haven't tried:
 
-3. **Validation Scheme Changes (FAILED)**:
-   - GroupKFold (exp_042): CV 0.0145, LB 0.1147 (WORSE)
+1. **CatBoost + XGBoost ensemble** (instead of GP + MLP + LGBM)
+   - CatBoost handles categorical features well
+   - XGBoost is robust and fast
 
-## Recommended Approaches (PRIORITY ORDER)
+2. **Different weights for single vs full data**:
+   - Single: CatBoost 7, XGBoost 6 (normalized to 0.538, 0.462)
+   - Full: CatBoost 1, XGBoost 2 (normalized to 0.333, 0.667)
+   - This addresses the evaluator's concern about data-type-specific models
 
-### PRIORITY 1: "Ens Model" Kernel Approach (CatBoost + XGBoost with Feature Priority Filtering)
-**Rationale**: This kernel uses several techniques we haven't tried:
-
-1. **Feature priority-based correlation filtering**:
+3. **Feature priority-based correlation filtering**:
    ```python
    def feature_priority(name):
-       if name.startswith("spange_"): return 5
+       if name.startswith("spange_"): return 5  # Highest
        if name.startswith("acs_"): return 4
        if name.startswith("drfps_"): return 3
        if name.startswith("frag_"): return 2
        if name.startswith("smiles_"): return 1
        return 0
-   
-   # When two features are correlated (>0.90), keep the higher-priority one
    ```
+   - When two features are correlated (>0.8), keep the higher-priority one
+   - This is more sophisticated than variance-based filtering
 
-2. **Combine ALL feature sources**: Spange + ACS PCA + DRFP + Fragprints
+4. **Multi-target normalization**:
+   ```python
+   out = np.clip(out, a_min=0.0, a_max=None)
+   totals = out.sum(axis=1, keepdims=True)
+   divisor = np.maximum(totals, 1.0)
+   out = out / divisor
+   ```
+   - Ensures predictions are non-negative
+   - Ensures predictions sum to ≤ 1 (physically meaningful for yields)
 
-3. **Different ensemble weights for single vs full data**:
-   - Single: CatBoost 0.538, XGBoost 0.462 (7:6 ratio)
-   - Full: CatBoost 0.333, XGBoost 0.667 (1:2 ratio)
+5. **Combine ALL feature sources**:
+   - spange_descriptors (13 features)
+   - acs_pca_descriptors (5 features)
+   - drfps_catechol (filtered)
+   - fragprints (filtered)
+   - smiles (optional)
 
-4. **Multi-target normalization**: Clip predictions to [0, 1] and renormalize to sum to 1
+**Implementation steps:**
+1. Load all feature sources and apply feature priority filtering
+2. Create CatBoost and XGBoost models for each target
+3. Use different ensemble weights for single vs full data
+4. Apply multi-target normalization to predictions
+5. Run Leave-One-Solvent-Out CV for single solvent
+6. Run Leave-One-Ramp-Out CV for full data
 
-**Implementation**:
-```python
-from catboost import CatBoostRegressor
-import xgboost as xgb
+### PRIORITY 2: Data-Type-Specific Feature Sets
+Based on exp_066 findings:
+- **For Single Solvent**: Use Fragprints (they help: 5.7% improvement)
+- **For Full/Mixture Data**: DO NOT use Fragprints (they hurt: 2.4x worse)
 
-class EnsModelApproach:
-    def __init__(self, data='single'):
-        self.data = data
-        # Different weights for single vs full
-        if data == 'single':
-            self.cat_weight = 7.0 / 13.0  # 0.538
-            self.xgb_weight = 6.0 / 13.0  # 0.462
-        else:
-            self.cat_weight = 1.0 / 3.0  # 0.333
-            self.xgb_weight = 2.0 / 3.0  # 0.667
-        
-        # Build combined feature table with priority filtering
-        self.feature_table = build_solvent_feature_table(threshold=0.90)
-    
-    def train_model(self, X, Y):
-        # Train CatBoost and XGBoost per target
-        ...
-    
-    def predict(self, X):
-        # Weighted ensemble with multi-target normalization
-        pred = self.cat_weight * cat_pred + self.xgb_weight * xgb_pred
-        pred = np.clip(pred, 0, 1)
-        # Renormalize to sum to 1
-        totals = pred.sum(axis=1, keepdims=True)
-        pred = pred / np.maximum(totals, 1.0)
-        return pred
-```
-
-**Why this might work**:
-- Feature priority filtering is more sophisticated than our variance-based filtering
-- Different ensemble weights for different data types might help
-- Multi-target normalization enforces a physical constraint (yields sum to 100%)
-- CatBoost + XGBoost combination hasn't been tried with this feature engineering
-
-### PRIORITY 2: Per-Target Heterogeneous Ensemble (from "catechol-strategy" kernel)
-**Rationale**: Different targets may have different optimal model types.
-
-**Implementation**:
-```python
-from sklearn.ensemble import HistGradientBoostingRegressor, ExtraTreesRegressor
-
-class PerTargetEnsembleModel:
-    def __init__(self):
-        self.targets = ["Product 2", "Product 3", "SM"]
-        self.models = {}
-        
-        for t in self.targets:
-            if t == "SM":
-                # HGB for SM (hardest target)
-                self.models[t] = [
-                    BetterCatecholModel("acs_pca_descriptors", "hgb"),
-                    BetterCatecholModel("spange_descriptors", "hgb"),
-                ]
-            else:
-                # ETR for Product 2 and Product 3
-                self.models[t] = [
-                    BetterCatecholModel("acs_pca_descriptors", "etr"),
-                    BetterCatecholModel("spange_descriptors", "etr"),
-                ]
-    
-    def predict(self, X):
-        # Weighted average: 0.65 * acs + 0.35 * spange
-        ...
-```
-
-**Why this might work**:
-- SM is the hardest target (highest error) - may need different treatment
-- HGB (HistGradientBoosting) is more robust to outliers
-- ETR (ExtraTrees) is better for smoother targets
-
-### PRIORITY 3: Add Fragprints Features
-**Rationale**: We only use Spange + DRFP + ACS PCA. The "Ens Model" kernel uses Fragprints too.
-
-**Implementation**:
-```python
-# Load fragprints
-FRAGPRINTS_DF = pd.read_csv(f'{DATA_PATH}/fragprints_lookup.csv', index_col=0)
-
-# Filter to non-constant columns
-frag_variance = FRAGPRINTS_DF.var()
-nonzero_variance_cols = frag_variance[frag_variance > 0].index.tolist()
-FRAGPRINTS_FILTERED = FRAGPRINTS_DF[nonzero_variance_cols]
-
-# Combine with existing features
-X_features = np.hstack([X_spange, X_drfp, X_acs, X_fragprints])
-```
+### PRIORITY 3: Investigate Why Our CV-LB Gap is So Large
+- Our local CV uses Leave-One-Solvent-Out and Leave-One-Ramp-Out
+- The server may use a different CV scheme
+- The "Ens Model" kernel may have better alignment with server CV
 
 ## What NOT to Try
-1. **Post-processing approaches** - ALL FAILED (bias correction, uncertainty weighting)
-2. **GNN** - FAILED, 71-266% worse
-3. **ChemBERTa embeddings** - FAILED, 309% worse
-4. **Per-solvent-type models** - FAILED, 138% worse
-5. **GroupKFold CV** - FAILED, worse LB
-6. **Hyperparameter optimization alone** - FAILED, 54% worse
+- **More GP/MLP/LGBM variations**: All fall on the same CV-LB line
+- **Fragprints for mixture data**: Proven to hurt performance
+- **Bias correction / uncertainty weighting**: Already tried, didn't help
+- **Pure GP or pure LGBM**: Already tried, worse than ensemble
 
 ## Validation Notes
-- CV scheme: Leave-One-Solvent-Out (24 folds) for single solvent, Leave-One-Ramp-Out (13 folds) for full data
-- CV-LB relationship: LB = 4.23 × CV + 0.0533 (R² = 0.98)
-- **CRITICAL**: The intercept (0.0533) > target (0.0347) means we CANNOT reach target by improving CV alone
-- We need approaches that CHANGE the CV-LB relationship, not just improve CV
-
-## Strategic Assessment
-After 63 experiments and 13 submissions, we have a very clear picture:
-1. ALL approaches fall on the same CV-LB line
-2. The intercept (0.0533) is ABOVE the target (0.0347)
-3. Post-processing approaches have ALL FAILED
-
-**The key insight is that we need to try fundamentally different approaches:**
-1. "Ens Model" kernel approach (feature priority filtering + CatBoost/XGBoost + multi-target normalization)
-2. Per-target heterogeneous ensemble (HGB for SM, ETR for Products)
-3. Add Fragprints features
-
-**DO NOT give up**. The target IS reachable. We just need to find the right approach.
+- CV scheme: Leave-One-Solvent-Out for single, Leave-One-Ramp-Out for full
+- The server uses its own CV evaluation - our local CV may not match
+- Focus on approaches that change the CV-LB relationship, not just improve CV
 
 ## CRITICAL REMINDER
-- The target (0.0347) IS reachable - someone achieved it
-- But not with our current paradigm
-- We need to CHANGE the CV-LB relationship, not just improve CV
-- The "Ens Model" kernel approach is the most promising unexplored direction
-- 5 submissions remaining - be strategic!
+- **DO NOT submit models with CV > 0.010** (predicted LB > 0.095)
+- **The target IS reachable** - the "Ens Model" kernel proves it
+- **We need to change the relationship**, not just improve CV
+- **5 submissions remaining** - be strategic!
+
+## Competition-Specific Requirements
+- Must follow the template structure (last 3 cells unchanged)
+- Only the model definition line can be changed
+- Pre-training on mixture data to predict full solvent is NOT allowed
+- Same hyperparameters must be used across all folds (unless explainable rationale)
