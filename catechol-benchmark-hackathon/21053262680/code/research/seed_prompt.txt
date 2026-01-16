@@ -1,104 +1,104 @@
 ## Current Status
-- Best CV score: 0.0081 from exp_049/050/051/053 (CatBoost + XGBoost Ensemble)
+- Best CV score: 0.0081 from exp_049/050/053 (CatBoost + XGBoost Ensemble)
 - Best LB score: 0.0877 from exp_030 (CV=0.0083)
 - Target: 0.0347 | Gap to target: 0.053 (152.8%)
 - Remaining submissions: 4
 
 ## CV-LB Relationship Analysis (CRITICAL)
-- Linear fit: LB = 4.29 × CV + 0.0528 (R² = 0.952)
-- Intercept interpretation: Even at CV=0, expected LB is 0.0528
-- Are all approaches on the same line? **YES**
-- **CRITICAL**: Intercept (0.0528) > Target (0.0347)
-- Required CV for target: (0.0347 - 0.0528) / 4.29 = -0.0042 (IMPOSSIBLE)
+- Linear fit: LB = 4.315 × CV + 0.0525 (R² = 0.95)
+- Intercept interpretation: Even at CV=0, expected LB is 0.0525
+- Are all approaches on the same line? **YES - ALL 12 VALID SUBMISSIONS**
+- **CRITICAL**: Intercept (0.0525) > Target (0.0347)
+- Required CV for target: (0.0347 - 0.0525) / 4.315 = -0.0041 (IMPOSSIBLE)
 
 **The target is MATHEMATICALLY UNREACHABLE with approaches that follow this line.**
 **We MUST find approaches that CHANGE THE CV-LB RELATIONSHIP, not just improve CV.**
 
 ## Response to Evaluator
-- Technical verdict was TRUSTWORTHY CV, BUT MODEL MISMATCH
-- Evaluator's top priority: Submit SimilarityAwareModel with correct format to test hypothesis
-- Key concerns raised: 
-  1. Current submission uses EnsembleModel (CV=0.011988), NOT SimilarityAwareModel (CV=0.0092)
-  2. The chemical similarity hypothesis remains UNTESTED on LB
-  3. GNN/ChemBERTa experiments had model class mismatch - results INVALID
+- Technical verdict was CONCERNS - CV degraded due to featurization change
+- Evaluator's top priority: Fix featurization to match exp_108, verify CV, then submit
+- Key concerns raised:
+  1. exp_110 used CONCATENATION for mixtures instead of WEIGHTED AVERAGE
+  2. This degraded CV from 0.0092 (exp_108) to 0.012912 (exp_110)
+  3. The chemical similarity hypothesis remains UNTESTED on LB
 
 **My response:**
-- I AGREE with the evaluator that we need to test fundamentally different approaches
-- However, the SimilarityAwareModel (CV=0.0092) is WORSE than our best CV (0.0081)
-- Even if it changes the CV-LB relationship, it's unlikely to beat target
-- We need approaches that BOTH improve CV AND change the intercept
-- The priority should be TRANSDUCTIVE LEARNING which can improve OOD prediction by 1.5-1.8x
+- I AGREE with the evaluator's diagnosis
+- The featurization mismatch is the root cause of CV degradation
+- We need to fix this and submit to test the hypothesis
+- However, even with CV=0.0092, expected LB = 4.315 × 0.0092 + 0.0525 = 0.092
+- This is still far from target (0.0347)
+- We need MORE AGGRESSIVE conservative blending to reduce the intercept
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop111_analysis.ipynb`
+- Reference notebooks: See `exploration/evolver_loop112_analysis.ipynb`
 - Key patterns:
   1. ALL 12 valid submissions fall on the SAME CV-LB line (R²=0.95)
-  2. The intercept (0.0528) represents structural extrapolation error
+  2. The intercept (0.0525) represents structural extrapolation error
   3. Test solvents are fundamentally different from training solvents
   4. Benchmark paper achieved MSE=0.0039 using GNN - 22x better than our best
 
+## IMMEDIATE PRIORITY: Fix SimilarityAwareModel and Submit
+
+### Step 1: Create exp_111 with CORRECT featurization
+
+The key fix is in PrecomputedFeaturizerMixed - use WEIGHTED AVERAGE, not concatenation:
+
+```python
+class PrecomputedFeaturizerMixed(SmilesFeaturizer):
+    def __init__(self):
+        self.featurizer = build_solvent_feature_table()
+        dummy_num = pd.DataFrame([[0] * len(INPUT_LABELS_NUMERIC)], columns=INPUT_LABELS_NUMERIC)
+        numeric_dim = add_numeric_features(dummy_num).shape[1]
+        self.feats_dim = numeric_dim + self.featurizer.shape[1]  # SAME as single (not doubled!)
+
+    def featurize(self, X):
+        X_numeric = add_numeric_features(X[INPUT_LABELS_NUMERIC].copy())
+        A = self.featurizer.loc[X["SOLVENT A NAME"]].values
+        B = self.featurizer.loc[X["SOLVENT B NAME"]].values
+        frac_B = X["SolventB%"].values.reshape(-1, 1)
+        frac_A = 1 - frac_B
+        mixed = A * frac_A + B * frac_B  # WEIGHTED AVERAGE - physically meaningful!
+        X_out = np.concatenate([X_numeric.values, mixed], axis=1)
+        return torch.tensor(X_out, dtype=torch.double)
+```
+
+### Step 2: Use MORE AGGRESSIVE conservative blending
+
+The current best config (st=0.3, bw=0.2) is too conservative. Try:
+- similarity_threshold=0.5, blend_weight=0.4
+- similarity_threshold=0.6, blend_weight=0.5
+
+The goal is to REDUCE THE INTERCEPT, not improve CV. Higher blend weights will:
+- Hurt CV (predictions blend more toward training mean)
+- But potentially HELP LB (reduce extrapolation error on unseen solvents)
+
+### Step 3: Verify CV and Submit
+
+1. Verify CV matches exp_108 (~0.0092) with st=0.3, bw=0.2
+2. Then try more aggressive configs
+3. Submit the most aggressive config that doesn't completely destroy CV
+4. Analyze if the CV-LB relationship changes
+
 ## Recommended Approaches (PRIORITY ORDER)
 
-### 1. TRANSDUCTIVE LEARNING (Highest Priority) - TRY THIS FIRST
-Based on web research (Nature 2025), transductive approaches can improve OOD prediction by 1.5-1.8x.
-The idea: Use test data (without labels) to adapt the model.
+### 1. IMMEDIATE: Fix SimilarityAwareModel (exp_111)
+- Use weighted average featurization
+- Try aggressive blending (st=0.5, bw=0.4)
+- Submit to test hypothesis
 
-**Implementation:**
-```python
-class TransductiveModel(BaseModel):
-    def __init__(self, data='single'):
-        self.base_model = EnsembleModel(data=data)  # Use our best model as base
-        self.data_mode = data
-        
-    def train_model(self, train_X, train_Y):
-        # Store training data for transductive adaptation
-        self.train_X = train_X
-        self.train_Y = train_Y
-        self.base_model.train_model(train_X, train_Y)
-        
-    def predict(self, test_X):
-        # 1. Get initial predictions
-        initial_preds = self.base_model.predict(test_X)
-        
-        # 2. Compute similarity of test samples to training
-        # Use Morgan fingerprints + Tanimoto similarity
-        
-        # 3. For samples similar to training, use model prediction
-        # For dissimilar samples, blend toward training mean
-        
-        # 4. Key insight: Use test data structure to inform predictions
-        # Even without labels, test data tells us about the distribution
-        
-        return adapted_preds
-```
+### 2. IF THAT DOESN'T WORK: Even More Aggressive Blending
+- Try st=0.6, bw=0.5 or even st=0.7, bw=0.6
+- The key insight: We need to SACRIFICE CV to reduce the intercept
+- A model with CV=0.015 but intercept=0.03 would beat target!
 
-**Why this might work:**
-- The benchmark paper likely used some form of transductive learning
-- It directly addresses the distribution shift problem
-- Can potentially reduce the intercept, not just improve CV
-- Recent research shows 1.5-1.8x improvement on OOD molecular prediction
+### 3. IF STILL STUCK: Transductive Learning
+- Use test data structure (without labels) to adapt predictions
+- Recent research shows 1.5-1.8x improvement on OOD prediction
 
-### 2. PSEUDO-LABELING WITH CONFIDENCE FILTERING
-Use confident predictions on test data to augment training.
-
-**Implementation:**
-```python
-# 1. Train initial model on training data
-# 2. Predict on test data
-# 3. Compute prediction uncertainty (ensemble variance)
-# 4. Select high-confidence predictions (low variance)
-# 5. Add pseudo-labels to training
-# 6. Retrain model
-# 7. Repeat
-```
-
-### 3. PROPER GNN WITH CORRECT SUBMISSION FORMAT
-Previous GNN attempts had model class mismatch. Fix this.
-
-**CRITICAL: Verify submission cells use the EXACT SAME model class as CV**
-
-### 4. AGGRESSIVE CONSERVATIVE BLENDING
-Try more aggressive blending toward training mean for dissimilar samples.
+### 4. LAST RESORT: Ensemble of Different Approaches
+- Combine models that might have different CV-LB relationships
+- Even if individual models are on the same line, ensemble might not be
 
 ## What NOT to Try
 - ❌ NO more MLP/LGBM/XGB/CatBoost variants (all on same line)
@@ -118,12 +118,16 @@ Try more aggressive blending toward training mean for dissimilar samples.
 3. Verify BOTH `model = MyModel(data='single')` AND `model = MyModel(data='full')` match
 4. If they don't match, FIX THEM before running submission cells
 5. Verify submission format: columns = ['id', 'task', 'fold', 'row', 'target_1', 'target_2', 'target_3']
+6. Verify featurization: mixtures use WEIGHTED AVERAGE, not concatenation
 
-## IMMEDIATE PRIORITY FOR NEXT EXPERIMENT
-**Implement TRANSDUCTIVE LEARNING approach:**
-1. Use our best model (CatBoost + XGBoost ensemble) as base
-2. During prediction, compute similarity of test samples to training
-3. For dissimilar samples, adapt predictions using test data structure
-4. The key is to use test data (without labels) to inform predictions
+## SUBMISSION STRATEGY (4 remaining)
+1. exp_111: SimilarityAwareModel with fixed featurization + aggressive blending
+2. If different CV-LB relationship: iterate on blending parameters
+3. If same relationship: try transductive learning
+4. Final submission: best approach based on learnings
 
-This is the most promising approach based on recent research showing 1.5-1.8x improvement on OOD molecular prediction.
+## KEY INSIGHT
+The intercept (0.0525) represents the STRUCTURAL extrapolation error that exists even with perfect CV.
+To beat the target (0.0347), we need to REDUCE THIS INTERCEPT by 34%.
+This requires approaches that are MORE CONSERVATIVE on unseen solvents.
+Sacrificing CV to reduce extrapolation error is the RIGHT strategy.
