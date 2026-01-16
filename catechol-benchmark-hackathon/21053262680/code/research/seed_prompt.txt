@@ -1,116 +1,62 @@
 ## Current Status
-- Best CV score: 0.0081 from exp_049/050/053 (CatBoost + XGBoost ensemble)
-- Best LB score: 0.0877 (exp_030 - GP+MLP+LGBM ensemble)
+- Best CV score: 0.0081 from exp_049/050/053 (CatBoost+XGBoost ensemble)
+- Best LB score: 0.0877 (exp_030)
 - Target: 0.0347 | Gap to target: 153%
-- Experiments: 97 | Submissions: 22/5 used, 4 remaining
 
 ## CV-LB Relationship Analysis (CRITICAL)
-- Linear fit: LB = 4.315 × CV + 0.0525 (R² = 0.95)
-- Intercept (0.0525) > Target (0.0347)
-- Required CV for target: -0.0041 (IMPOSSIBLE with current approaches)
-- **ALL 97 experiments fall on the SAME CV-LB line**
-- This is a STRUCTURAL DISTRIBUTION SHIFT problem, not model quality
+- Linear fit: LB = 4.31 * CV + 0.0525 (R² = 0.95)
+- Intercept interpretation: Even at CV=0, expected LB is 0.0525
+- Are all approaches on the same line? YES
+- CRITICAL: Intercept (0.0525) > Target (0.0347)
+- Required CV for target: (0.0347 - 0.0525) / 4.31 = -0.0041 (IMPOSSIBLE)
+
+**This means the target is mathematically unreachable with current approaches that fall on this line.**
 
 ## Response to Evaluator
-
-**Technical verdict was TRUSTWORTHY** - exp_096 (Multi-Order GAT) was correctly implemented but achieved CV=0.0447, which is 452% worse than baseline.
-
-**Evaluator's top priority**: Use PRE-TRAINED molecular embeddings instead of training GNNs from scratch.
-
-**I AGREE with the evaluator's assessment:**
-1. GNNs trained from scratch on small data (~600 samples) don't work
-2. The benchmark paper likely used pre-trained embeddings
-3. We need approaches that CHANGE the CV-LB relationship, not just improve CV
-4. With only 4 submissions remaining, we must be strategic
-
-**Key insight from exp_096**: The Multi-Order GAT with proper PyTorch Geometric implementation achieved CV=0.0447 - this is 452% WORSE than simple tabular models. This definitively proves that training GNNs from scratch on this small dataset doesn't work.
+- Technical verdict was TRUSTWORTHY. The ChemBERTa implementation was correct but failed due to dimensionality (786 features for ~600 samples).
+- Evaluator's top priority: PCA-reduced ChemBERTa (768 → 20 dim) + domain constraints. **AGREE** - this addresses the dimensionality problem.
+- Key concerns raised: 
+  1. ChemBERTa 768-dim is too high-dimensional → **Addressing with PCA reduction**
+  2. CV-LB intercept problem unsolved → **Need approaches that CHANGE the relationship, not just improve CV**
+  3. exp_073 similarity weighting was a disaster (LB 0.1451) → **AVOID similarity-based approaches**
 
 ## Data Understanding
+- Reference notebooks: See `exploration/evolver_loop98_analysis.ipynb` for CV-LB analysis
+- Key patterns:
+  1. ALL tabular models (MLP, LGBM, XGB, CatBoost, GP, Ridge) fall on the SAME CV-LB line
+  2. GNN attempts ALL failed with worse CV than tabular models
+  3. ChemBERTa (768-dim) failed due to dimensionality (CV 0.028 vs baseline 0.0081)
+  4. Similarity-based approaches made things WORSE (exp_073: LB 0.1451)
+  5. The test solvents are VERY different from training solvents
 
-Reference notebooks:
-- `exploration/evolver_loop97_analysis.ipynb` - CV-LB relationship analysis
+## Recommended Approaches (Priority Order)
 
-Key patterns:
-1. **24 unique solvents** in single solvent data (656 samples)
-2. **13 unique solvent pairs** in full data (1227 samples)
-3. **Leave-One-Solvent-Out** validation means we predict for UNSEEN solvents
-4. **The benchmark paper (arXiv:2512.19530) achieved MSE 0.0039** - this proves the target is reachable
-
-## CRITICAL INSIGHT FROM PUBLIC KERNELS
-
-The "mixall" kernel (9 votes) uses a DIFFERENT validation scheme:
-- **GroupKFold (5 splits)** instead of Leave-One-Out (24 folds)
-- Ensemble: MLP + XGBoost + RandomForest + LightGBM
-- Claims "good CV/LB" with only 2m 15s runtime
-- This might give a DIFFERENT CV-LB relationship!
-
-## MANDATORY NEXT EXPERIMENT: Frozen ChemBERTa Embeddings + Ensemble
-
-Based on web research, use frozen ChemBERTa embeddings as features:
+### 1. PCA-Reduced ChemBERTa (HIGH PRIORITY)
+**Rationale**: ChemBERTa embeddings (768-dim) failed due to dimensionality. Reducing to 10-20 components should help.
 
 ```python
-from transformers import AutoModel, AutoTokenizer
-import torch
-import numpy as np
+from sklearn.decomposition import PCA
 
-class ChemBERTaFeaturizer:
-    """Extract frozen ChemBERTa embeddings for SMILES strings."""
-    
-    def __init__(self, model_name="seyonec/ChemBERTa-zinc-base-v1"):
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModel.from_pretrained(model_name)
-        self.model.eval()  # Freeze weights
-        
-    def featurize(self, smiles_list):
-        """Extract embeddings for a list of SMILES strings."""
-        embeddings = []
-        with torch.no_grad():
-            for smiles in smiles_list:
-                inputs = self.tokenizer(smiles, return_tensors="pt", padding=True, truncation=True)
-                outputs = self.model(**inputs)
-                # Mean pool over token dimension
-                embed = outputs.last_hidden_state.mean(dim=1).squeeze().numpy()
-                embeddings.append(embed)
-        return np.array(embeddings)
+# Pre-compute reduced embeddings for all solvents
+pca = PCA(n_components=20)
+chemberta_reduced = pca.fit_transform(chemberta_768dim)
 
-# Usage:
-# 1. Pre-compute embeddings for all solvents
-# 2. Use embeddings as features for MLP/LGBM/XGB ensemble
-# 3. This leverages pre-trained knowledge without training from scratch
+# Total features: 20 (ChemBERTa PCA) + 13 (Spange) + 5 (Arrhenius) = 38
+# This is comparable to best model's 18 features
 ```
 
-**Why this might work:**
-- ChemBERTa was pre-trained on 10M+ SMILES strings
-- Frozen embeddings capture molecular structure without overfitting
-- Combines pre-trained knowledge with our best ensemble approach
+**Expected outcome**: If CV improves below 0.0081, submit to check if it changes the CV-LB relationship.
 
-### Implementation Steps:
-1. Install transformers: `pip install transformers`
-2. Load ChemBERTa model: `seyonec/ChemBERTa-zinc-base-v1`
-3. Extract embeddings for all 24 solvents (768-dim vectors)
-4. Create lookup table: solvent_name -> embedding
-5. Use embeddings as features (instead of or in addition to Spange/DRFP)
-6. Train MLP + LGBM + XGB ensemble
-7. Verify submission cells use correct model class
-
-### CRITICAL VERIFICATION:
-- **BEFORE running CV**: Note the exact model class name
-- **AFTER CV**: Verify submission cells use the SAME model class
-- **If mismatch**: FIX submission cells before logging experiment
-
-## ALTERNATIVE: Domain Constraint Enforcement (Mass Balance)
-
-If ChemBERTa doesn't work, try enforcing mass balance:
+### 2. Yield Normalization / Mass Balance Constraint (MEDIUM PRIORITY)
+**Rationale**: The Ens Model kernel uses yield normalization (clip to 0, normalize if sum > 1). This is a domain constraint that should generalize to unseen solvents.
 
 ```python
 def enforce_mass_balance(predictions):
     """Post-process predictions to satisfy mass balance."""
-    # predictions shape: [N, 3] for Product2, Product3, SM
-    
     # Clip to [0, 1]
     predictions = np.clip(predictions, 0, 1)
     
-    # Ensure sum doesn't exceed 1
+    # Ensure sum doesn't exceed 1 (yields can't exceed 100% total)
     row_sums = predictions.sum(axis=1, keepdims=True)
     mask = row_sums > 1
     predictions[mask.squeeze()] = predictions[mask.squeeze()] / row_sums[mask]
@@ -118,28 +64,79 @@ def enforce_mass_balance(predictions):
     return predictions
 ```
 
-## What NOT to Try
+**Expected outcome**: May reduce extreme predictions that hurt LB.
 
-1. ❌ **More GNNs trained from scratch** - exp_096 proved this doesn't work (CV 452% worse)
-2. ❌ **More tabular model variants** - All 97 experiments fall on same CV-LB line
-3. ❌ **Hyperparameter tuning** - Won't change the intercept
-4. ❌ **Multi-seed ensembles** - Gap is 153%, not 1-2%
-5. ❌ **Submitting experiments with CV > 0.0081** - Only submit if better
+### 3. Conservative Blending Toward Training Mean (MEDIUM PRIORITY)
+**Rationale**: If test solvents are fundamentally different, blending ALL predictions toward training mean may reduce the intercept.
+
+```python
+class ConservativeModel:
+    def __init__(self, base_model, blend_factor=0.2):
+        self.base_model = base_model
+        self.blend_factor = blend_factor
+        self.train_mean = None
+    
+    def fit(self, X, y):
+        self.base_model.fit(X, y)
+        self.train_mean = y.mean(axis=0)
+    
+    def predict(self, X):
+        base_pred = self.base_model.predict(X)
+        # Blend toward training mean
+        return (1 - self.blend_factor) * base_pred + self.blend_factor * self.train_mean
+```
+
+**Expected outcome**: May reduce the CV-LB intercept by making predictions more conservative.
+
+### 4. Cost-Sensitive Re-weighting (MEDIUM PRIORITY)
+**Rationale**: Research shows yield prediction is an imbalanced regression problem. High-yield reactions are underrepresented.
+
+```python
+# Weight samples by inverse frequency of their yield bin
+def compute_sample_weights(y):
+    # Bin yields into 10 bins
+    bins = np.linspace(0, 1, 11)
+    bin_indices = np.digitize(y.mean(axis=1), bins)
+    bin_counts = np.bincount(bin_indices, minlength=11)
+    weights = 1.0 / (bin_counts[bin_indices] + 1)
+    return weights / weights.sum() * len(weights)
+```
+
+**Expected outcome**: May improve predictions for underrepresented yield regions.
+
+### 5. Exact Ens Model Replica (FALLBACK)
+**Rationale**: The Ens Model kernel uses ALL feature sources with correlation-based filtering. We haven't exactly replicated this.
+
+Key features:
+- ALL feature sources: spange, acs_pca, drfps, fragprints, smiles
+- Correlation-based filtering with priority (spange > acs > drfps > frag > smiles)
+- CatBoost + XGBoost ensemble with different weights for single vs full data
+- Yield normalization (clip to 0, normalize if sum > 1)
+
+## What NOT to Try
+- ❌ More raw ChemBERTa embeddings (768-dim is too large)
+- ❌ More GNNs trained from scratch (they fail on small data)
+- ❌ More similarity-based approaches (exp_073 disaster)
+- ❌ More tabular model variants (they all fall on the same CV-LB line)
+- ❌ Multi-seed ensembles or hyperparameter sweeps (too far from target)
 
 ## Validation Notes
+- CV scheme: Leave-One-Out for single solvent (24 folds), Leave-One-Ramp-Out for full data (13 folds)
+- Combined CV = (single_cv + full_cv) / 2
+- CRITICAL: Verify submission cell model class matches CV model class before logging
 
-1. **CV Scheme**: Leave-One-Solvent-Out for single solvent, Leave-One-Ramp-Out for full data
-2. **Model Class Consistency**: ALWAYS verify submission cells use the EXACT model class from CV
-3. **Only 4 submissions remaining** - use wisely
-4. **Only submit if**:
-   - CV is better than 0.0081 (baseline)
-   - OR approach shows promise for changing CV-LB relationship
+## Submission Strategy (4 remaining)
+1. Only submit experiments that show promise for CHANGING the CV-LB relationship
+2. If CV improves AND the approach is fundamentally different, submit to check LB
+3. If nothing improves, submit best CV (exp_049/050/053) as fallback
+4. Save at least 1 submission for final attempt
 
-## REMEMBER
+## Key Insight from Research
+The web search revealed that the CV-LB gap in chemical yield prediction can be reduced by:
+1. **Data augmentation** - permuting reactant-product pairs
+2. **Test-time augmentation** - average predictions from multiple augmented views
+3. **Pre-training on large molecular databases** - then fine-tuning
+4. **Cost-sensitive re-weighting** - higher importance to underrepresented regions
+5. **Imbalanced regression** - treat yield prediction as an imbalanced problem
 
-The benchmark paper achieved MSE 0.0039 (vs our best 0.0877) - a **25x improvement**. The target IS reachable. The key is:
-1. **Pre-trained embeddings** - not training from scratch
-2. **Distribution shift handling** - not just improving CV
-3. **Domain constraints** - physics-based rules that generalize
-
-The CV-LB intercept (0.0525) is the fundamental blocker. We need approaches that REDUCE this intercept, not just improve CV.
+The target IS reachable. The benchmark paper achieved MSE 0.0039. We just haven't found the right approach yet.
