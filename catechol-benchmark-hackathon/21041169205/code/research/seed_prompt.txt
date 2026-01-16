@@ -1,100 +1,103 @@
 ## Current Status
-- Best CV score: 0.0083 from exp_030 (GP+MLP+LGBM ensemble)
-- Best LB score: 0.0877 from exp_030 and exp_067
+- Best CV score: 0.0081 from exp_049/050/053 (but these had submission errors)
+- Best verified LB score: 0.0877 from exp_030 and exp_067
 - Target: 0.0347 | Gap to target: 0.0530
 
 ## CV-LB Relationship Analysis (CRITICAL)
-- Linear fit: LB = 4.36 * CV + 0.0520 (R² = 0.96)
+- Linear fit: LB = 4.36 * CV + 0.0520 (R² = 0.9558)
 - Intercept interpretation: Even at CV=0, expected LB is 0.0520
-- Are all approaches on the same line? YES - extremely tight fit
+- Are all approaches on the same line? YES
 - **CRITICAL**: Intercept (0.0520) > Target (0.0347)
-- Required CV for target: (0.0347 - 0.0520) / 4.36 = -0.0040 (IMPOSSIBLE)
+- Required CV for target: (0.0347 - 0.0520) / 4.36 = -0.004 (IMPOSSIBLE)
 
-**THIS IS A DISTRIBUTION SHIFT PROBLEM, NOT A MODEL OPTIMIZATION PROBLEM**
-Standard CV optimization CANNOT reach the target. We must change the CV-LB relationship.
+**This means standard CV optimization CANNOT reach the target. We MUST change the CV-LB relationship.**
 
 ## Response to Evaluator
-- Technical verdict: TRUSTWORTHY - exp_070 implementation is sound
-- Evaluator's top priority: **Combine best model (exp_030) with extrapolation detection**
-- Key concerns raised:
-  1. exp_070 uses simple MLP [64,64] instead of best model (GP+MLP+LGBM)
-  2. CV=0.01536 is almost 2x worse than best CV=0.0083
-  3. Need to verify if extrapolation detection actually changes the CV-LB relationship
-
-**I AGREE with the evaluator's assessment.** The extrapolation detection approach is strategically correct (trying to reduce the intercept), but it needs to be combined with the best base model.
+- Technical verdict was TRUSTWORTHY. The exp_071 implementation was sound but the approach was flawed.
+- Evaluator's top priority: Fix the blend target (nearest neighbor instead of global mean). AGREE.
+- Key concerns raised: Blending toward global mean is WRONG for outlier solvents. HFIP's fold had MSE=0.200280 because predictions were pulled toward the mean, but HFIP's actual behavior is very different.
+- The evaluator correctly identified that the strategic direction (reducing CV-LB intercept) is correct, but the implementation needs to be fixed.
 
 ## Data Understanding
-- Reference notebooks: `exploration/evolver_loop73_analysis.ipynb` for CV-LB analysis
+- Reference notebooks: See `exploration/evolver_loop74_analysis.ipynb` for CV-LB analysis
 - Key patterns:
-  - Outlier solvents (HFIP, Cyclohexane, Water, Ethylene Glycol, TFE) have high outlier scores
-  - These solvents are far from others in Spange descriptor space
-  - Blending predictions toward mean for outliers may help on unseen test solvents
+  1. All model types (MLP, LGBM, XGB, GP) fall on the same CV-LB line
+  2. The intercept (0.0520) represents EXTRAPOLATION ERROR to unseen solvents
+  3. Outlier solvents (HFIP, Cyclohexane, Water) have DIFFERENT behavior, not "average" behavior
+  4. The extrapolation detection in exp_071 HURT performance by blending toward global mean
 
-## Recommended Approaches (Priority Order)
+## Recommended Approaches
 
-### PRIORITY 1: Combine exp_030 (Best Model) with Extrapolation Detection
-**Rationale**: exp_030 has best CV (0.0083) and best LB (0.0877). Adding extrapolation detection on top may reduce the intercept without sacrificing CV too much.
+### PRIORITY 1: Revert to Best Model (exp_030) and Submit
+The exp_071 extrapolation detection made things worse. We should:
+1. Revert to exp_030 (GP+MLP+LGBM ensemble, CV=0.0083, LB=0.0877)
+2. This is our best verified model
 
-Implementation approach:
-1. Copy the GP+MLP+LGBM ensemble from exp_030
-2. Add pre-computed outlier scores for each solvent
-3. After getting ensemble predictions, apply blending toward mean for outlier solvents
-4. Use sigmoid output to ensure [0,1] range
+### PRIORITY 2: Try Nearest Neighbor Blending (Instead of Global Mean)
+If we want to try extrapolation detection again:
+1. For outlier solvents, blend toward NEAREST training solvent's predictions
+2. This preserves chemical similarity
+3. Use Spange descriptor distance to find nearest neighbors
 
-Key outlier solvents (z-score > 1.0):
-- HFIP: 4.57 (z=2.24)
-- Cyclohexane: 4.18 (z=1.86)
-- Water: 3.70 (z=1.40)
-- Ethylene Glycol: 3.69 (z=1.39)
-- TFE: 3.59 (z=1.29)
-
-Blend formula:
-```
-z_score = (outlier_score - 2.24) / 1.04
-blend_weight = clip((z_score - threshold) / 2.0, 0, 1)
-final_pred = (1 - blend_weight) * ensemble_pred + blend_weight * mean_pred
-```
-
-### PRIORITY 2: Try Different Blend Thresholds
-- blend_threshold=0.5: More aggressive blending
-- blend_threshold=1.0: Moderate blending (default)
-- blend_threshold=1.5: Less aggressive blending
-
-### PRIORITY 3: Use GP Uncertainty for Extrapolation Detection
-Instead of distance-based outlier scores, use GP's uncertainty estimates:
 ```python
-mean, var = gp.predict(X, return_var=True)
-uncertainty = np.sqrt(var)
-blend_weight = np.clip(uncertainty / threshold, 0, 1)
-conservative_pred = (1 - blend_weight) * mean + blend_weight * population_mean
+def get_nearest_training_mean(self, test_solvent):
+    """Get mean prediction for k nearest training solvents."""
+    test_features = SPANGE_DF.loc[test_solvent].values
+    distances = []
+    for train_solvent in self.training_solvents:
+        train_features = SPANGE_DF.loc[train_solvent].values
+        dist = np.linalg.norm(test_features - train_features)
+        distances.append((train_solvent, dist))
+    
+    distances.sort(key=lambda x: x[1])
+    nearest = distances[:self.k_neighbors]
+    
+    # Return mean of nearest solvents' predictions
+    nearest_preds = [self.solvent_mean_predictions[s] for s, _ in nearest]
+    return np.mean(nearest_preds, axis=0)
 ```
 
-### PRIORITY 4: 4-Model Ensemble (like mixall kernel)
-Add XGBoost and RandomForest to the ensemble:
-- MLP (40%), XGBoost (20%), RF (20%), LightGBM (20%)
+### PRIORITY 3: Disable Extrapolation Detection for Full Data
+The full data CV went from 0.008488 to 0.040984 (383% worse) with extrapolation detection.
+Only apply extrapolation detection to single solvents, not mixtures.
+
+### PRIORITY 4: Try Chemical Class-Specific Models
+Group solvents by chemical class:
+- Alcohols: Methanol, Ethanol, IPA, tert-Butanol, TFE, HFIP, Ethylene Glycol
+- Ethers: THF, 2-MeTHF, Diethyl Ether, MTBE
+- Esters: Ethyl Acetate, Methyl Propionate, Ethyl Lactate, Dimethyl Carbonate
+- Amides: DMA
+- Ketones: Butanone, Cyrene
+- Hydrocarbons: Cyclohexane
+- Nitriles: Acetonitrile
+
+Use class-specific means for blending instead of global mean.
+
+### PRIORITY 5: Study Top Public Kernels
+The "mixall" kernel uses MLP+XGB+RF+LGBM ensemble with weighted averaging.
+The "Arrhenius" kernel uses 7-model bagging with TTA.
+Consider implementing these approaches.
 
 ## What NOT to Try
-- ❌ Simple MLP without ensemble (already tried, CV worse)
-- ❌ DRFP-only features (exp_002 showed they're worse than Spange)
-- ❌ Deep residual networks (exp_004 failed badly)
-- ❌ Pure GP (exp_032 showed it's worse than ensemble)
-- ❌ Standard CV optimization without addressing intercept
+- Blending toward global mean (proven to hurt performance)
+- Deep residual networks (exp_004 failed badly)
+- DRFP-only features with PCA (exp_002 was much worse)
+- Aggressive extrapolation detection (exp_071 hurt performance)
 
 ## Validation Notes
-- Use official Leave-One-Out CV (24 folds for single, 13 for full)
-- Ensure predictions are in [0, 1] range (use sigmoid or clip)
-- Follow exact template structure (last 3 cells unchanged)
-- CV will likely be slightly worse with extrapolation detection, but LB may improve
+- CV scheme: Leave-one-solvent-out for single solvents (24 folds), leave-one-ramp-out for full data (13 folds)
+- CV-LB gap: ~4.36x multiplier + 0.0520 intercept
+- The intercept is the key problem - we need to reduce it, not just improve CV
 
 ## Key Insight
-The target (0.0347) is BELOW the intercept (0.0520) of the CV-LB line. This means:
-1. No amount of CV improvement can reach the target
-2. We must change the CV-LB relationship
-3. Extrapolation detection is designed to do exactly this
-4. But it must be combined with the best base model (exp_030)
+The target (0.0347) is BELOW the intercept (0.0520). This means:
+1. Standard ML optimization CANNOT reach the target
+2. We need approaches that CHANGE THE CV-LB RELATIONSHIP
+3. The GNN benchmark achieved MSE 0.0039 - the target IS reachable
+4. We need to find what the GNN does differently that changes the relationship
 
 ## Submission Strategy
-- 4 submissions remaining
-- Submit the extrapolation-aware ensemble (exp_030 + extrapolation detection)
-- If LB improves relative to CV, the approach is working
-- If LB doesn't improve, try different blend thresholds or GP uncertainty
+With only 4 remaining submissions:
+1. Submit exp_030 (best verified model) to confirm pipeline works
+2. If we have time, try nearest neighbor blending approach
+3. Focus on approaches that might change the CV-LB relationship
