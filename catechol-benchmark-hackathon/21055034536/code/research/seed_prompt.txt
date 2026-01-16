@@ -1,80 +1,52 @@
 ## Current Status
 - Best CV score: 0.0081 (exp_049/050/053 variants; some LB pending)
 - Best confirmed LB score: 0.0877 (exp_030 and exp_068)
-- Latest experiment: exp_073_AD_shrinkage_template_safe | CV: 0.0091106 | LB: not submitted/unknown (logged 0.0)
+- Latest experiment: exp_073_AD_shrinkage_template_safe | CV: 0.0091106 | LB: not submitted/unknown
 - Target LB: 0.034700 | Gap to target (best LB): 0.053020
 
 ## CV-LB Relationship Analysis (CRITICAL)
-- Fitted on completed submissions: **LB ≈ 4.34 × CV + 0.0523** (R² ≈ 0.957) (per evaluator)
-- Interpretation: large **structural intercept ~0.052** dominates; CV improvements mostly move along same line.
-- Are all approaches on the same line? **YES** (MLP/LGBM/XGB/CatBoost/GP all align).
-- Therefore: we must **change test-time behavior** on OOD solvents/ramps (reduce intercept), not just improve CV.
+- Fitted on completed submissions: **LB 										 			 	 	 	 LB 
+  
+  
+  LB 
+**LB 
+  
+  LB**
+- Practical: as evaluator computed: **LB        **: **LB  4.34     CV + 0.0523 (R 0.957)**
+- Interpretation: large structural intercept ~0.052 dominates; we must reduce intercept by OOD-aware test-time behavior.
+- Are all approaches on the same line? **YES**.
 
-## Response to Evaluator (REQUIRED)
-- Technical verdict was **CONCERNS**. I agree the run is template-safe and CV is meaningful, but internal consistency issues likely suppressed performance.
-- Evaluator’s top priority: **v2 AD shrinkage** with (1) refit distance+mu on full fold, (2) hinged shrinkage, (3) consider kNN-mean-y fallback.
-- We will implement exactly these fixes. Additionally, we’ll react to the new analysis: distance correlates with error strongly for **full/mixtures** but not for **single**, so we should (a) improve single distance features (include kinetics) or (b) disable/attenuate shrinkage for single.
+## Response to Evaluator
+- Technical verdict: **CONCERNS**. Agree: template-safe; CV meaningful; internal consistency suppressing performance.
+- Top priority: implement **v2 AD shrinkage** with (1) refit NN/scaler + mu on full fold, (2) hinged shrinkage (alpha~0 for ID), (3) neighbor-based fallback instead of global mean.
+- We will do exactly this.
+- Additional synthesis with new analysis: distance correlates with error strongly for **full/mixtures** but not for **single**, so we should improve single distance features (add kinetics) or disable shrinkage on single.
 
 ## Data Understanding
-- Reference: `exploration/evolver_loop66_analysis.ipynb` … `loop69` confirm CV→LB line/intercept.
-- New (loop73 analysis):
-  - Full-data blended-embedding kNN distance correlates with per-row error (Spearman ~0.27). Top 30% most-distant rows contribute ~43% of full-data MSE.
-  - Single-solvent embedding distance does **not** positively correlate with error → shrinkage there is likely harmful unless distance includes kinetics/conditions.
+- See loop66-69 for CV-LB intercept analysis.
+- Loop73 analysis (new):
+  - Full-data blended embedding kNN distance correlates with per-row error (Spearman ~0.27). Top 30% most-distant rows contribute ~43% of full-data MSE.
+  - Single-solvent embedding distance does not correlate positively with error.
 
 ## Recommended Approaches (priority order)
+1) **AD Shrinkage v2 (hinged + refit + kNN-mean-y fallback)**
+   - New model class: `GPMLPLGBM_ADShrinkageV2`
+   - Calibrate alpha(d) on inner split, then refit base + NN/scaler on full fold.
+   - Use hinge threshold tau (e.g., q=0.7) so alpha=0 for d<=tau.
+   - Replace global mean fallback with kNN mean of y (per target) in training space.
 
-### 1) **AD Shrinkage v2 = hinged + refit + kNN fallback (NEW prediction family)**
-This is a pivot away from pure tabular/global models into a **hybrid local (instance-based) correction** designed to reduce the LB intercept.
+2) **Distance feature upgrades**
+   - Single: add kinetics to distance vector: [RT, Temp, invT, logRT, invT*logRT] + solvent_embed.
+   - Full: keep blend embedding + add pct, pct*(1-pct), and ||A-B|| in embed space.
 
-Implement a new model class (e.g., `GPMLPLGBM_ADShrinkageV2`) starting from the template-safe notebook scaffold (072A0/073):
-
-**Inside each outer fold (single and full):**
-1. Split X_train into train_inner/cal_inner using GroupShuffleSplit (same as 073) **only for learning alpha(d)**.
-2. Train `base_inner` on train_inner, predict cal_inner.
-3. Fit scaler+NearestNeighbors on train_inner distance-features; compute d_cal.
-4. Learn a **hinge threshold τ** so shrinkage is ~0 for in-domain:
-   - Set τ = quantile(d_cal, q) where q in {0.60, 0.70, 0.80} (choose one; 0.70 is a good start).
-   - Use d’ = max(0, d - τ).
-   - Force alpha(0)=0 by adding an anchor point (d’=0, alpha=0) when fitting isotonic.
-5. **Fallback target = kNN-mean-y**, not global mean:
-   - For each cal point, compute `y_knn_cal` = mean of y_train_inner over its k nearest neighbors in distance space.
-   - Compute per-sample optimal alpha to blend `p_cal` with `y_knn_cal`, then aggregate by distance bins and isotonic-fit alpha(d’).
-   - Prediction rule: `pred = (1-alpha)*base_pred + alpha*y_knn_pred`.
-6. **Refit stage (fix evaluator concern):** after alpha(d’) is learned,
-   - Refit **base** on full fold X_train.
-   - Refit scaler+NN on full fold X_train distance-features (unsupervised).
-   - Set any global baselines (if still used) from full y_train.
-
-**Key implementation notes:**
-- Keep `alpha(d’)` fixed from calibration; only refit NN/scaler/base on full fold.
-- Ensure the **same class** is used in CV and both submission model lines (single and full). No mismatches.
-
-### 2) Improve distance features (esp. SINGLE)
-Given analysis, do NOT use solvent-embedding-only distance for single.
-
-- Single distance features should include kinetics/conditions:
-  - `[Residence Time, Temperature, invT, logRT, invT*logRT]` + solvent_embed
-  - Standardize and use Euclidean distance.
-
-- Full distance features: start with the **blend embedding** (it correlated best) + add mixture nonlinearity scalars:
-  - `D = [blend_embed, pct, pct*(1-pct), ||A-B||]` where `||A-B||` is L2 norm in solvent_embed space.
-  - This is cheap and captures “how different are the components”.
-
-### 3) Only shrink mixtures first (surgical)
-If time is tight: apply AD shrinkage **only for data='full'**, and for single return base prediction unchanged (alpha=0). This matches evidence and avoids hurting single CV.
-
-### 4) One LB submission as an intercept test (after CV sanity)
-After implementing v2:
-- If overall CV is within ~0.0005 of baseline template-safe (~0.0086) OR only slightly worse but predictions are meaningfully changed on high-distance points, **submit exactly one** v2 model to probe if intercept reduces.
+3) **Surgical version if needed**
+   - Apply AD only on `data='full'`; keep single as base (alpha=0) to avoid harming single.
 
 ## What NOT to Try
-- More pure MLP/LGBM/XGB/CatBoost tuning or bigger ensembles (forbidden; stays on same CV→LB line).
-- Multi-seed averaging, large sweeps, weight fine-tuning.
-- Any AD method that shrinks toward **global mean** without hinge (already likely to hurt ID CV).
+- More optimization of standard tabular models, multi-seed, sweeps.
+- Global-mean shrinkage without hinge.
 
 ## Validation Notes
-- Must use template-defined split generators.
-- Add debug prints (during development only, not in final submission cells) to confirm:
-  - `alpha` is ~0 for low d’, non-zero only in tail.
-  - kNN fallback values are reasonable (in [0,1]).
-- Keep the last 3 template cells unchanged except the `model = ...` line.
+- Must keep last 3 template cells unchanged except the model line.
+- Verify submission model class equals CV model class for both single and full.
+- Add debug checks in development: alpha near zero for low distances; alpha activates in tail.
