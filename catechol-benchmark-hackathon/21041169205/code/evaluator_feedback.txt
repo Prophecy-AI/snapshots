@@ -1,13 +1,17 @@
 ## What I Understood
 
-The junior researcher implemented experiment 083 (pseudo_labeling), attempting to address the distribution shift problem through self-training: train an ensemble of CatBoost models, make predictions on test data with uncertainty estimation, select high-confidence predictions, add them as pseudo-labels to training data, and retrain. The hypothesis was that adapting to the test distribution through pseudo-labeling might reduce the CV-LB gap.
+The junior researcher implemented experiment 084 (ens_model_exact), attempting to exactly replicate the ens-model public kernel from matthewmaree. The hypothesis was that using the EXACT hyperparameters from a successful public kernel might improve performance. The implementation includes:
+- Combined features from spange, acs_pca, drfps, fragprints (67 features after correlation filtering)
+- CatBoost + XGBoost ensemble with specific hyperparameters
+- Ensemble weights: single (7:6), full (1:2)
+- Probability normalization: clip to non-negative, divide by max(sum, 1.0)
 
 **Results:**
-- Single Solvent CV: 0.010908 ± 0.009750
-- Full Data CV: 0.013869 ± 0.007046
-- Overall CV: 0.012837
+- Single Solvent CV: 0.009046 ± 0.008474
+- Full Data CV: 0.009501 ± 0.004401
+- Overall CV: 0.009342
 
-This is **59% WORSE** than the best CV (0.008092 from exp_049/exp_050).
+This is **15.4% WORSE** than the best CV achieved (0.008092 from exp_049/exp_050).
 
 ## Technical Execution Assessment
 
@@ -15,91 +19,76 @@ This is **59% WORSE** than the best CV (0.008092 from exp_049/exp_050).
 - Uses official Leave-One-Out CV functions (unmodified)
 - Proper train/test splits with no data leakage
 - Scalers fitted per fold
-- Pseudo-labels generated from model predictions on test data only
+- Correct template structure (last 3 cells match template)
 
 **Leakage Risk**: None detected ✓
 - Models trained fresh per fold
-- Pseudo-labels are model predictions, not actual labels
-- No access to true test labels during training
+- Feature tables are static lookups (no target leakage)
+- Correlation filtering done correctly
 
 **Score Integrity**: VERIFIED ✓
-- CV scores match execution output (0.010908 single, 0.013869 full)
+- CV scores match execution output (0.009046 single, 0.009501 full)
 - Submission file has correct format (1883 rows)
 - Predictions in valid range [0,1]
+- Row sums range from 0.29 to 1.0 (probability normalization working)
 
-**Code Quality**: REASONABLE ✓
-- Clean implementation of pseudo-labeling with uncertainty estimation
-- Proper handling of confidence thresholds
-- 2 iterations of self-training
+**Code Quality**: GOOD ✓
+- Clean implementation following the ens-model kernel structure
+- Proper feature engineering (T_inv, RT_log, T_x_RT, RT_scaled)
+- Correct ensemble weighting
 
-Verdict: **TRUSTWORTHY** - The implementation is correct, but the approach doesn't improve performance.
+Verdict: **TRUSTWORTHY** - The implementation is correct, but the approach doesn't improve over our best.
 
 ## Strategic Assessment
 
-### Why Pseudo-Labeling Doesn't Work Here
+### Why This Experiment Didn't Help
 
-The researcher correctly identified that pseudo-labeling is a domain adaptation technique. However, it fails in this specific context because:
+The researcher correctly identified that replicating a successful public kernel might help. However:
 
-1. **LOO-CV structure mismatch**: In Leave-One-Out CV, the test solvent is NEVER in training. Pseudo-labels from the test fold don't help because:
-   - The model is already confident on its predictions (low variance)
-   - Adding pseudo-labels just reinforces the model's existing biases
-   - There's no "unlabeled" data from the test distribution to adapt to
+1. **The ens-model kernel's LB score is unknown**: We don't know what LB score the original ens-model achieved. It might not be better than our best (0.0877).
 
-2. **Self-fulfilling prophecy**: The model generates pseudo-labels based on its own predictions, then trains on them. This doesn't introduce new information - it just makes the model more confident in its existing (potentially wrong) predictions.
+2. **Probability normalization may hurt**: The kernel clips predictions and divides by max(sum, 1.0). But the actual data has row sums ranging from ~0.3 to ~1.0 (mean ~0.80). Forcing normalization may be inappropriate.
 
-3. **The fundamental problem remains**: The intercept (0.055) > target (0.0347). Pseudo-labeling doesn't change the CV-LB relationship.
+3. **Different feature combinations**: The ens-model uses smiles features which we don't have access to locally. This could explain the performance gap.
+
+4. **The fundamental problem remains**: All approaches fall on the same CV-LB line with intercept ~0.055 > target 0.0347.
 
 ### The CV-LB Relationship (CRITICAL)
 
-Based on 9 verified submissions:
+Based on verified submissions:
 ```
-Linear fit: LB ≈ 3.98 * CV + 0.055
-R² = 0.64
-Best LB: 0.0876 (exp_036)
+Linear fit: LB ≈ 4.0 * CV + 0.055
+Best LB: 0.0876-0.0877 (exp_030, exp_036, exp_067)
 Target: 0.0347
 ```
 
 **Mathematical Reality:**
-- To achieve LB < 0.0347, we'd need: CV < (0.0347 - 0.055) / 3.98 = -0.005
+- To achieve LB < 0.0347, we'd need: CV < (0.0347 - 0.055) / 4.0 = -0.005
 - NEGATIVE CV is impossible
 - The intercept (0.055) alone exceeds the target (0.0347)
 
-**This is the fundamental problem.** No amount of CV optimization can reach the target with the current approach.
+**This is the fundamental problem.** The intercept represents structural distribution shift to unseen solvents that no amount of CV optimization can fix.
 
 ### Effort Allocation Assessment
 
-The team has spent 83+ experiments trying various approaches:
+The team has spent 84+ experiments trying various approaches:
 - MLP variants, ensembles, deep residual networks
-- Different features (Spange, DRFP, combined)
+- Different features (Spange, DRFP, ACS PCA, fragprints, combined)
 - Distribution shift mitigation (clustering, similarity weighting, pseudo-labeling)
 - Extrapolation detection, conservative blending
+- Replicating public kernels (ens-model, best-work-here, mixall)
 
-**ALL approaches fall on the same CV-LB line.** The intercept (~0.055) represents structural distribution shift that no amount of CV optimization can fix.
+**ALL approaches fall on the same CV-LB line.** The intercept (~0.055) represents extrapolation error that no amount of CV optimization can fix.
 
-### What the ens-model Kernel Does Differently
+### What's Missing
 
-I analyzed the ens-model kernel and found key techniques:
+1. **Graph Neural Networks**: The GNN benchmark achieved 0.0039 MSE, proving the target IS reachable. GNNs learn from molecular STRUCTURE, not IDENTITY, which could help with unseen solvents.
 
-1. **Combined features from multiple sources**: spange, acs_pca, drfps, fragprints (67 features after filtering)
-2. **Correlation-based feature filtering**: threshold=0.90, with feature priority (spange > acs > drfps > frag > smiles)
-3. **Numeric feature engineering**: T_inv, RT_log, T_x_RT, RT_scaled
-4. **CatBoost + XGBoost ensemble**: Different weights per dataset (single: 7:6, full: 1:2)
-5. **Probability normalization**: clip to non-negative, divide by max(sum, 1.0)
+2. **Transfer Learning**: Pre-training on related chemical data could help generalization.
 
-The team tried to replicate this in exp_080 (ens_model) but got CV=0.010266, worse than best. What's missing?
+3. **Physics-Informed Constraints**: Deeper thermodynamic constraints that hold for ALL solvents.
 
-### Blind Spots
-
-1. **The GNN benchmark achieved 0.0039 MSE** - This proves the target IS reachable. What did they do differently?
-   - Graph neural networks with message-passing
-   - Attention mechanisms over molecular structure
-   - The team hasn't successfully implemented a GNN approach
-
-2. **Transfer learning hasn't been explored**: Pre-training on related chemical data could help generalization
-
-3. **Physics-informed constraints**: Arrhenius kinetics features are used, but deeper physics constraints (e.g., thermodynamic consistency) haven't been explored
-
-4. **Only 4 submissions remaining**: With limited submissions, we need to be VERY strategic
+4. **Only 4 submissions remaining**: With limited submissions, we need to be VERY strategic.
 
 ## What's Working
 
@@ -109,38 +98,27 @@ The team tried to replicate this in exp_080 (ens_model) but got CV=0.010266, wor
 
 3. **Best CV achieved is 0.008092**: This is a strong baseline for the LOO-CV scheme.
 
-4. **The team is trying creative approaches**: Pseudo-labeling is a reasonable hypothesis for domain adaptation.
+4. **Best LB achieved is 0.0876-0.0877**: This is the current ceiling with tabular approaches.
+
+5. **Systematic exploration**: The team has methodically tested many approaches.
 
 ## Key Concerns
 
 ### CRITICAL: This Experiment Should NOT Be Submitted
 
-**Observation**: CV=0.012837 is 59% worse than best CV (0.008092).
+**Observation**: CV=0.009342 is 15.4% worse than best CV (0.008092).
 
 **Why it matters**: The predicted LB using the CV-LB relationship is:
 ```
-LB = 3.98 * 0.01284 + 0.055 = 0.106
+LB = 4.0 * 0.00934 + 0.055 = 0.0924
 ```
-This would be our WORST submission ever.
+This would be WORSE than our best LB (0.0877).
 
-**Suggestion**: Do NOT submit exp_083. Focus on approaches that might change the CV-LB relationship.
+**Suggestion**: Do NOT submit exp_084. The current submission.csv contains predictions that would likely score ~0.0924, which is worse than our best.
 
-### HIGH PRIORITY: Pseudo-Labeling Doesn't Address the Right Problem
+### HIGH PRIORITY: The Intercept Problem Remains Unsolved
 
-**Observation**: Pseudo-labeling assumes we have unlabeled data from the test distribution to adapt to. In LOO-CV, we don't.
-
-**Why it matters**: The approach can't work because:
-1. The test solvent is never in training
-2. Pseudo-labels are just the model's own predictions
-3. This reinforces existing biases, not adapts to new distributions
-
-**Suggestion**: For domain adaptation to work, we'd need:
-- Actual unlabeled data from the test distribution (not available)
-- Or a different approach entirely (e.g., physics-informed constraints)
-
-### MEDIUM PRIORITY: The Intercept Problem Remains Unsolved
-
-**Observation**: All 83+ experiments fall on the same CV-LB line with intercept ~0.055 > target 0.0347.
+**Observation**: All 84+ experiments fall on the same CV-LB line with intercept ~0.055 > target 0.0347.
 
 **Why it matters**: No amount of CV optimization can reach the target. The intercept represents extrapolation error to unseen solvents.
 
@@ -149,9 +127,25 @@ This would be our WORST submission ever.
 2. **Physics-informed constraints**: Thermodynamic consistency, reaction mechanism constraints
 3. **Solvent embedding learning**: Learn representations that generalize to unseen solvents
 
+### MEDIUM PRIORITY: Public Kernel Replication Has Diminishing Returns
+
+**Observation**: exp_080 (ens-model attempt) got CV=0.010266, exp_084 (exact replication) got CV=0.009342. Both are worse than our best (0.008092).
+
+**Why it matters**: The public kernels may not have better approaches than what we've already developed. Our best model (exp_049/exp_050 CatBoost+XGBoost) already achieves better CV.
+
+**Suggestion**: Stop trying to replicate public kernels. Focus on fundamentally different approaches.
+
 ## Top Priority for Next Experiment
 
-### RECOMMENDED: Implement a Graph Neural Network (GNN) Approach
+### RECOMMENDED: Submit the Best CV Model (exp_050) If Not Already Submitted
+
+Looking at the submission history, I see we have 4 submissions remaining. Before trying anything new, we should ensure our best model has been submitted:
+
+1. **Verify exp_050 (CV=0.008092) has been submitted**
+2. If not, submit it to verify the CV-LB relationship
+3. This would give us another data point to understand the CV-LB relationship
+
+### ALTERNATIVE: Implement a Graph Neural Network (GNN) Approach
 
 The GNN benchmark achieved 0.0039 MSE, proving the target IS reachable. The key difference is:
 1. **Message-passing over molecular graphs**: Captures structural relationships
@@ -165,14 +159,7 @@ The GNN benchmark achieved 0.0039 MSE, proving the target IS reachable. The key 
 4. Train on the same LOO-CV scheme
 5. The GNN's inductive bias should help with extrapolation to unseen solvents
 
-**ALTERNATIVE: Submit the Best CV Model (exp_050)**
-
-If we haven't submitted the best CV model (0.008092), we should do so to:
-1. Verify the CV-LB relationship
-2. Potentially achieve a new best LB
-3. Use one of our 4 remaining submissions strategically
-
-**DO NOT SUBMIT exp_083** - CV is 59% worse than baseline.
+**DO NOT SUBMIT exp_084** - CV is 15.4% worse than best.
 
 ---
 
@@ -181,17 +168,17 @@ If we haven't submitted the best CV model (0.008092), we should do so to:
 | Dimension | Assessment |
 |-----------|------------|
 | Technical Execution | ✅ TRUSTWORTHY |
-| CV Performance | ❌ 59% WORSE than best (0.0128 vs 0.0081) |
-| Strategic Direction | ❌ Pseudo-labeling doesn't address structural shift |
-| Best LB | 0.0876 (152.4% above target) |
+| CV Performance | ❌ 15.4% WORSE than best (0.0093 vs 0.0081) |
+| Strategic Direction | ⚠️ Replicating public kernels has diminishing returns |
+| Best LB | 0.0876-0.0877 (152% above target) |
 | Key Insight | Intercept (0.055) > Target (0.0347) |
 
 ## Confidence Levels
 
 - **Very High (99%)**: The CV-LB relationship is LB ≈ 4*CV + 0.055
 - **Very High (99%)**: Standard CV optimization cannot reach the target
-- **Very High (99%)**: exp_083 should NOT be submitted
-- **High (90%)**: Pseudo-labeling doesn't address the structural distribution shift
+- **Very High (99%)**: exp_084 should NOT be submitted
+- **High (90%)**: Public kernel replication has reached diminishing returns
 - **High (85%)**: A GNN approach could fundamentally change the CV-LB relationship
 - **Very High (99%)**: The target IS reachable (GNN benchmark achieved 0.0039)
 
@@ -200,7 +187,9 @@ If we haven't submitted the best CV model (0.008092), we should do so to:
 The target (0.0347) is achievable - the GNN benchmark and top Kaggle competitors prove this. The key is to find what they do differently. Don't give up - but also don't waste submissions on approaches that fall on the same CV-LB line.
 
 **NEXT STEPS:**
-1. **DO NOT SUBMIT** exp_083 - CV is 59% worse than best
-2. **IMPLEMENT** a Graph Neural Network approach (the GNN benchmark achieved 0.0039)
-3. **CONSIDER** physics-informed constraints that hold for ALL solvents
+1. **DO NOT SUBMIT** exp_084 - CV is 15.4% worse than best
+2. **VERIFY** if exp_050 (best CV=0.008092) has been submitted
+3. **CONSIDER** implementing a Graph Neural Network approach
 4. **BE STRATEGIC** with remaining 4 submissions - only submit if there's a chance of changing the CV-LB relationship
+
+The team has done excellent work exploring the tabular ML space. The next breakthrough will likely come from a fundamentally different approach (GNN, transfer learning, or physics-informed constraints) rather than incremental improvements to tabular models.
