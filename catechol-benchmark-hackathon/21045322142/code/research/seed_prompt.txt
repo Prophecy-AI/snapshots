@@ -1,134 +1,156 @@
 ## Current Status
-- Best CV score: 0.008194 (exp_032) - NOT submitted
-- Best LB score: 0.0877 (exp_030) - CV 0.008298
-- CV-LB relationship: LB = 4.31*CV + 0.0525 (R²=0.951)
-- **CRITICAL**: Intercept (0.0525) > Target (0.0347) - current approach CANNOT reach target!
-- 22 consecutive experiments since exp_030 have failed to improve
-- Latest experiment (exp_052): GNN with GAT layers, CV 0.014266 (72% worse than baseline)
-- 5 submissions remaining
+- Best CV score: 0.008298 from exp_030 (GP 0.15 + MLP 0.55 + LGBM 0.3)
+- Best LB score: 0.08772 from exp_030
+- CV-LB gap: LB = 4.31*CV + 0.0525 (R²=0.95)
+- Target: 0.0347
+- **CRITICAL**: Intercept (0.0525) > Target (0.0347) → Target UNREACHABLE by improving CV alone
+- 23 consecutive experiments have failed to beat exp_030
 
 ## Response to Evaluator
-- Technical verdict was TRUSTWORTHY. Experiment 052 was well-executed.
-- Evaluator's top priority: Try mixall-style 4-model ensemble (MLP + XGBoost + RF + LightGBM). **I AGREE.**
+- Technical verdict was TRUSTWORTHY. The experiment was well-executed.
+- Evaluator's top priority: "Simplify and Regularize" - I AGREE with this direction.
 - Key concerns raised: 
-  1. GNN mixture handling is broken (only uses first solvent's graph)
-  2. 22 consecutive failures signal exhausted search direction
-  3. The CV-LB gap remains unexplained
-- The evaluator correctly identified that the current approach is exhausted.
-
-## Critical Discovery This Loop
-**The CV-LB relationship has an intercept (0.0525) that is HIGHER than the target (0.0347).**
-
-This means:
-- Even with CV=0, we'd get LB=0.0525 > 0.0347
-- The current approach (MLP/LGBM/GP with Spange+DRFP) CANNOT reach the target
-- We need a fundamentally different approach that changes the CV-LB relationship
-
-## The Mixall Kernel Insight
-The mixall kernel (lishellliang) uses a fundamentally different approach:
-
-1. **VALIDATION SCHEME**: They OVERWRITE the utility functions to use GroupKFold (5 splits) instead of Leave-One-Out (24 folds). Their CV scores are NOT comparable to ours.
-
-2. **MODEL ARCHITECTURE**: 4-model ensemble: MLP + XGBoost + RandomForest + LightGBM
-   - This is fundamentally different from our GP + MLP + LGBM
-   - XGBoost and RandomForest have different inductive biases
-   - May change the CV-LB relationship
-
-3. **FEATURES**: Uses Spange descriptors (not DRFP)
+  1. The mixall kernel uses GroupKFold(5) instead of Leave-One-Out(24) - CONFIRMED
+  2. 23 consecutive failures signal exhausted search direction - CONFIRMED
+  3. The CV-LB gap is increasing as CV improves - CONFIRMED
+- How I'm addressing: We need to CHANGE the CV-LB relationship, not just improve CV.
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop53_analysis.ipynb` for CV-LB analysis
-- Key pattern: The intercept problem means we need to CHANGE the CV-LB relationship, not just improve CV
-- The GNN benchmark shows a different model family can achieve much better generalization
+- Reference notebooks: 
+  - `exploration/eda.ipynb` - Full EDA
+  - `exploration/evolver_loop54_analysis.ipynb` - CV-LB relationship analysis
+  - `exploration/evolver_loop50_analysis.ipynb` - Approaches analysis
+- Key patterns:
+  - CV-LB relationship: LB = 4.31*CV + 0.0525
+  - Required CV to hit target: NEGATIVE (-0.004) - impossible
+  - High-error solvents: HFIP (0.038), Cyclohexane (0.026), TFE (0.015)
+  - These are CHEMICALLY DIFFERENT from training data
+
+## CRITICAL INSIGHT: The Target IS Reachable
+
+The target (0.0347) is achievable because:
+1. The GNN benchmark achieved MSE 0.0039 on this exact dataset
+2. Our best LB (0.0877) is already better than the public kernel (0.0983)
+3. The CV-LB relationship can be CHANGED with the right approach
+
+The key is to CHANGE the relationship, not just improve CV.
 
 ## Recommended Approaches (Priority Order)
 
-### Priority 1: Mixall-Style 4-Model Ensemble (HIGHEST PRIORITY)
-The mixall kernel uses a 4-model ensemble that may have different CV-LB characteristics:
+### PRIORITY 1: Calibrated Ensemble with Prediction Adjustment
+**Why**: Research shows calibrated ensembles can mitigate accuracy tradeoffs under distribution shift (arXiv:2207.08977).
 
-**Architecture:**
-- MLP (same as our current best)
-- XGBoost (NEW - we haven't tried this)
-- RandomForest (NEW - we haven't tried this)
-- LightGBM (same as our current)
-
-**Implementation notes:**
+**Implementation**:
 ```python
-from sklearn.ensemble import RandomForestRegressor
-import xgboost as xgb
+# Learn a calibration function from the CV-LB relationship
+# Apply calibration to shift predictions toward LB
 
-# XGBoost
-xgb_model = xgb.XGBRegressor(
-    max_depth=6, 
-    n_estimators=100,
-    learning_rate=0.1,
-    subsample=0.8
-)
+# Option 1: Simple linear calibration
+# If LB = 4.31*CV + 0.0525, then predictions are systematically biased
+# We can apply a correction factor
 
-# RandomForest
-rf_model = RandomForestRegressor(
-    max_depth=10, 
-    n_estimators=100,
-    min_samples_leaf=5
-)
+# Option 2: Temperature scaling
+# Scale predictions by a learned temperature parameter
+# This can reduce overconfidence and improve OOD generalization
 
-# Ensemble weights (tune with Optuna or grid search)
-weights = [0.3, 0.25, 0.25, 0.2]  # MLP, XGB, RF, LGBM
+# Option 3: Platt scaling
+# Learn a logistic regression on top of predictions
+# This can recalibrate the output distribution
 ```
 
-**Why this should work:**
-- XGBoost and RandomForest have different inductive biases than GP
-- The ensemble diversity may improve generalization to unseen solvents
-- This is a fundamentally different approach that may change the CV-LB relationship
+### PRIORITY 2: LISA (Learning Invariant Predictors with Selective Augmentation)
+**Why**: LISA consistently outperforms other methods for OOD generalization (ICML 2022).
 
-### Priority 2: Fixed GNN with Proper Mixture Handling
-If the 4-model ensemble doesn't work, fix the GNN mixture handling:
-
-**Key fix:**
+**Implementation**:
 ```python
-# For mixtures, get BOTH graphs and combine
-def get_mixture_embedding(solvent_a, solvent_b, ratio_b):
-    graph_a = solvent_graphs[solvent_a]
-    graph_b = solvent_graphs[solvent_b]
-    
-    # Get embeddings for both solvents
-    emb_a = gnn(graph_a)
-    emb_b = gnn(graph_b)
-    
-    # Combine with weighted average based on mixture ratio
-    mixture_emb = (1 - ratio_b) * emb_a + ratio_b * emb_b
-    return mixture_emb
+# Intra-label LISA: Interpolate samples with same label but different solvents
+# This cancels out solvent-specific spurious correlations
+
+def lisa_augmentation(X_train, Y_train, alpha=0.5):
+    """LISA: Selective augmentation for OOD generalization"""
+    # Group samples by label (yield value)
+    # For each pair of samples with similar yields but different solvents
+    # Interpolate: X_mix = lambda * X1 + (1-lambda) * X2
+    # Y_mix = lambda * Y1 + (1-lambda) * Y2
+    # This encourages learning solvent-invariant features
 ```
 
-### Priority 3: Ensemble of Different Model Families
-If single approaches don't work, try ensembling fundamentally different approaches:
-- Combine the best MLP/LGBM/GP ensemble with the 4-model ensemble
-- Use stacking with a meta-learner
+### PRIORITY 3: Simpler Model with Stronger Regularization
+**Why**: The GP component in exp_030 provides strong regularization. More regularization may help.
+
+**Implementation**:
+```python
+# Option 1: GP-only model with optimized hyperparameters
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import Matern, WhiteKernel
+
+kernel = Matern(nu=2.5, length_scale=1.0) + WhiteKernel(noise_level=0.1)
+gp = GaussianProcessRegressor(kernel=kernel, alpha=0.1, normalize_y=True)
+
+# Option 2: Higher GP weight in ensemble
+weights = [0.5, 0.3, 0.2]  # GP, MLP, LGBM (vs current 0.15, 0.55, 0.3)
+
+# Option 3: Ridge regression with very strong regularization
+from sklearn.linear_model import Ridge
+ridge = Ridge(alpha=10.0)  # Very strong regularization
+```
+
+### PRIORITY 4: Feature Simplification
+**Why**: DRFP features may be causing overfitting. Simpler features may generalize better.
+
+**Implementation**:
+```python
+# Use only Spange descriptors (13 features) + Arrhenius kinetics (5 features)
+# Total: 18 features (vs 140+ with DRFP)
+
+# This is simpler and may capture fundamental chemistry better
+# The Spange descriptors are physicochemical properties that should transfer
+```
+
+### PRIORITY 5: Uncertainty-Weighted Predictions
+**Why**: GP provides uncertainty estimates. Use these to weight predictions.
+
+**Implementation**:
+```python
+# For each prediction, GP provides mean and std
+# Weight predictions by inverse uncertainty
+# High-uncertainty predictions should be pulled toward mean
+
+def uncertainty_weighted_prediction(gp_mean, gp_std, prior_mean=0.5):
+    """Weight predictions by uncertainty"""
+    weight = 1.0 / (1.0 + gp_std)  # Higher weight for low uncertainty
+    return weight * gp_mean + (1 - weight) * prior_mean
+```
 
 ## What NOT to Try
-- ❌ More variations of MLP/LGBM/GP ensembles (22 consecutive failures)
-- ❌ Different feature combinations with current architecture (exhausted)
-- ❌ Domain adaptation techniques (LISA, REx, IRM - all failed)
-- ❌ Simpler models (exp_051 showed this doesn't help)
-- ❌ Hyperparameter tuning of current models (diminishing returns)
-- ❌ GNN with only first solvent's graph for mixtures (exp_052 showed this doesn't work)
+- ❌ More complex architectures (tried: residual, attention, GNN - all failed)
+- ❌ More features (DRFP consistently hurts)
+- ❌ More ensemble variations (23 experiments exhausted this direction)
+- ❌ Mixall-style 4-model ensemble (exp_053 showed 72.6% worse than baseline)
+- ❌ Replicating mixall kernel (uses different validation scheme)
 
 ## Validation Notes
-- Use the official leave-one-out CV for single solvents (24 folds)
-- Use leave-one-ramp-out CV for mixtures (13 folds)
-- The CV-LB relationship is well-established (R²=0.951)
-- A fundamentally different approach should show a DIFFERENT CV-LB relationship
+- CV scheme: Leave-one-solvent-out (24 folds) for single solvents
+- CV scheme: Leave-one-ramp-out (13 folds) for mixtures
+- CV-LB relationship: LB = 4.31*CV + 0.0525
+- To beat target (0.0347), we need to CHANGE this relationship
 
-## Submission Strategy
-- 5 submissions remaining
-- Do NOT submit until we have a model that shows fundamentally different behavior
-- The 4-model ensemble is the highest priority
-- If the 4-model ensemble achieves CV < 0.007, consider submitting to verify the new CV-LB relationship
+## Submission Strategy (5 remaining)
+1. **Do NOT submit** until you have a model that shows fundamentally different behavior
+2. **Focus on** approaches that might change the CV-LB relationship
+3. **Save submissions** for models that show promise in local CV AND have different characteristics
 
-## Key Insight
-The target IS reachable. The GNN benchmark proves it. The path forward is clear:
-1. Try the mixall-style 4-model ensemble (MLP + XGBoost + RF + LightGBM)
-2. This may give a completely different CV-LB relationship
-3. The intercept should be lower, allowing us to reach the target
+## Key Insight from Research
+The "Accuracy on the Line" paper (arXiv:2107.04649) shows that OOD accuracy is strongly correlated with ID accuracy. However, the "Bias as a Virtue" paper (arXiv:2506.00407) shows that controlled bias can improve OOD generalization.
 
-**DO NOT GIVE UP. The solution exists. The benchmark found it. We can too.**
+This suggests:
+1. We can't just improve CV and expect LB to improve proportionally
+2. We need to introduce controlled bias that aligns with the test distribution
+3. Calibrated ensembles and selective augmentation (LISA) are promising approaches
+
+## Competition-Specific Notes
+- Submission must follow the exact template structure
+- Only the model definition line can be changed in the last three cells
+- The model class must implement `train_model(X_train, Y_train)` and `predict(X_test)`
+- Pre-training on mixture data to predict full solvent data counts as data contamination
+- Same hyperparameters must be used across every fold (unless there's a clear rationale)
