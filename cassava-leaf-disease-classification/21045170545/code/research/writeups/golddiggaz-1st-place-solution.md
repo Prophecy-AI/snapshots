@@ -1,8 +1,7 @@
 # 1st Place Solution
 
-**Rank:** 1
 **Author:** Jannis
-**Collaborators:** Jannis, Sebastian, Matthias
+**Rank:** 1
 **Votes:** 294
 
 ---
