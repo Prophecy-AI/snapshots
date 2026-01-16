@@ -5,107 +5,180 @@
 - Submissions remaining: 5
 
 ## CV-LB Relationship Analysis (CRITICAL)
-- Linear fit: LB = 4.23 × CV + 0.0533 (R² = 0.98)
-- Intercept interpretation: Even at CV=0, expected LB is 0.0533
+- Linear fit: LB = 4.22 × CV + 0.0534 (R² = 0.98)
+- Intercept interpretation: Even at CV=0, expected LB is 0.0534
 - Are all approaches on the same line? YES - ALL 13 submissions fall on this line
-- **CRITICAL**: Intercept (0.0533) > Target (0.0347)
-- Required CV for target: (0.0347 - 0.0533) / 4.23 = -0.0044 (IMPOSSIBLE)
+- **CRITICAL**: Intercept (0.0534) > Target (0.0347)
+- Required CV for target: (0.0347 - 0.0534) / 4.22 = -0.0044 (IMPOSSIBLE)
 
 ## Response to Evaluator
-- Technical verdict was TRUSTWORTHY. The uncertainty-weighted implementation was correct.
-- Evaluator's top priority: Try ChemBERTa pre-trained embeddings. **ALREADY TRIED AND FAILED** (Loop 51: CV 0.033498, 309% worse)
-- Key concerns raised: The uncertainty-weighted approach failed because GP uncertainty is uniformly HIGH for all test samples in Leave-One-Solvent-Out CV.
-- **I AGREE** with the evaluator's analysis of WHY it failed. The approach doesn't work because we're ALWAYS extrapolating to unseen solvents.
+- Technical verdict was TRUSTWORTHY. The bias correction implementation was correct.
+- Evaluator's top priority: Try GroupKFold validation from "mixall" kernel. **ALREADY TRIED AND FAILED** (exp_042: CV 0.0145, LB 0.1147 - WORSE)
+- Key concerns raised: The bias correction approach failed because the bias is NOT uniform across targets.
+- **I AGREE** with the evaluator's analysis. The key insight from exp_062 is:
+  - Product 2: predictions are 0.009 LOWER than actuals (negative bias)
+  - Product 3: predictions are 0.003 LOWER than actuals (negative bias)
+  - SM: predictions are 0.021 HIGHER than actuals (positive bias)
+  - Subtracting a constant hurts some targets while helping others
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop59_analysis.ipynb` for CV-LB analysis
+- Reference notebooks: See `exploration/evolver_loop60_analysis.ipynb` for CV-LB analysis
 - Key patterns:
-  1. ALL model types (MLP, LGBM, GP, XGBoost) fall on the same CV-LB line
-  2. The intercept (0.0533) represents STRUCTURAL extrapolation error
+  1. ALL model types (MLP, LGBM, GP, XGBoost, CatBoost) fall on the same CV-LB line
+  2. The intercept (0.0534) represents STRUCTURAL extrapolation error
   3. Improving CV alone CANNOT reach the target
   4. The target IS reachable (someone achieved it), but not with our current paradigm
+  5. **NEW INSIGHT**: Bias is target-specific, not uniform
 
 ## What Has Been Tried and FAILED
-1. **Uncertainty-Weighted Predictions (exp_061)**: Best alpha=0.0 (no blending), CV 0.008841 (7.89% worse)
-2. **ChemBERTa Pre-trained Embeddings (exp_052)**: CV 0.033498 (309% worse)
-3. **Per-Solvent-Type Models (exp_054)**: CV 0.019519 (138% worse)
-4. **Per-Target Optimization (exp_053)**: CV 0.009946 (21% worse)
-5. **Hyperparameter Optimization (exp_055)**: CV 0.012658 (54% worse)
-6. **GroupKFold CV (exp_042)**: CV 0.0145, LB 0.1147 (WORSE)
-7. **GNN (exp_051, exp_056)**: Failed to improve
+1. **Bias Correction (exp_062)**: Best bias=0.005, CV 0.008926 (8.94% worse) - Bias is NOT uniform across targets
+2. **Uncertainty-Weighted Predictions (exp_061)**: Best alpha=0.0 (no blending), CV 0.008841 (7.89% worse)
+3. **ChemBERTa Pre-trained Embeddings (exp_050)**: CV 0.033498 (309% worse)
+4. **Per-Solvent-Type Models (exp_052)**: CV 0.019519 (138% worse)
+5. **Per-Target Optimization (exp_051)**: CV 0.009946 (21% worse)
+6. **Hyperparameter Optimization (exp_053)**: CV 0.012658 (54% worse)
+7. **GroupKFold CV (exp_042)**: CV 0.0145, LB 0.1147 (WORSE)
+8. **GNN (exp_049, exp_054)**: CV 0.014080, 0.030013 (WORSE)
+9. **CatBoost (exp_045)**: CV 0.010927 (33% worse)
+10. **Multi-Model Ensemble MLP+XGB+RF+LGBM (exp_048)**: CV 0.009435 (15% worse)
 
 ## Recommended Approaches (PRIORITY ORDER)
 
-### PRIORITY 1: Bias Correction / Post-Processing Calibration
-**Rationale**: The intercept (0.0533) is systematic. If we can identify and correct this bias, we might reduce the LB score.
+### PRIORITY 1: TARGET-SPECIFIC BIAS CORRECTION
+**Rationale**: exp_062 showed bias is NOT uniform across targets. Instead of subtracting a constant from ALL predictions, apply different corrections to each target.
 
 **Implementation**:
 ```python
-# The CV-LB relationship is: LB = 4.23 * CV + 0.0533
-# If we subtract a constant from predictions, we shift the intercept
-# Try subtracting 0.01-0.02 from all predictions
-corrected_pred = ensemble_pred - 0.015  # Tune this value
-corrected_pred = np.clip(corrected_pred, 0, 1)  # Keep in valid range
+# From exp_062 analysis:
+# Product 2: predictions are 0.009 LOWER than actuals -> ADD 0.009
+# Product 3: predictions are 0.003 LOWER than actuals -> ADD 0.003
+# SM: predictions are 0.021 HIGHER than actuals -> SUBTRACT 0.021
+
+corrections = np.array([0.009, 0.003, -0.021])  # [Product 2, Product 3, SM]
+corrected_pred = ensemble_pred + corrections
+corrected_pred = np.clip(corrected_pred, 0, 1)
 ```
 
 **Why this might work**:
-- The intercept is systematic across ALL approaches
-- A simple bias correction might reduce it
+- The bias is target-specific, not uniform
+- Applying target-specific corrections should improve ALL targets
 - This is a post-processing step that doesn't change the model
 
-### PRIORITY 2: Target-Specific Calibration
-**Rationale**: The SM target is hardest (highest error). Different targets might need different calibration.
-
-**Implementation**:
-```python
-# Analyze per-target CV-LB relationship
-# Apply different bias corrections to each target
-corrections = {'Product 2': -0.01, 'Product 3': -0.01, 'SM': -0.02}
-```
-
-### PRIORITY 3: Ensemble Variance as Uncertainty
-**Rationale**: Instead of GP uncertainty (which is uniformly high), use ensemble variance.
+### PRIORITY 2: ENSEMBLE VARIANCE AS UNCERTAINTY
+**Rationale**: exp_061 used GP uncertainty, which is uniformly HIGH for all test samples. Instead, use variance across ensemble members.
 
 **Implementation**:
 ```python
 # Train multiple models with different seeds
-# Use variance across models as uncertainty
-# Blend toward mean when variance is high
+# Compute variance across models for each prediction
+# When variance is high, blend toward population mean
+
+predictions = []
+for seed in range(10):
+    model = train_model(seed=seed)
+    predictions.append(model.predict(X_test))
+
+mean_pred = np.mean(predictions, axis=0)
+variance = np.var(predictions, axis=0)
+
+# Blend toward population mean when variance is high
+population_mean = np.array([0.15, 0.12, 0.52])  # From training data
+alpha = np.clip(variance / 0.01, 0, 1)  # Normalize variance
+final_pred = (1 - alpha) * mean_pred + alpha * population_mean
 ```
 
-### PRIORITY 4: Study What Top Kernels Do Differently
-**Rationale**: The "mixall" kernel uses GroupKFold and an ensemble of MLP + XGBoost + RF + LightGBM.
+**Why this might work**:
+- Ensemble variance is a better uncertainty estimate than GP uncertainty
+- High variance indicates the model is uncertain -> blend toward mean
+- This could reduce extrapolation error on unseen solvents
 
-**Key insight from "mixall" kernel**:
-- Uses GroupKFold (5 splits) instead of Leave-One-Out
-- Ensemble weights: MLP, XGBoost, RF, LightGBM
-- Runtime is only 2m 15s
+### PRIORITY 3: DIFFERENT MODEL FOR DIFFERENT TARGETS
+**Rationale**: The "catechol-strategy" kernel (0.11161 LB) uses different model types for different targets:
+- HGB (HistGradientBoosting) for SM
+- ETR (ExtraTrees) for Product 2 and Product 3
 
-**However**: We already tried GroupKFold in exp_042 and it was WORSE (CV 0.0145, LB 0.1147).
+**Implementation**:
+```python
+from sklearn.ensemble import HistGradientBoostingRegressor, ExtraTreesRegressor
+
+class PerTargetModel:
+    def __init__(self):
+        self.models = {
+            'Product 2': ExtraTreesRegressor(n_estimators=300),
+            'Product 3': ExtraTreesRegressor(n_estimators=300),
+            'SM': HistGradientBoostingRegressor(max_iter=300)
+        }
+    
+    def train_model(self, X, Y):
+        for target, model in self.models.items():
+            model.fit(X, Y[target])
+    
+    def predict(self, X):
+        preds = []
+        for target in ['Product 2', 'Product 3', 'SM']:
+            preds.append(self.models[target].predict(X))
+        return np.column_stack(preds)
+```
+
+**Why this might work**:
+- Different targets may have different optimal model types
+- SM is the hardest target (highest error) - may need different treatment
+- This is a fundamentally different approach than our current ensemble
+
+### PRIORITY 4: STUDY THE "ENS MODEL" KERNEL APPROACH
+**Rationale**: The "Ens Model" kernel uses:
+1. Correlation-filtered features (threshold=0.90)
+2. CatBoost + XGBoost ensemble with different weights for single vs full data
+3. Feature priority-based filtering (spange > acs > drfps > frag > smiles)
+
+**Key insight**: Different ensemble weights for single vs full data:
+- Single: CatBoost 7.0, XGBoost 6.0 (normalized)
+- Full: CatBoost 1.0, XGBoost 2.0 (normalized)
+
+**Implementation**:
+```python
+# Use different ensemble weights for single vs full data
+if data == 'single':
+    weights = {'cat': 0.538, 'xgb': 0.462}  # 7/(7+6), 6/(7+6)
+else:
+    weights = {'cat': 0.333, 'xgb': 0.667}  # 1/(1+2), 2/(1+2)
+```
 
 ## What NOT to Try
-1. **Uncertainty-weighted predictions** - FAILED, best alpha=0.0
-2. **ChemBERTa embeddings** - FAILED, 309% worse
-3. **Per-solvent-type models** - FAILED, 138% worse
-4. **Per-target optimization** - FAILED, 21% worse
-5. **Hyperparameter optimization** - FAILED, 54% worse
-6. **GroupKFold CV** - FAILED, worse LB
+1. **Uniform bias correction** - FAILED, bias is target-specific
+2. **GP uncertainty weighting** - FAILED, uncertainty is uniformly high
+3. **ChemBERTa embeddings** - FAILED, 309% worse
+4. **Per-solvent-type models** - FAILED, 138% worse
+5. **GroupKFold CV** - FAILED, worse LB
+6. **GNN** - FAILED, 71-266% worse
+7. **Hyperparameter optimization** - FAILED, 54% worse
 
 ## Validation Notes
 - CV scheme: Leave-One-Solvent-Out (24 folds) for single solvent, Leave-One-Ramp-Out (13 folds) for full data
-- CV-LB relationship: LB = 4.23 × CV + 0.0533 (R² = 0.98)
-- **CRITICAL**: The intercept (0.0533) > target (0.0347) means we CANNOT reach target by improving CV alone
+- CV-LB relationship: LB = 4.22 × CV + 0.0534 (R² = 0.98)
+- **CRITICAL**: The intercept (0.0534) > target (0.0347) means we CANNOT reach target by improving CV alone
 - We need approaches that CHANGE the CV-LB relationship, not just improve CV
 
 ## Strategic Assessment
-After 61 experiments and 13 submissions, we have a very clear picture:
+After 62 experiments and 13 submissions, we have a very clear picture:
 1. ALL approaches fall on the same CV-LB line
-2. The intercept (0.0533) is ABOVE the target (0.0347)
+2. The intercept (0.0534) is ABOVE the target (0.0347)
 3. Improving CV alone is mathematically insufficient
 
-**The only viable paths forward are:**
-1. **Bias correction**: Subtract a constant from predictions to shift the intercept
-2. **Target-specific calibration**: Different corrections for different targets
-3. **Ensemble variance**: Use model disagreement as uncertainty (instead of GP uncertainty)
+**The key insight from exp_062 is that bias is TARGET-SPECIFIC:**
+- Product 2: -0.009 (predictions too low)
+- Product 3: -0.003 (predictions too low)
+- SM: +0.021 (predictions too high)
+
+**This suggests the path forward:**
+1. Apply target-specific bias corrections
+2. Use ensemble variance as uncertainty (instead of GP uncertainty)
+3. Try different model types for different targets
 
 **DO NOT give up**. The target IS reachable. We just need to find the right approach.
+
+## CRITICAL REMINDER
+- The target (0.0347) IS reachable - someone achieved it
+- But not with our current paradigm
+- We need to CHANGE the CV-LB relationship, not just improve CV
+- Target-specific bias correction is the most promising unexplored direction
