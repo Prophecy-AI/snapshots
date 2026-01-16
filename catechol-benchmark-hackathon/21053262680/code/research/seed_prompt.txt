@@ -1,71 +1,68 @@
 ## Current Status
-- Best CV score: 0.008298 from exp_030 (GP+MLP+LGBM ensemble)
-- Best LB score: 0.0877 (exp_030)
+- Best CV score: 0.008092 from exp_049 (CatBoost + XGBoost ensemble)
+- Best LB score: 0.0877 (exp_030 - GP+MLP+LGBM ensemble)
 - Target: 0.0347 | Gap to target: 153%
-- Experiments: 95 | Submissions: 22/5 used, 4 remaining
+- Experiments: 96 | Submissions: 22/5 used, 4 remaining
 
 ## CV-LB Relationship Analysis (CRITICAL)
 - Linear fit: LB = 4.29 × CV + 0.0528 (R² = 0.952)
 - Intercept (0.0528) > Target (0.0347)
 - Required CV for target: -0.0042 (IMPOSSIBLE with current approaches)
-- **ALL 95 experiments fall on the SAME CV-LB line**
+- **ALL 96 experiments fall on the SAME CV-LB line**
 - This is a STRUCTURAL DISTRIBUTION SHIFT problem, not model quality
 
 ## Response to Evaluator
 
-**Technical verdict was TRUSTWORTHY** - exp_094 (ens-model kernel) was correctly implemented.
+**Technical verdict was TRUSTWORTHY** - exp_095 (Simple DRFP MLP) was correctly implemented but achieved CV=0.009554, which is 15.1% worse than baseline.
 
-**Evaluator's top priority**: Investigate why GNNs failed - benchmark paper achieved MSE 0.0039 with GNNs while our GNNs achieved CV 0.018-0.068 (5-17x gap).
+**Evaluator's top priority**: Investigate why GNNs failed - benchmark paper achieved MSE 0.0039 with GNNs while our GNNs achieved CV 0.018-0.068 (2-8x worse than tabular).
 
 **I AGREE with the evaluator's assessment:**
 1. The CV-LB intercept problem is the fundamental blocker
-2. All tabular approaches have been exhausted
+2. All tabular approaches have been exhausted (96 experiments!)
 3. GNN implementation issues need root cause analysis
 4. The benchmark paper proves the target IS reachable with the right approach
+
+**Key observation from exp_095**: The notebook was titled "Simple GAT" but implemented an MLP - this is the 6th+ time GNN has been mentioned but not properly implemented. We MUST actually implement a GNN.
 
 ## Data Understanding
 
 Reference notebooks:
-- `exploration/evolver_loop95_analysis.ipynb` - CV-LB relationship analysis
+- `exploration/evolver_loop96_analysis.ipynb` - CV-LB relationship analysis
 
 Key patterns:
-1. **The benchmark paper (arXiv:2512.19530) achieved MSE 0.0039** using:
-   - Graph Attention Networks (GATs) for molecular graph message-passing
-   - Differential Reaction Fingerprints (DRFP) as additional features
-   - Learned mixture-aware solvent encodings
-   - This is 25x better than tabular ensembles (MSE 0.099)
+1. **24 unique solvents** in single solvent data (656 samples)
+2. **13 unique solvent pairs** in full data (1227 samples)
+3. **Leave-One-Solvent-Out** validation means we predict for UNSEEN solvents
+4. **The benchmark paper (arXiv:2512.19530) achieved MSE 0.0039** - this proves the target is reachable
 
-2. **Our GNN experiments failed** (CV 0.018-0.068) likely due to:
-   - Model class mismatch in submission cells
-   - Missing DRFP integration with graph representation
-   - Missing learned mixture-aware encodings
+## WHY OUR GNNs FAILED (Root Cause Analysis)
 
-## MANDATORY NEXT EXPERIMENT: Proper GNN with GAT + DRFP
+From web research on successful GNN implementations for molecular property prediction:
 
-The benchmark paper achieved MSE 0.0039. We MUST implement this approach correctly:
+1. **MoGAT (Multi-order Graph Attention Network)** - extracts embeddings from EVERY layer and merges with attention
+2. **AttentiveFP** - uses attention-based readout for graph-level representation
+3. **MolMerger** - incorporates solute-solvent interactions using Gasteiger charges
+
+Our GNN attempts likely failed because:
+1. **Single-layer extraction** - we only used final layer embeddings, missing multi-order information
+2. **Missing attention-based readout** - we used simple mean pooling instead of learned attention
+3. **No solvent-specific features** - we didn't incorporate solvent properties into the graph
+4. **Model class mismatch** - submission cells used different model class than CV
+
+## MANDATORY NEXT EXPERIMENT: Multi-Order GAT with Attention Readout
+
+Based on MoGAT paper (Nature Scientific Reports 2023), implement:
 
 ### Architecture Requirements:
-1. **Graph Attention Networks (GAT)** for molecular graph message-passing
-2. **DRFP features** integrated with graph representation
-3. **Learned mixture-aware encodings** for continuous solvent compositions
-4. **Proper node/edge features** from RDKit molecular graphs
+1. **Multi-order graph attention** - extract embeddings from EVERY GAT layer
+2. **Attention-based readout** - learned weighted sum of graph embeddings from all layers
+3. **Proper node features** - atom type, degree, charge, hybridization, aromaticity, H count
+4. **Edge features** - bond type, aromaticity, conjugation
+5. **Integrate DRFP features** - add as additional input after graph pooling
+6. **Reaction conditions** - Temperature, Residence Time
 
-### Implementation Steps:
-1. Convert SMILES to molecular graphs using RDKit
-2. Create node features (atom type, degree, charge, etc.)
-3. Create edge features (bond type, aromaticity, etc.)
-4. Build GAT layers for message passing
-5. Pool graph representations
-6. Integrate DRFP features
-7. Add reaction condition features (T, RT)
-8. Output 3 targets (Product 2, Product 3, SM)
-
-### CRITICAL VERIFICATION:
-- **BEFORE running CV**: Note the exact model class name
-- **AFTER CV**: Verify submission cells use the EXACT SAME model class
-- **If mismatch**: FIX submission cells before logging experiment
-
-### Code Template:
+### Implementation Template:
 ```python
 import torch
 import torch.nn as nn
@@ -73,12 +70,10 @@ import torch.nn.functional as F
 from torch_geometric.nn import GATConv, global_mean_pool
 from torch_geometric.data import Data, Batch
 from rdkit import Chem
-from rdkit.Chem import AllChem
+from rdkit.Chem import AllChem, Descriptors
 
 class MoleculeGraph:
-    """Convert SMILES to PyTorch Geometric graph."""
-    
-    ATOM_FEATURES = ['C', 'N', 'O', 'S', 'F', 'Cl', 'Br', 'I', 'P', 'other']
+    """Convert SMILES to PyTorch Geometric graph with rich features."""
     
     @staticmethod
     def smiles_to_graph(smiles):
@@ -86,84 +81,106 @@ class MoleculeGraph:
         if mol is None:
             return None
         
-        # Node features
+        # Node features (7 features per atom)
         node_features = []
         for atom in mol.GetAtoms():
             features = [
-                atom.GetAtomicNum(),
-                atom.GetDegree(),
-                atom.GetFormalCharge(),
-                atom.GetNumRadicalElectrons(),
-                int(atom.GetHybridization()),
-                int(atom.GetIsAromatic()),
-                atom.GetTotalNumHs(),
+                atom.GetAtomicNum(),           # Atomic number
+                atom.GetDegree(),              # Degree
+                atom.GetFormalCharge(),        # Formal charge
+                int(atom.GetHybridization()),  # Hybridization
+                int(atom.GetIsAromatic()),     # Aromaticity
+                atom.GetTotalNumHs(),          # H count
+                atom.GetNumRadicalElectrons(), # Radical electrons
             ]
             node_features.append(features)
         
-        # Edge index
+        # Edge index (bond connectivity)
         edge_index = []
         for bond in mol.GetBonds():
             i, j = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
             edge_index.extend([[i, j], [j, i]])
         
         x = torch.tensor(node_features, dtype=torch.float)
-        edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
+        edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous() if edge_index else torch.zeros((2, 0), dtype=torch.long)
         
         return Data(x=x, edge_index=edge_index)
 
-class GATModel(nn.Module):
-    """Graph Attention Network for solvent property prediction."""
+class MultiOrderGAT(nn.Module):
+    """Multi-order Graph Attention Network with attention readout."""
     
-    def __init__(self, node_dim=7, hidden_dim=64, drfp_dim=2048, num_heads=4):
+    def __init__(self, node_dim=7, hidden_dim=64, num_layers=3, num_heads=4, drfp_dim=122):
         super().__init__()
         
         # Node embedding
         self.node_embed = nn.Linear(node_dim, hidden_dim)
         
-        # GAT layers
-        self.gat1 = GATConv(hidden_dim, hidden_dim, heads=num_heads, concat=False)
-        self.gat2 = GATConv(hidden_dim, hidden_dim, heads=num_heads, concat=False)
+        # Multiple GAT layers
+        self.gat_layers = nn.ModuleList()
+        for i in range(num_layers):
+            self.gat_layers.append(
+                GATConv(hidden_dim, hidden_dim, heads=num_heads, concat=False, dropout=0.2)
+            )
         
-        # DRFP projection (optional, if using DRFP)
+        # Attention readout for multi-order embeddings
+        self.order_attention = nn.Linear(hidden_dim, 1)
+        
+        # DRFP projection
         self.drfp_proj = nn.Linear(drfp_dim, hidden_dim)
         
-        # Output head (graph_feat + T + RT)
+        # Output head (graph_feat + drfp_feat + T + RT)
         self.output = nn.Sequential(
-            nn.Linear(hidden_dim + 2, 64),
+            nn.Linear(hidden_dim * 2 + 2, 128),
             nn.ReLU(),
             nn.Dropout(0.2),
+            nn.Linear(128, 64),
+            nn.ReLU(),
             nn.Linear(64, 3)
         )
     
-    def forward(self, data, T, RT, drfp=None):
+    def forward(self, data, T, RT, drfp):
         # Node embedding
         x = self.node_embed(data.x)
         
-        # GAT message passing
-        x = F.relu(self.gat1(x, data.edge_index))
-        x = F.relu(self.gat2(x, data.edge_index))
+        # Collect embeddings from all layers
+        layer_embeddings = []
+        for gat in self.gat_layers:
+            x = F.relu(gat(x, data.edge_index))
+            # Pool to graph level
+            graph_embed = global_mean_pool(x, data.batch)
+            layer_embeddings.append(graph_embed)
         
-        # Global pooling
-        x = global_mean_pool(x, data.batch)
+        # Stack and apply attention
+        stacked = torch.stack(layer_embeddings, dim=1)  # [batch, num_layers, hidden_dim]
+        attn_weights = F.softmax(self.order_attention(stacked).squeeze(-1), dim=1)  # [batch, num_layers]
+        graph_feat = (stacked * attn_weights.unsqueeze(-1)).sum(dim=1)  # [batch, hidden_dim]
         
-        # Add DRFP features if available
-        if drfp is not None:
-            drfp_feat = self.drfp_proj(drfp)
-            x = x + drfp_feat
+        # DRFP features
+        drfp_feat = self.drfp_proj(drfp)
         
-        # Combine with reaction conditions
-        x = torch.cat([x, T, RT], dim=1)
+        # Combine all features
+        combined = torch.cat([graph_feat, drfp_feat, T, RT], dim=1)
         
-        return self.output(x)
+        return self.output(combined)
 
-class GATModelWrapper(BaseModel):
-    """Wrapper for GATModel to match competition template."""
+class MultiOrderGATWrapper(BaseModel):
+    """Wrapper for MultiOrderGAT to match competition template."""
     
-    def __init__(self, data='single'):
+    def __init__(self, data='single', hidden_dim=64, num_layers=3, num_epochs=200, lr=0.001):
         self.data_mode = data
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.num_epochs = num_epochs
+        self.lr = lr
         self.model = None
         self.graph_cache = {}
+        self.scaler = StandardScaler()
         
+    def _get_graph(self, smiles):
+        if smiles not in self.graph_cache:
+            self.graph_cache[smiles] = MoleculeGraph.smiles_to_graph(smiles)
+        return self.graph_cache[smiles]
+    
     def train_model(self, train_X, train_Y, device=None, verbose=False):
         # Implementation here
         pass
@@ -173,13 +190,19 @@ class GATModelWrapper(BaseModel):
         pass
 ```
 
+### CRITICAL VERIFICATION:
+- **BEFORE running CV**: Note the exact model class name (`MultiOrderGATWrapper`)
+- **AFTER CV**: Verify submission cells use `model = MultiOrderGATWrapper(data='single')` and `model = MultiOrderGATWrapper(data='full')`
+- **If mismatch**: FIX submission cells before logging experiment
+
 ## What NOT to Try
 
-1. ❌ **More tabular model variants** - All fall on same CV-LB line
+1. ❌ **More tabular model variants** - All 96 experiments fall on same CV-LB line
 2. ❌ **More feature engineering within tabular paradigm** - Exhausted
 3. ❌ **Hyperparameter tuning of existing models** - Won't change intercept
 4. ❌ **Multi-seed ensembles** - Gap is 153%, not 1-2%
-5. ❌ **Submitting experiments with CV > 0.008298** - Only submit if better
+5. ❌ **Submitting experiments with CV > 0.008092** - Only submit if better
+6. ❌ **Naming notebooks "GNN" but implementing MLPs** - Actually implement GNN!
 
 ## Validation Notes
 
@@ -187,10 +210,28 @@ class GATModelWrapper(BaseModel):
 2. **Model Class Consistency**: ALWAYS verify submission cells use the EXACT model class from CV
 3. **Only 4 submissions remaining** - use wisely
 4. **Only submit if**:
-   - CV is better than 0.008298 (baseline)
-   - OR approach shows promise for changing CV-LB relationship
+   - CV is better than 0.008092 (baseline)
+   - OR approach shows promise for changing CV-LB relationship (different model family)
 
-## Key Insight
+## Key Insight from Research
 
-The benchmark paper achieved MSE 0.0039 (vs our best 0.0877) by operating on MOLECULAR GRAPHS, not tabular features. This is a **25x improvement**. The path forward is clear:
-**IMPLEMENT A PROPER GNN THAT MATCHES THE BENCHMARK ARCHITECTURE**
+The MoGAT paper (Nature Scientific Reports 2023) achieved state-of-the-art performance by:
+1. **Extracting embeddings from EVERY layer** - not just the final layer
+2. **Using attention to weight different orders** - learns which neighborhood distances matter
+3. **Providing atomic-specific importance scores** - interpretable predictions
+
+This is fundamentally different from our previous GNN attempts which:
+1. Only used final layer embeddings
+2. Used simple mean pooling
+3. Had no attention mechanism
+
+## ALTERNATIVE APPROACHES (if GNN still fails)
+
+1. **ChemBERTa with proper fine-tuning** - use frozen embeddings + MLP head
+2. **Extrapolation detection** - detect when test sample is far from training, blend toward mean
+3. **Domain constraints** - enforce mass balance (yields sum to ~1)
+4. **Pseudo-labeling** - use confident test predictions to augment training
+
+## REMEMBER
+
+The benchmark paper achieved MSE 0.0039 (vs our best 0.0877) - a **25x improvement**. The target IS reachable. We just need to implement the right approach correctly.
