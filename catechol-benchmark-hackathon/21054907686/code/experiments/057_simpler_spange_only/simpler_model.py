@@ -46,9 +46,9 @@ spange = spange.rename(columns={'SOLVENT NAME': 'Solvent'})
 spange_cols = [c for c in spange.columns if c != 'Solvent']
 
 print(f"Spange features: {len(spange_cols)}")
-print(f"Using ONLY Spange + Arrhenius features (no DRFP)")
+print(f"Features: {spange_cols}")
 
-# Prepare single solvent data - ONLY Spange + Arrhenius
+# Prepare single solvent data - ONLY SPANGE + ARRHENIUS
 single_data['Solvent'] = single_data['SOLVENT NAME']
 single_merged = single_data.merge(spange, on='Solvent', how='left')
 single_merged['inv_temp'] = 1.0 / (single_merged['Temperature'] + 273.15)
@@ -62,7 +62,7 @@ print(f"\nSingle solvent features: {X_single.shape}")
 print(f"Single solvent targets: {Y_single.shape}")
 print(f"Number of features: {len(feature_cols)} (vs 2063 in exp_030)")
 
-# Prepare mixture data - ONLY Spange + Arrhenius
+# Prepare mixture data - ONLY SPANGE + ARRHENIUS
 full_data_mix = full_data[full_data['SolventB%'] > 0].copy()
 full_data_mix['Solvent'] = full_data_mix['SOLVENT A NAME'] + '.' + full_data_mix['SOLVENT B NAME']
 
@@ -139,12 +139,8 @@ def train_mlp(X_train, Y_train, input_dim, epochs=200, lr=0.001, batch_size=32):
 # GP + MLP + LGBM Ensemble (same as exp_030 but with simpler features)
 class SimplerEnsemble:
     def __init__(self, input_dim, weights=[0.15, 0.55, 0.30]):
-        """
-        GP + MLP + LGBM ensemble with simpler features
-        weights: [GP, MLP, LGBM]
-        """
         self.input_dim = input_dim
-        self.weights = weights
+        self.weights = weights  # [GP, MLP, LGBM]
         self.gp_models = []
         self.mlp = None
         self.lgbm_models = []
@@ -155,14 +151,9 @@ class SimplerEnsemble:
         
         # Train GP (one per target)
         self.gp_models = []
-        kernel = ConstantKernel(1.0) * Matern(length_scale=1.0, nu=2.5) + WhiteKernel(noise_level=0.1)
         for i in range(Y_train.shape[1]):
-            gp = GaussianProcessRegressor(
-                kernel=kernel,
-                n_restarts_optimizer=5,
-                random_state=42,
-                normalize_y=True
-            )
+            kernel = ConstantKernel(1.0) * Matern(length_scale=1.0, nu=2.5) + WhiteKernel(noise_level=0.1)
+            gp = GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=5, random_state=42)
             gp.fit(X_scaled, Y_train[:, i])
             self.gp_models.append(gp)
         
@@ -321,18 +312,18 @@ print("\n" + "="*60)
 print("EXPERIMENT 057 SUMMARY")
 print("="*60)
 
-print(f"\nSimpler Model (GP + MLP + LGBM with Spange Only):")
+print(f"\nSimpler Model (Spange Only):")
 print(f"  Features: Spange + Arrhenius ({len(feature_cols)} features vs 2063 in exp_030)")
-print(f"  Weights: GP=0.15, MLP=0.55, LGBM=0.30")
+print(f"  Ensemble: GP (0.15) + MLP (0.55) + LGBM (0.30)")
 print(f"\n  Single Solvent CV: {single_mse:.6f}")
 print(f"  Mixture CV: {mix_mse:.6f}")
 print(f"  Overall CV: {overall_mse:.6f}")
 print(f"  vs Baseline (exp_030): {improvement:+.1f}%")
 
 print(f"\nKey insights:")
-print(f"1. exp_000 (simpler model) had best residual (-0.0022) in CV-LB relationship")
-print(f"2. Simpler features may generalize better to unseen solvents")
-print(f"3. DRFP features (2048 dims) may be overfitting to CV scheme")
+print(f"1. Simpler features (15 vs 2063) may generalize better to LB")
+print(f"2. exp_000 had best residual (-0.0022) with simpler features")
+print(f"3. This approach tests if simpler = better for LB")
 
 print(f"\nRemaining submissions: 5")
 print(f"Best model: exp_030 (GP 0.15 + MLP 0.55 + LGBM 0.3) with CV 0.008298, LB 0.0877")
