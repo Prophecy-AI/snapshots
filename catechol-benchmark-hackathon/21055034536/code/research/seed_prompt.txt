@@ -1,111 +1,111 @@
 ## Current Status
-- Best CV score: 0.0081 from exp_049/050
-- Best LB score: 0.0877 from exp_030
-- Target: 0.0347 | Gap to target: 0.0530 (152.7% above)
-- Last submission (exp_064) FAILED with "Evaluation metric raised an unexpected error"
+- Best CV score: **0.00810** (exp_049/050/053 family; LB pending)
+- Best verified LB score: **0.0877** (exp_030 / exp_068 clean template replication)
+- Target: **0.0347** | Gap to target: **0.0530**
+- Submissions remaining today: **4**
 
 ## CV-LB Relationship Analysis (CRITICAL)
-- Linear fit: LB = 4.31 * CV + 0.0525 (R² = 0.95)
-- Intercept interpretation: Even at CV=0, expected LB is 0.0525
-- Are all approaches on the same line? YES
-- **CRITICAL**: Intercept (0.0525) > Target (0.0347) - IMPOSSIBLE to reach target by CV optimization alone!
-- Required CV to hit target: (0.0347 - 0.0525) / 4.31 = -0.0041 (NEGATIVE - IMPOSSIBLE)
+- Updated fit using confirmed scored submissions (incl. exp_030/068): **LB ≈ 4.30 · CV + 0.0524** (R² ≈ **0.97**)  
+  Source: `exploration/evolver_loop69_lb_feedback.ipynb`
+- Intercept interpretation: even with perfect CV, expected LB is ~0.052 → systematic OOD/extrapolation error dominates.
+- Are all approaches on the same line? **YES (so far)**.
+- Required CV for target under current line: (0.0347 − 0.0524)/4.30 ≈ **−0.0041** → we must **change** the relationship (reduce intercept) via shift-aware prediction.
 
 ## Response to Evaluator
-- Technical verdict was TRUSTWORTHY - the notebook is a faithful replication of exp_030
-- Evaluator's top priority: Submit exp_067 to verify pipeline, then pivot to GNN or distribution-shift strategies
-- Key concerns raised: The 0.087 floor cannot be broken by CV optimization. R² of 0.0131 between CV and LB proves CV improvements don't translate to LB improvements.
-- **My response**: The evaluator's R² calculation seems incorrect (I calculated R²=0.95 with strong correlation). However, the INTERCEPT problem is real - even with perfect CV, we can't reach the target. The evaluator is RIGHT that we need fundamentally different approaches.
-
-## Submission Failure Analysis
-The exp_064 submission failed with "Evaluation metric raised an unexpected error". Investigation shows:
-- Submission file format is CORRECT (1883 rows, correct columns, no NaN/inf)
-- Predictions are in valid ranges [0, 1]
-- Notebook structure matches exp_030 which worked
-
-**Possible causes:**
-1. Transient evaluation system error
-2. Cell 14 after "FINAL CELL" (but exp_030 had same structure and worked)
-3. Unknown issue with the evaluation metric
-
-**Recommendation**: Create a new experiment with ONLY the required cells (no Cell 14 after final cell) and submit again.
+- Technical verdict was **TRUSTWORTHY**. We accept that the clean notebook is template-compliant and the model class matches in submission cells.
+- Evaluator’s top priority was to submit the clean template to confirm Kaggle accepts it. **Done**: we now have a graded LB (0.0877), confirming the submission pipeline is fixed.
+- Key concerns raised and how we address them:
+  1) **Mixture representation too linear** → we will add explicit **(A,B,pct) interaction features** (concat/diff/prod) rather than only blended descriptors.
+  2) **Distribution shift not integrated into submitted model** → we will implement **cross-fitted applicability-domain (AD) shrinkage** inside the model wrapper (train-fold only) to directly attack the intercept.
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop68_analysis.ipynb` for CV-LB analysis
-- Key patterns:
-  1. CV-LB relationship is highly linear (R²=0.95) with slope 4.31
-  2. Intercept (0.0525) is HIGHER than target (0.0347)
-  3. All model types (MLP, LGBM, XGB, GP) fall on the same line
-  4. This is a DISTRIBUTION SHIFT problem, not a modeling problem
+- We are predicting on **unseen solvents/ramps**; Group/leave-one-solvent style CV still underestimates how hard test solvents are.
+- The stable empirical mapping LB ≈ 4.30*CV + 0.052 suggests a large systematic error component on OOD solvents.
 
-## Recommended Approaches
+## Recommended Approaches (priority order)
 
-### IMMEDIATE PRIORITY: Fix Submission Issue
-1. **Create a clean notebook** - Remove Cell 14 (CV verification) from the notebook
-2. **Use exact template structure** - Only the 3 required cells at the end
-3. **Submit exp_030 approach** - This achieved our best LB (0.0877)
+### 1) Add an Applicability-Domain (AD) correction layer ON TOP of the current GP+MLP+LGBM ensemble (must be template compliant)
+Goal: reduce catastrophic errors on far-OOD points and **break the intercept**.
 
-### STRATEGIC PRIORITY: Break the 0.087 Floor
-Since the intercept (0.0525) > target (0.0347), we CANNOT reach the target by CV optimization alone. We need approaches that REDUCE THE INTERCEPT:
+Implement a new model class (or modify existing) such as:
+- `GPMLPLGBMEnsembleAD(data='single'|'full')`
 
-1. **Extrapolation Detection + Conservative Predictions** (HIGH PRIORITY)
-   - Add features measuring solvent distance to training distribution
-   - When extrapolating (far from training solvents), blend predictions toward population mean
-   - This should reduce error on "hard" test solvents
+**Core idea (per outer CV fold, using ONLY that fold’s training data):**
+1. Train the base ensemble as in exp_030 (GP+MLP+LGBM).
+2. Define an **AD distance** for any sample as mean kNN distance to training manifold in a *descriptor space*.
+3. Compute a **baseline predictor** that is conservative under shift (kNN regression is ideal because it’s local and stable).
+4. Learn a **distance→shrinkage α(d)** mapping **cross-fitted** within the training fold.
+5. Final prediction:  
+   `pred_final = (1-α(d))*pred_model + α(d)*pred_baseline`
+6. Clip predictions to [0,1].
 
-2. **Uncertainty-Weighted Predictions** (HIGH PRIORITY)
-   - Use GP uncertainty estimates
-   - High uncertainty → conservative prediction (closer to mean)
-   - This naturally handles extrapolation
+**Concrete, implementable recipe (low-risk, fast):**
+- Descriptor space for distance:
+  - Use **Spange descriptors** (low-dim) + optionally **ACS-PCA** (low-dim).
+  - Avoid raw high-dim DRFP for distance unless you PCA it.
+  - Fit `StandardScaler` **inside each outer fold** on training solvents/ramps only.
+- Distance computation:
+  - `NearestNeighbors(n_neighbors=5, metric='euclidean')` on scaled descriptor vectors.
+  - `d(x) = mean(knn_distances)`.
+- Baseline predictor:
+  - `KNeighborsRegressor(n_neighbors=10, weights='distance')` on same descriptor space **plus (time,temp, pct)**, trained on the outer fold training rows.
+  - For single-solvent, features can be `[time,temp] + solvent_desc`.
+  - For full/mixture, features can be `[time,temp,pct] + pair_desc`.
+- Learn α(d) using ONLY the outer fold’s training rows (cross-fitted):
+  - Split the outer fold training rows into **K=5 inner folds** (random KFold, not group-based).
+  - For each inner fold:
+    - Fit base ensemble on inner-train.
+    - Fit baseline KNN on inner-train.
+    - Predict inner-val with both models.
+    - Compute distances d for inner-val to inner-train.
+  - After collecting all inner-val predictions, estimate α as a **monotonic function** of distance:
+    - Bin distances into ~10 quantile bins.
+    - For each bin, solve least-squares optimal shrinkage:
+      `alpha_bin = clip( sum((y-m)*(b-m)) / sum((b-m)^2), 0, 1 )`  where m=model_pred, b=baseline_pred.
+    - Enforce monotonicity with `IsotonicRegression(increasing=True)` mapping `bin_center -> alpha_bin`.
+  - At inference, compute d for each sample vs outer-train, get α(d) from isotonic reg.
 
-3. **Physics-Informed Constraints** (MEDIUM PRIORITY)
-   - Arrhenius kinetics features (already implemented)
-   - Mass balance constraint: Product 2 + Product 3 + SM ≈ 1
-   - Enforce this constraint in predictions
+**Why this is the right next move:** it explicitly targets OOD behavior (the intercept) rather than chasing CV.
 
-4. **Solvent Clustering** (MEDIUM PRIORITY)
-   - Group solvents by chemical class (alcohols, ethers, esters, etc.)
-   - Use class-specific models
-   - Detect when test solvent is in a known vs novel class
+### 2) Upgrade mixture representation: explicit pair-interaction descriptors (A,B,pct)
+Goal: fix structural limitation of linear blending.
 
-5. **Study Top Public Kernels** (LOW PRIORITY)
-   - Our best LB (0.0877) is BETTER than the top public kernel (0.09831)
-   - We're already competitive, but need to break the 0.087 floor
+For full-data featurization, compute and feed BOTH blended and interaction features:
+- `blend = (1-pct)*A + pct*B`
+- `diff = A - B`
+- `prod = A * B` (elementwise)
+- `pct2 = pct*(1-pct)`
+
+Then build final pair descriptor vector like:
+`pair_desc = concat([blend, diff, prod, pct2])`
+
+Use this pair_desc:
+- for MLP and LGBM feature input
+- for distance / kNN baseline feature space
+
+(Keep single-solvent pipeline unchanged except for AD correction.)
+
+### 3) Only if AD correction fails to move LB: re-attempt representation change (GNN / ChemBERTa) with strict class-match + template compliance
+Do NOT do this yet; AD correction is faster to iterate and more likely to change the intercept.
+If we do pivot again:
+- enforce: CV model class == submission cell model class (both single and full)
+- keep last 3 cells EXACTLY template except the `model = ...` line.
 
 ## What NOT to Try
-- **Standard CV optimization** - All approaches fall on the same CV-LB line. Improving CV won't help.
-- **More ensemble diversity** - We've tried GP, MLP, LGBM, XGB. All on same line.
-- **Hyperparameter tuning** - Diminishing returns, won't change the intercept.
+- More weight tuning, hyperparameter sweeps, or multi-seed bagging on tabular ensemble (optimization forbidden; will stay on same CV-LB line).
+- Any notebook that adds cells after the template FINAL CELL.
+- Any approach that changes the split generator (no GroupKFold-5 like some public kernels; must stick to template generators).
 
 ## Validation Notes
-- CV scheme: Leave-One-Solvent-Out (24 folds for single, 13 folds for full)
-- CV-LB gap: ~10x (CV 0.008 → LB 0.087)
-- The gap is STRUCTURAL - it's the intercept, not the slope
+- Use the competition’s official split generators (already in template).
+- Report CV overall + single/full components.
+- Track whether AD correction changes the CV-LB relationship: we care about **same CV but lower LB**.
+- Implementation hygiene:
+  - Keep all unsupervised transforms (scalers/PCA) fitted **inside each fold** (train-only) to avoid any preprocessing concerns.
+  - Ensure `model = GPMLPLGBMEnsembleAD(data='single')` and `model = GPMLPLGBMEnsembleAD(data='full')` appear in the last 3 template cells.
 
-## Specific Next Steps
-
-### Step 1: Fix Submission (IMMEDIATE)
-Create a new experiment that:
-1. Uses the exp_030 GP+MLP+LGBM ensemble approach
-2. Has ONLY the 3 required cells at the end (no Cell 14)
-3. Writes to `submission.csv` (not `/home/submission/submission.csv`)
-
-### Step 2: Implement Extrapolation Detection (NEXT)
-After fixing submission, implement:
-1. Calculate solvent similarity to training set (using Spange descriptors)
-2. For each test prediction, compute "extrapolation score"
-3. Blend prediction toward population mean based on extrapolation score
-4. This should reduce error on "hard" test solvents and lower the intercept
-
-### Step 3: Uncertainty-Weighted Predictions (AFTER)
-Use GP uncertainty to weight predictions:
-1. Train GP with uncertainty estimates
-2. For high-uncertainty predictions, blend toward mean
-3. This naturally handles extrapolation
-
-## Key Insight
-The target (0.0347) is BELOW the intercept (0.0525). This means:
-- No amount of CV optimization can reach the target
-- We need to CHANGE THE CV-LB RELATIONSHIP, not just improve CV
-- The solution is to reduce error on "hard" test solvents (extrapolation)
-- Conservative predictions when extrapolating should lower the intercept
+## Next Experiment Definition (do this now)
+- Create new experiment notebook based on the clean exp_030 template submission notebook.
+- Add the AD correction layer + mixture interaction features.
+- Name the experiment clearly (e.g., `exp_069_ad_shrinkage_pair_features`).
+- Do NOT submit until local CV run completes and the notebook ends exactly with the template final cell.
