@@ -3,7 +3,7 @@
 - Best LB score: 0.0877 from exp_030
 - Target: 0.0347 | Gap to target: 0.0530 (152.7%)
 - Remaining submissions: 3
-- Latest experiment: exp_117 (Physics-Constrained Ensemble) CV=0.009215
+- Latest experiment: exp_118 (Softmax Output Normalization) CV=0.015006 (85% WORSE - yields don't sum to 1)
 
 ## CV-LB Relationship Analysis (CRITICAL)
 - Linear fit: LB = 4.09 × CV + 0.0546 (R² = 0.96)
@@ -16,41 +16,54 @@
 We MUST change the CV-LB relationship, not just improve CV.
 
 ## Response to Evaluator
-- Technical verdict was TRUSTWORTHY. The physics-constrained model is correctly implemented.
-- Evaluator's top priority: Submit exp_117 to test if physics constraints change the CV-LB relationship.
-- **My synthesis**: Post-hoc physics constraints are unlikely to change the CV-LB relationship because they don't change how the model learns. However, submitting exp_117 as a diagnostic is reasonable. If LB ≈ 0.0923 (on the line), we know post-hoc constraints don't help. If LB < 0.0900, they might help.
+- Technical verdict was TRUSTWORTHY. The softmax experiment was correctly implemented.
+- Evaluator correctly identified the fundamental flaw: yields don't sum to 1 (avg=0.80, std=0.19)
+- Evaluator's top priority: Try yield RATIO prediction or median ensemble
+- **My synthesis**: I AGREE. Softmax was fundamentally flawed. The evaluator's suggestions are the most promising unexplored approaches.
 
-## IMMEDIATE PRIORITY: Softmax Output Layer Model
+## Key Findings from Loop 120 Analysis
+1. **CV-LB Line**: LB = 4.09×CV + 0.0546 (R²=0.96) - ALL approaches on same line
+2. **Intercept Problem**: Intercept (0.0546) > Target (0.0347) - target unreachable by CV improvement
+3. **exp_073 (RF)**: Outlier but WORSE (LB=0.1451 vs expected 0.0890) - RF overfits more
+4. **exp_118 (Softmax)**: CV=0.015 (85% worse) - yields don't sum to 1 (avg=0.80)
+5. **120 experiments**: All tabular, GNN, ChemBERTa, physics-constrained on same line
+
+## IMMEDIATE PRIORITY: Yield Ratio Prediction
 
 **Why this is the most promising unexplored approach:**
-1. Unlike post-hoc constraints, softmax CHANGES how the model learns
-2. Enforces SM + P2 + P3 = 1 EXACTLY (not just ≤ 1)
-3. Changes the output space, not just post-processing
-4. May reduce extreme predictions for unseen solvents
+1. Ratios (P2/total, P3/total) might be more stable across solvents than absolute yields
+2. Total yield might be easier to predict (single number vs 3)
+3. This CHANGES the problem formulation, potentially changing the CV-LB relationship
+4. NOT tried in any of the 120 experiments
 
 **Implementation:**
 ```python
-class SoftmaxYieldModel:
-    """Predict yields as a probability distribution over outcomes.
+class YieldRatioModel:
+    """Predict yield ratios instead of absolute yields.
     
-    Key insight: SM + P2 + P3 should sum to 1 (or close to it).
-    By using softmax, we enforce this constraint DURING training,
-    not just post-processing.
+    Key insight: The distribution shift might be in the absolute scale,
+    not the relative proportions. By predicting ratios and total separately,
+    we may achieve better generalization.
     """
     def __init__(self, data='single'):
         self.data_type = data
         self.featurizer = Featurizer(mixed=(data=='full'))
         self.scaler = StandardScaler()
-        self.models = []  # One model per target
+        self.ratio_models = []  # Predict P2/total, P3/total
+        self.total_model = None  # Predict total = P2 + P3 + SM
         
     def train_model(self, X_train, y_train):
         X_feat = self.featurizer.featurize(X_train)
         X_scaled = self.scaler.fit_transform(X_feat)
         
         y_vals = y_train.values
+        total = y_vals.sum(axis=1)
         
-        # Train separate models for each target
-        for i in range(3):
+        # Compute ratios (handle division by zero)
+        ratios = y_vals / np.maximum(total.reshape(-1, 1), 1e-6)
+        
+        # Train ratio models for P2 and P3 (SM ratio = 1 - P2_ratio - P3_ratio)
+        for i in range(2):  # Only P2 and P3 ratios
             model = CatBoostRegressor(
                 iterations=500,
                 learning_rate=0.05,
@@ -59,38 +72,64 @@ class SoftmaxYieldModel:
                 random_seed=42,
                 verbose=False
             )
-            model.fit(X_scaled, y_vals[:, i])
-            self.models.append(model)
+            model.fit(X_scaled, ratios[:, i])
+            self.ratio_models.append(model)
+        
+        # Train total model
+        self.total_model = CatBoostRegressor(
+            iterations=500,
+            learning_rate=0.05,
+            depth=6,
+            l2_leaf_reg=3,
+            random_seed=42,
+            verbose=False
+        )
+        self.total_model.fit(X_scaled, total)
         
     def predict(self, X):
         X_feat = self.featurizer.featurize(X)
         X_scaled = self.scaler.transform(X_feat)
         
-        # Get raw predictions
-        preds = []
-        for i in range(3):
-            pred = self.models[i].predict(X_scaled)
-            preds.append(pred)
+        # Predict ratios
+        p2_ratio = self.ratio_models[0].predict(X_scaled)
+        p3_ratio = self.ratio_models[1].predict(X_scaled)
+        sm_ratio = 1 - p2_ratio - p3_ratio
         
-        pred = np.column_stack(preds)
+        # Clip ratios to [0, 1]
+        p2_ratio = np.clip(p2_ratio, 0, 1)
+        p3_ratio = np.clip(p3_ratio, 0, 1)
+        sm_ratio = np.clip(sm_ratio, 0, 1)
         
-        # Apply softmax to ensure sum = 1
-        # First clip to avoid extreme values
-        pred = np.clip(pred, 0, 1)
+        # Renormalize ratios to sum to 1
+        total_ratio = p2_ratio + p3_ratio + sm_ratio
+        p2_ratio = p2_ratio / total_ratio
+        p3_ratio = p3_ratio / total_ratio
+        sm_ratio = sm_ratio / total_ratio
         
-        # Then normalize to sum to 1
-        total = pred.sum(axis=1, keepdims=True)
-        pred = pred / (total + 1e-6)
+        # Predict total
+        total = self.total_model.predict(X_scaled)
+        total = np.clip(total, 0, 1.5)  # Reasonable range
+        
+        # Compute final predictions
+        pred = np.column_stack([
+            p2_ratio * total,
+            p3_ratio * total,
+            sm_ratio * total
+        ])
         
         return torch.tensor(pred)
 ```
 
 ## ALTERNATIVE: Median Ensemble
 
-If softmax doesn't help, try median ensemble:
+If yield ratio doesn't help, try median ensemble:
 ```python
 class MedianEnsembleModel:
-    """Ensemble with median aggregation for robustness to outliers."""
+    """Ensemble with median aggregation for robustness to outliers.
+    
+    Key insight: Mean aggregation can be dominated by extreme predictions.
+    Median is more robust and may reduce errors on unseen solvents.
+    """
     def __init__(self, data='single', n_models=10):
         self.data_type = data
         self.n_models = n_models
@@ -109,33 +148,95 @@ class MedianEnsembleModel:
         return torch.tensor(pred)
 ```
 
+## ALTERNATIVE: Quantile Regression
+
+Predict median instead of mean:
+```python
+from catboost import CatBoostRegressor
+
+class QuantileModel:
+    """Predict median (50th percentile) instead of mean.
+    
+    Key insight: Mean predictions can be pulled by outliers.
+    Median predictions are more robust.
+    """
+    def __init__(self, data='single'):
+        self.data_type = data
+        self.featurizer = Featurizer(mixed=(data=='full'))
+        self.scaler = StandardScaler()
+        self.models = []
+        
+    def train_model(self, X_train, y_train):
+        X_feat = self.featurizer.featurize(X_train)
+        X_scaled = self.scaler.fit_transform(X_feat)
+        y_vals = y_train.values
+        
+        for i in range(3):
+            model = CatBoostRegressor(
+                iterations=500,
+                learning_rate=0.05,
+                depth=6,
+                l2_leaf_reg=3,
+                loss_function='Quantile:alpha=0.5',  # Median
+                random_seed=42,
+                verbose=False
+            )
+            model.fit(X_scaled, y_vals[:, i])
+            self.models.append(model)
+            
+    def predict(self, X):
+        X_feat = self.featurizer.featurize(X)
+        X_scaled = self.scaler.transform(X_feat)
+        
+        preds = []
+        for i in range(3):
+            pred = self.models[i].predict(X_scaled)
+            preds.append(pred)
+        
+        pred = np.column_stack(preds)
+        pred = np.clip(pred, 0, 1)
+        return torch.tensor(pred)
+```
+
 ## Submission Strategy (3 remaining)
 
 **Recommended approach:**
-1. **First**: Implement and test softmax output layer model
-2. **If CV is reasonable**: Submit softmax model to test if it changes CV-LB relationship
-3. **If softmax doesn't help**: Try median ensemble
+1. **First**: Implement yield ratio prediction (highest potential to change CV-LB relationship)
+2. **If CV is reasonable (< 0.012)**: Submit to test if it changes CV-LB relationship
+3. **If ratio doesn't help**: Try median ensemble or quantile regression
 4. **Final submission**: Best approach from experiments
 
-**Alternative (more conservative):**
-1. Submit exp_117 (physics-constrained) as diagnostic
-2. Based on results, iterate on most promising approach
+**Decision criteria for submission:**
+- If new approach achieves CV < 0.010 AND is fundamentally different: SUBMIT
+- If CV is similar to best but approach is different: SUBMIT (to test relationship)
+- If CV is worse: DON'T SUBMIT, try next approach
 
 ## What NOT to Try
-1. ❌ More MLP variants - exhaustively tested
+1. ❌ More MLP variants - exhaustively tested (50+ experiments)
 2. ❌ More feature engineering - doesn't change intercept
 3. ❌ Multi-seed ensembles with mean - we're 152% away from target
 4. ❌ Hyperparameter tuning - won't change CV-LB relationship
 5. ❌ More GNN variants - TRUE GNN worse than tabular
 6. ❌ More ChemBERTa variants - on same line
+7. ❌ Softmax output - yields don't sum to 1 (avg=0.80)
+8. ❌ Post-hoc physics constraints - don't change learning
 
 ## Validation Notes
 - CV scheme: Leave-one-solvent-out (24 folds single, 13 folds full)
 - **CRITICAL**: Verify model class consistency in submission cells
 - Track both single-solvent MSE and full-data MSE separately
+- After submission, check if LB falls on the line or deviates
 
 ## Critical Reminders
 1. **VERIFY MODEL CLASS CONSISTENCY**: Before logging ANY experiment, verify that submission cells use the EXACT same model class as CV computation.
-2. **DON'T GIVE UP**: The target IS achievable.
+2. **DON'T GIVE UP**: The target IS achievable. The benchmark paper achieved MSE 0.0039.
 3. **FOCUS ON CHANGING THE RELATIONSHIP**: Improving CV alone won't help.
-4. **ONLY 3 SUBMISSIONS LEFT**: Be strategic.
+4. **ONLY 3 SUBMISSIONS LEFT**: Be strategic - only submit if approach is fundamentally different.
+
+## Priority Order for Next Experiments
+1. **Yield Ratio Prediction** - Most promising, changes problem formulation
+2. **Median Ensemble** - Quick to implement, robust to outliers
+3. **Quantile Regression** - Predicts median instead of mean
+4. **Relative Prediction** - Predict change from reference solvent
+
+The key insight is that we need to CHANGE how we formulate the problem, not just improve the model. All 120 experiments have shown that improving CV doesn't help because the intercept is too high. We need approaches that might reduce the intercept or change the slope of the CV-LB relationship.
