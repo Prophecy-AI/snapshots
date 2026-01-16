@@ -1,111 +1,117 @@
 ## Current Status
-- Best CV score: 0.0083 from exp_030 (GP+MLP+LGBM ensemble)
+- Best CV score: 0.0083 from exp_030 and exp_067 (GP+MLP+LGBM ensemble)
 - Best LB score: 0.0877 (exp_030 and exp_067)
 - Target: 0.0347 | Gap to target: 0.0530 (152.7% worse)
 
 ## CV-LB Relationship Analysis (CRITICAL)
-- Linear fit: LB = 4.36 * CV + 0.052 (R² = 0.956)
-- Intercept interpretation: Even at CV=0, expected LB is 0.052
+- Linear fit: LB = 4.36 * CV + 0.0520 (R² = 0.9558)
+- Intercept interpretation: Even at CV=0, expected LB is 0.0520
 - **Are all approaches on the same line? YES**
-- **CRITICAL: Intercept (0.052) > Target (0.0347)**
-- Required CV for target: (0.0347 - 0.052) / 4.36 = -0.004 (IMPOSSIBLE)
+- **CRITICAL: Intercept (0.0520) > Target (0.0347)**
+- Required CV for target: (0.0347 - 0.0520) / 4.36 = -0.004 (IMPOSSIBLE)
 
 **This means standard CV optimization CANNOT reach the target.**
 The 1st place score (0.0347) is BELOW our intercept, meaning they found a way to CHANGE the CV-LB relationship.
 
 ## Response to Evaluator
 - Technical verdict was TRUSTWORTHY. Execution is sound.
-- Evaluator's top priority: RETURN TO CONSERVATIVE BLENDING. I agree this is a reasonable direction, but the conservative blending experiments (exp_096, exp_097) both made CV worse.
-- Key concerns raised: The intercept problem is being ignored; recent experiments are regressive. I fully agree - we've been stuck optimizing CV when the real problem is the intercept.
-- Evaluator correctly identified that adding more models (5-model ensemble) didn't help. The 3-model ensemble (GP+MLP+LGBM) remains optimal.
+- Evaluator's top priority: IMPLEMENT ENS-MODEL KERNEL'S FULL APPROACH. I agree - we need to try approaches that might reduce the intercept.
+- Key concerns raised: (1) The intercept problem is being ignored, (2) Recent experiments are regressive, (3) Per-target models didn't help. All valid concerns.
+- Evaluator correctly identified that all model types fall on the same CV-LB line. The intercept is the bottleneck.
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop103_analysis.ipynb` for CV-LB analysis
+- Reference notebooks: See `exploration/evolver_loop104_analysis.ipynb` for CV-LB analysis
 - Key patterns:
   1. All model types (MLP, LGBM, GP, CatBoost, XGBoost) fall on the SAME CV-LB line
-  2. The intercept (0.052) represents extrapolation error to unseen solvents
+  2. The intercept (0.0520) represents extrapolation error to unseen solvents
   3. 1st place (0.0347) found something fundamentally different
-  4. Recent experiments (exp_094-098) all made CV WORSE than exp_030
+  4. Recent experiments (exp_094-099) all made CV WORSE than exp_030
 
 ## Recommended Approaches
 
-**PRIORITY 1: Per-Target Model with Different Architectures**
-The dabansherwani kernel uses different model types for different targets:
-- SM: HistGradientBoosting (hardest target, needs more regularization)
-- Product 2/3: ExtraTreesRegressor (easier targets, can use more complex models)
-- Weights: 0.65 * ACS_PCA + 0.35 * Spange features
-
-This is worth trying because:
-1. SM is consistently the hardest target (highest error)
-2. Different targets may have different optimal model types
-3. We haven't tried ExtraTreesRegressor yet
-
+**PRIORITY 1: Add Mass Balance Constraint to exp_030**
+The ens-model kernel uses clipping + renormalization (mass balance constraint):
 ```python
-class PerTargetEnsemble:
-    def __init__(self, data='single'):
-        self.targets = ["Product 2", "Product 3", "SM"]
-        self.models = {}
-        for t in self.targets:
-            if t == "SM":
-                # SM is hardest - use HistGradientBoosting
-                self.models[t] = [
-                    HistGradientBoostingRegressor(max_depth=7, max_iter=700, learning_rate=0.04),
-                    HistGradientBoostingRegressor(max_depth=7, max_iter=700, learning_rate=0.04)
-                ]
-            else:
-                # P2/P3 are easier - use ExtraTrees
-                self.models[t] = [
-                    ExtraTreesRegressor(n_estimators=900, min_samples_leaf=2),
-                    ExtraTreesRegressor(n_estimators=900, min_samples_leaf=2)
-                ]
+# Post-processing in predict()
+out = np.clip(out, 0.0, None)  # Clip to non-negative
+totals = out.sum(axis=1, keepdims=True)
+divisor = np.maximum(totals, 1.0)  # Only normalize if sum > 1
+out = out / divisor
 ```
 
-**PRIORITY 2: Yield Normalization Post-Processing**
-The nocarbonintelligence kernel normalizes yields to sum to 1 (mass balance constraint):
-```python
-# Post-processing
-predictions = np.clip(predictions, 0, None)
-sum_yields = predictions.sum(axis=1, keepdims=True)
-predictions = predictions / np.clip(sum_yields, 1e-12, None)
-predictions = np.clip(predictions, 0, 1)
-```
+This enforces a physics constraint (yields can't sum to more than 100%) that should generalize to unseen solvents. This is a LOW-RISK change to our best model.
 
-This enforces a physics constraint that should generalize to unseen solvents.
+**PRIORITY 2: Implement ens-model Kernel's Full Approach**
+Key techniques from ens-model kernel:
+1. **Correlation filtering** (threshold=0.90) with feature priority: spange > acs > drfps > frag > smiles
+2. **Combined feature table** from all sources
+3. **CatBoost + XGBoost ensemble** with different weights:
+   - Single data: CatBoost=7/13, XGBoost=6/13
+   - Full data: CatBoost=1/3, XGBoost=2/3
+4. **Clipping + renormalization** of predictions
 
-**PRIORITY 3: Combine GP+MLP+LGBM with Per-Target Weighting**
-Instead of uniform weights across targets, use target-specific weights:
-- SM: Higher GP weight (more conservative for hardest target)
-- P2/P3: Higher MLP/LGBM weight (more aggressive for easier targets)
+**PRIORITY 3: Different Ensemble Weights for Single vs Full Data**
+The ens-model kernel uses DIFFERENT weights for single vs full data. This adapts to each task's characteristics. Our current ensemble uses the same weights for both.
 
-**PRIORITY 4: Feature Importance Analysis**
-Before trying more models, analyze which features are most important:
-- Are Spange features more important than DRFP?
-- Are ACS PCA features adding value?
-- Which features have the highest correlation with targets?
-
-This could guide feature selection to reduce overfitting.
+**PRIORITY 4: Solvent Similarity Features**
+Add features measuring how similar test solvents are to training solvents:
+- Tanimoto similarity to nearest training solvent
+- Distance in Spange descriptor space
+- When extrapolating (low similarity), blend toward population mean
 
 ## What NOT to Try
 - ❌ More models in ensemble (5-model was worse than 3-model)
+- ❌ Per-target models with different architectures (exp_099 was 23% worse)
 - ❌ Conservative blending with high blend_strength (made CV worse)
 - ❌ GP uncertainty blending (exp_097 was 7.6% worse)
-- ❌ CatBoost + XGBoost only (exp_094 was 15.2% worse)
 - ❌ Ridge regression (exp_095 was 89.8% worse)
+- ❌ HistGradientBoosting or ExtraTreesRegressor (didn't help)
 
 ## Validation Notes
 - CV scheme: Leave-One-Out for single solvents, Leave-One-Ramp-Out for mixtures
-- CV-LB gap: ~4.36x multiplier + 0.052 intercept
+- CV-LB gap: ~4.36x multiplier + 0.0520 intercept
 - The intercept is the real bottleneck - any approach that doesn't reduce it won't reach target
 
 ## Key Insight
-The 1st place score (0.0347) is BELOW our intercept (0.052). This means they found a fundamentally different approach that doesn't follow our CV-LB line. Possible explanations:
-1. Features that generalize better to unseen solvents
-2. Physics-based constraints that hold for all solvents
+The 1st place score (0.0347) is BELOW our intercept (0.0520). This means they found a fundamentally different approach that doesn't follow our CV-LB line. Possible explanations:
+1. Physics-based constraints that hold for all solvents (mass balance)
+2. Features that generalize better to unseen solvents
 3. Different validation scheme that better matches test distribution
 4. Post-processing that adjusts predictions for test distribution
 
 ## Submission Strategy
 - Only 4 submissions remaining
-- DO NOT submit unless CV < 0.0083 (our best)
-- Consider submitting if a new approach shows promise (different CV-LB relationship)
-- The per-target ensemble approach is worth trying first
+- PRIORITY: Try exp_030 with mass balance constraint (low-risk, potentially high-reward)
+- If CV improves, submit to verify LB improvement
+- The mass balance constraint is the most promising approach because:
+  1. It enforces physics that generalizes to unseen solvents
+  2. It's used by the ens-model kernel
+  3. It's a simple change to our best model
+
+## Implementation Notes for exp_100
+
+Create a new experiment that takes exp_030 (GP+MLP+LGBM ensemble) and adds mass balance post-processing:
+
+```python
+class GPMLPLGBMEnsembleWithMassBalance:
+    # ... same as exp_030 ...
+    
+    def predict(self, X):
+        # Get predictions from GP, MLP, LGBM
+        gp_pred = self.gp_model.predict(X_gp)
+        mlp_pred = self.mlp_model.predict(X_mlp)
+        lgbm_pred = self.lgbm_model.predict(X_lgbm)
+        
+        # Ensemble
+        pred = 0.3 * gp_pred + 0.4 * mlp_pred + 0.3 * lgbm_pred
+        
+        # MASS BALANCE CONSTRAINT (NEW)
+        pred = np.clip(pred, 0.0, None)  # Non-negative
+        totals = pred.sum(axis=1, keepdims=True)
+        divisor = np.maximum(totals, 1.0)  # Only normalize if sum > 1
+        pred = pred / divisor
+        
+        return torch.tensor(pred, dtype=torch.double)
+```
+
+This is the simplest change that might reduce the intercept. If it works, we can try more sophisticated approaches.
