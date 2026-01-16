@@ -6,10 +6,11 @@ can improve generalization by up to 7.7%. This is fundamentally different from o
 previous approaches.
 
 Key changes from baseline (exp_030):
-1. Add auxiliary task: Reconstruct input features (autoencoder)
-2. Add auxiliary task: Predict solvent properties from embeddings
-3. Joint training forces model to learn more generalizable representations
-4. Keep GP + MLP + LGBM ensemble structure but with multi-task MLP
+1. Train with multiple auxiliary objectives
+2. Main task: Predict yields (SM, Product 2, Product 3)
+3. Auxiliary task 1: Reconstruct input features (autoencoder)
+4. Auxiliary task 2: Predict solvent properties from embedding
+5. Use shared encoder with task-specific heads
 """
 
 import numpy as np
@@ -113,37 +114,45 @@ Y_spange_mix = mix_merged[spange_target_cols].values
 
 print(f"\nMixture features: {X_mix.shape}")
 print(f"Mixture targets: {Y_mix.shape}")
-print(f"Spange auxiliary targets: {Y_spange_mix.shape}")
 
-# Multi-Task MLP Model with Auxiliary Tasks
-class MultiTaskMLP(nn.Module):
-    def __init__(self, input_dim, hidden_dims=[128, 64], output_dim=3, aux_dim=5, dropout=0.3):
+# Multi-Task Model with Auxiliary Objectives
+class MultiTaskModel(nn.Module):
+    def __init__(self, input_dim, hidden_dim=128, latent_dim=64, output_dim=3, aux_dim=5, dropout=0.3):
         super().__init__()
         
         # Shared encoder
-        layers = []
-        prev_dim = input_dim
-        for h_dim in hidden_dims:
-            layers.extend([
-                nn.Linear(prev_dim, h_dim),
-                nn.BatchNorm1d(h_dim),
-                nn.ReLU(),
-                nn.Dropout(dropout)
-            ])
-            prev_dim = h_dim
-        self.encoder = nn.Sequential(*layers)
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, latent_dim),
+            nn.BatchNorm1d(latent_dim),
+            nn.ReLU()
+        )
         
         # Main task head: Predict yields
         self.yield_head = nn.Sequential(
-            nn.Linear(hidden_dims[-1], output_dim),
+            nn.Dropout(dropout),
+            nn.Linear(latent_dim, 32),
+            nn.ReLU(),
+            nn.Linear(32, output_dim),
             nn.Sigmoid()
         )
         
         # Auxiliary task 1: Reconstruct input features (autoencoder)
-        self.reconstruction_head = nn.Linear(hidden_dims[-1], input_dim)
+        self.reconstruction_head = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, input_dim)
+        )
         
         # Auxiliary task 2: Predict solvent properties
-        self.solvent_property_head = nn.Linear(hidden_dims[-1], aux_dim)
+        self.solvent_property_head = nn.Sequential(
+            nn.Linear(latent_dim, 32),
+            nn.ReLU(),
+            nn.Linear(32, aux_dim)
+        )
     
     def forward(self, x, return_aux=False):
         z = self.encoder(x)
@@ -153,26 +162,21 @@ class MultiTaskMLP(nn.Module):
             reconstruction = self.reconstruction_head(z)
             solvent_props = self.solvent_property_head(z)
             return yields, reconstruction, solvent_props
+        
         return yields
 
 def train_multitask_mlp(X_train, Y_train, Y_spange_train, input_dim, 
                         epochs=300, lr=0.001, batch_size=32,
-                        aux_weight_recon=0.1, aux_weight_props=0.1):
-    """Train multi-task MLP with auxiliary objectives"""
-    model = MultiTaskMLP(input_dim, hidden_dims=[128, 64], aux_dim=Y_spange_train.shape[1])
+                        lambda_recon=0.1, lambda_aux=0.1):
+    """Train multi-task model with auxiliary objectives"""
+    model = MultiTaskModel(input_dim, aux_dim=Y_spange_train.shape[1])
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
-    
-    # Loss functions
-    mse_loss = nn.MSELoss()
     
     X_tensor = torch.FloatTensor(X_train)
     Y_tensor = torch.FloatTensor(Y_train)
     Y_spange_tensor = torch.FloatTensor(Y_spange_train)
     
-    # Normalize auxiliary targets
-    spange_mean = Y_spange_tensor.mean(dim=0)
-    spange_std = Y_spange_tensor.std(dim=0) + 1e-8
-    Y_spange_norm = (Y_spange_tensor - spange_mean) / spange_std
+    mse_loss = nn.MSELoss()
     
     model.train()
     for epoch in range(epochs):
@@ -183,7 +187,7 @@ def train_multitask_mlp(X_train, Y_train, Y_spange_train, input_dim,
             batch_idx = indices[i:i+batch_size]
             X_batch = X_tensor[batch_idx]
             Y_batch = Y_tensor[batch_idx]
-            Y_spange_batch = Y_spange_norm[batch_idx]
+            Y_spange_batch = Y_spange_tensor[batch_idx]
             
             optimizer.zero_grad()
             
@@ -197,13 +201,14 @@ def train_multitask_mlp(X_train, Y_train, Y_spange_train, input_dim,
             recon_loss = mse_loss(reconstruction, X_batch)
             
             # Auxiliary task 2: Solvent property prediction loss
-            props_loss = mse_loss(solvent_props, Y_spange_batch)
+            aux_loss = mse_loss(solvent_props, Y_spange_batch)
             
             # Combined loss
-            loss = main_loss + aux_weight_recon * recon_loss + aux_weight_props * props_loss
+            loss = main_loss + lambda_recon * recon_loss + lambda_aux * aux_loss
             
             loss.backward()
             optimizer.step()
+            
             total_loss += loss.item()
     
     return model
@@ -234,7 +239,8 @@ class MultiTaskEnsemble:
         # Train Multi-Task MLP with auxiliary objectives
         self.mlp = train_multitask_mlp(
             X_scaled, Y_train, Y_spange_scaled, self.input_dim,
-            epochs=300, aux_weight_recon=0.1, aux_weight_props=0.1
+            epochs=300, lr=0.001, batch_size=32,
+            lambda_recon=0.1, lambda_aux=0.1
         )
         
         # Train LightGBM (one per target)
@@ -394,16 +400,16 @@ print("="*60)
 print(f"\nMulti-Task Ensemble (GP + MultiTask MLP + LGBM):")
 print(f"  Features: Spange + DRFP + Arrhenius ({len(feature_cols)} features)")
 print(f"  Weights: GP=0.15, MLP=0.55, LGBM=0.30")
-print(f"  Auxiliary tasks: Reconstruction + Solvent property prediction")
+print(f"  Auxiliary tasks: Reconstruction + Solvent Property Prediction")
 print(f"\n  Single Solvent CV: {single_mse:.6f}")
 print(f"  Mixture CV: {mix_mse:.6f}")
 print(f"  Overall CV: {overall_mse:.6f}")
 print(f"  vs Baseline (exp_030): {improvement:+.1f}%")
 
 print(f"\nKey insights:")
-print(f"1. Auxiliary tasks force model to learn generalizable representations")
-print(f"2. Reconstruction task acts as regularization")
-print(f"3. Solvent property prediction captures chemistry knowledge")
+print(f"1. Auxiliary tasks force learning generalizable representations")
+print(f"2. Reconstruction task helps learn feature structure")
+print(f"3. Solvent property prediction helps learn chemistry")
 
 print(f"\nRemaining submissions: 5")
 print(f"Best model: exp_030 (GP 0.15 + MLP 0.55 + LGBM 0.3) with CV 0.008298, LB 0.0877")
