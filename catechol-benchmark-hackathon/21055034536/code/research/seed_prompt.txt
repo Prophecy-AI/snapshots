@@ -1,94 +1,79 @@
 ## Current Status
-- Best CV score: **0.008303** from **070A0_exp030_control** (GP+MLP+LGBM ensemble)
-- Best *confirmed* LB score: **0.0877** (exp_030 / exp_068)
-- Target: **0.034700** | Gap to target: **+0.053020**
-- Submissions remaining today: **4**
+- Best CV score (historical): **0.008298** (exp_030). Best *submitted* baseline: **0.008303** (exp_068) → **LB 0.08774**.
+- Latest experiment: **072A0_template_safe** (GP+MLP+LGBM ensemble, template-safe + flip bug fixed) → **CV 0.008621** (not submitted).
+- Target: **0.034700** | Current best LB: **0.08774** | Gap to target: **0.05304**
 
 ## CV-LB Relationship Analysis (CRITICAL)
-- Established mapping on completed submissions: **LB ≈ 4.31 × CV + 0.0525** (R² ≈ 0.95)
-- Interpretation: current approach family has a large **structural OOD intercept (~0.0525)**.
-- Are all approaches on the same line? **YES (tabular models / same representation family)**
-- Implication: further CV-only improvements are not the main lever; we must **change the CV→LB relationship** via OOD/shift-aware prediction.
+Using actual submission history (13 submissions with CV+LB present):
+- Linear fit: **LB = 4.34 * CV + 0.05226** (R² = **0.957**)
+- Intercept interpretation: Even with extremely strong CV, we still carry a large systematic error term; we must **change the mapping** (reduce intercept), not just improve CV.
+- Are all approaches on the same line? **YES (so far)** → treat as **distribution shift / extrapolation** problem.
 
 ## Response to Evaluator (REQUIRED)
-- Technical verdict was **CONCERNS**. I agree: even if the model is stable, the current notebook risks **template non-compliance / fold-index misalignment**.
-- Evaluator’s top priority: **move A0 into strictly template-compliant scaffold (053_exact_template) and fix mixture flip bug**. Agreed and making this our immediate next step.
-- Key concerns raised and how we address them:
-  1) **Ramp fold ordering**: unsorted ramps change fold indices. We will **use the official template split generators** (do not redefine them), guaranteeing fold ordering.
-  2) **Output path**: must write to **/home/submission/submission.csv** in the final cell. We will follow template exactly.
-  3) **Mixture flip/TTA bug**: implement flip as true **swap(A,B) + pct := 1-pct** and ensure it actually changes *directional* feature blocks (A-block/B-block), not just symmetric blends.
+- Technical verdict was **CONCERNS**. I agree: template compliance + fold/index alignment were a real submission risk, and mixture flip/TTA was a real bug.
+- Evaluator’s top priority: **port the A0 model into strict template scaffold and fix flip**. ✅ Done in **072A0_template_safe**:
+  - Uses exact template split generators and writes to `/home/submission/submission.csv`.
+  - Flip now correctly does **swap(A,B) and pct := 1-pct**, and TTA averages std+flip.
+- Key concern remaining: now that submission mechanics are safe, we must spend remaining submissions only on **OOD/intercept reduction layers** (AD shrinkage, uncertainty-aware fallback), not more base-model tweaks.
 
-## Data Understanding (what matters for next steps)
-- Full-data split is by **(SOLVENT A NAME, SOLVENT B NAME)** ramp. Our analysis shows membership masks are identical across implementations, but **fold order differs unless ramps are sorted**, which can break submission alignment.
-- Baseline ensemble (GP+MLP+LGBM) is a strong ID anchor; our next gains must come from **OOD behavior control**.
+## Data Understanding
+- Reference CV↔LB diagnostics: `exploration/evolver_loop66_analysis.ipynb` … `loop72_analysis.ipynb`.
+- Known mixture modeling signal: `exploration/evolver_loop69_analysis.ipynb` showed strong gains from **pairwise+interaction** mixture features vs linear blending (at least for Ridge baseline). This suggests mixture nonlinearity is real and may be part of OOD failure.
 
 ## Recommended Approaches (priority order)
 
-### 1) Make a submission-safe baseline notebook (A0-template) — minimal delta
-**Goal:** eliminate “bad LB due to misalignment” as a failure mode.
+### 1) Template-safe Applicability-Domain (AD) Shrinkage Layer (MINIMAL DELTA, INTERCEPT TARGET)
+**Goal:** change OOD behavior: when a sample is far from training solvents/ramps, shrink predictions toward a conservative fallback.
 
-**Instructions:**
-1. Start from **`experiments/053_exact_template/exact_template.ipynb`** (this is the scaffold).
-2. Keep the **last 3 cells IDENTICAL** to the template (no extra cells after final cell). Only change:
-   - `model = ...` line in the 3rd-to-last and 2nd-to-last cells.
-3. Implement a model class, e.g. **`GPMLPLGBMEnsemble_TemplateSafe`** (or reuse name if already exists) that reproduces exp_030 behavior.
-4. Ensure the notebook writes to **`/home/submission/submission.csv`** (template behavior).
-5. **Do NOT redefine split generators**. Import and use template `generate_leave_one_out_splits` and `generate_leave_one_ramp_out_splits`.
-6. Run the notebook end-to-end; verify local recomputed MSE ≈ **0.0083**.
+Implement a new model class (keep last 3 template cells unchanged except model line):
+- Base model: reuse **GP+MLP+LGBM** from `072A0_template_safe` (so we keep strong ID accuracy).
+- Add an AD module in `predict()`:
+  1. Build a **distance feature space** using solvent descriptors only (recommended):
+     - For `data='single'`: use Spange+DRFP(nzvar)+ACS PCA for SOLVENT NAME.
+     - For `data='full'`: use blended descriptors for A/B with pct (same blending as base featurizer) **but distance should ignore kinetics** to focus on solvent similarity; append pct.
+  2. Fit `StandardScaler` on train-distance-features; fit `NearestNeighbors(k=10)`.
+  3. Calibrate **alpha(distance)** *within each fold* (no leakage):
+     - Inside `train_model`, split the fold’s training set into `train_inner` and `cal_inner` by **group**:
+       - single: group = solvent name
+       - full: group = (SOLVENT A NAME, SOLVENT B NAME)
+     - Train base ensemble on `train_inner` only.
+     - On `cal_inner`, compute distance-to-`train_inner` and base predictions.
+     - Choose alpha by a simple grid search on cal_inner to minimize MSE of:
+       - `pred_shrunk = (1-alpha)*pred + alpha*mu`, where `mu` is the per-target mean label on `train_inner`.
+       - Do this **per distance bin** (e.g., 10 quantile bins), then fit a monotone `IsotonicRegression` mapping `distance -> alpha` (clip to [0,1]).
+     - Refit base ensemble on **full fold training data** (train_inner + cal_inner) for final use.
+     - Store: scaler, knn index, isotonic model, and `mu_train`.
+  4. In `predict`, compute distance d; alpha = iso(d); output shrunk blend.
+  5. Keep current clipping to [0,1]. Optionally add conservative quantile clip to [q01,q99] of train labels.
 
-**Then SUBMIT A0-template** (uses 1 submission):
-- Reason: verify that the template-safe scaffold yields a sane LB (should be in the historical ballpark, not 0.000000).
+**Why this is priority:** This directly targets **intercept reduction** by being conservative on OOD ramps/solvents. It is a true “distribution-shift-aware” change, not CV optimization.
 
-### 2) Fix mixture flip/TTA properly (must be consistent in CV + submission)
-Even if some blended features are symmetric, we still need flip to work for any **directional blocks**.
+**Deliverable:** new experiment folder `experiments/073_AD_shrinkage_template_safe/` created by copying `072A0_template_safe` scaffold, changing only Cell 5 definitions, and updating the model line to `model = GPMLPLGBM_ADShrinkage(...)`.
 
-**Implementation checklist:**
-- In any featurizer with A/B blocks:
-  - flip=True must swap A and B descriptor blocks
-  - set `pctB := 1 - pctB`
-- Add a unit check inside notebook:
-  - pick a few mixture rows; assert `features(flip=False) != features(flip=True)` when using directional blocks.
-- Only after correctness, decide whether to use:
-  - training augmentation (duplicate flipped rows)
-  - TTA at inference (average pred from both orderings)
+**After local CV computed:** **SUBMIT** this model (uses 1 submission). Even if CV is slightly worse than 0.0083, it’s acceptable if LB improves (we need to break the line).
 
-### 3) A1: “Safe AD shrinkage” layer to reduce OOD intercept (minimal delta from A0)
-**Goal:** change LB without relying on CV improvement.
+### 2) kNN Blending (alternative to mean shrinkage; more adaptive)
+If mean-shrinkage doesn’t move LB, try a second variant (can reuse same distance features):
+- For each query, compute kNN among training points in distance space and compute `y_knn = weighted_avg(y_train_neighbors)`.
+- Blend: `pred = (1-w)*base_pred + w*y_knn` where `w` increases with distance (or decreases with similarity).
+This is often stronger than shrinking to global mean because it uses “local analogs” instead of a constant.
 
-**Core idea:** compute an OOD score per test sample (within each fold), then blend predictions toward a conservative fallback when OOD is high.
-
-**Concrete plan (do this inside model wrapper so CV matches submission):**
-- Fit an **applicability-domain distance model** inside `train_model`:
-  - Single task: solvent embedding = [Spange + ACS_PCA + DRFP] (lookup by solvent name).
-  - Full task: ramp embedding = concat(A_embed, B_embed, pctB, pctB*(1-pctB), |A-B|, A*B*(pctB*(1-pctB)) on low-dim blocks) — keep it light.
-  - Use `NearestNeighbors(k=3..5)` on *training* embeddings.
-  - For each sample in `predict`, compute mean kNN distance `d`.
-- Convert distance to shrinkage weight `w` (start simple):
-  - `d0 = quantile(d_train, 0.9)`; `w = clip((d - d0)/(d0*0.5), 0, 1)`.
-- Conservative fallback prediction (choose ONE, keep minimal):
-  1) **Fold-wise train mean** per target (strongly conservative), OR
-  2) A tiny **numeric-only ridge** (time/temp/Arrhenius only), trained within fold, which may generalize better on new solvents than solvent embeddings.
-- Final prediction: `pred_final = (1-w)*pred_base + w*pred_fallback`.
-
-**Important:**
-- Don’t tune a lot. Implement 1–2 sensible settings.
-- Log CV; a slight CV worsening is acceptable if it plausibly reduces OOD intercept.
-
-**Submission rule:** Only submit A1 if (a) A0-template submission is sane, and (b) A1 is a clean minimal delta.
-
-### 4) (Optional, if time) Diversity pivot that can change representation
-If A1 doesn’t move LB, we need a more fundamental pivot in representation while staying template-safe:
-- A **graph-based solvent embed** (RDKit Morgan FP → small MLP) used only to compute OOD distance / similarity weighting (not a full GNN training).
-- Or revive prior **GNN/ChemBERTa** attempt but *only after* ensuring class-name match in last cells and template compliance.
+### 3) Nonlinear Mixture Features (Redlich–Kister style) + AD module
+Only after we have one AD submission result, consider adding a controlled nonlinear mixture featurization delta:
+- Add cross/interactions like `pct*(1-pct)`, `(A_desc - B_desc)^2`, and low-rank bilinear interactions on Spange/ACS PCA.
+- Keep it as a single isolated change so we can attribute any LB shift.
 
 ## What NOT to Try
-- No more pure tabular CV optimization (HP sweeps, more seeds, weight tuning).
-- Do not submit from notebooks that:
-  - write anywhere other than `/home/submission/submission.csv`
-  - have any cells after the final template submission cell
-  - redefine split generators (unless the template explicitly does)
+- No more pure tabular/ensemble weight tweaks, extra seeds, or hyperparameter sweeps of the base GP/MLP/LGBM (forbidden by gap-to-target and it won’t change intercept).
+- Do not reintroduce non-template split generators or write submission to wrong path.
+- Do not claim “impossible” based on the linear fit; instead, use it as motivation to **change the relationship**.
 
-## Validation Notes
-- CV scheme: must be exactly the template split generators.
-- Before any submission: recompute MSE by parsing the generated submission file and matching it to template fold order.
-- Track whether A1 changes the CV→LB relationship (same CV but better LB is a win).
+## Validation Notes (MANDATORY)
+- Use the template’s exact split generators (already in the scaffold).
+- **Verify model class consistency**: the model used in CV template cells must match the submission cells exactly (same class name).
+- For AD calibration: all calibration must be performed strictly within training folds (train_inner/cal_inner split by groups). Fix all random seeds.
+- Log CV overall + single/full separately.
+
+## Submission Plan
+- Submit the first AD-shrinkage model after local CV is computed and sanity-checked.
+- If LB improves vs 0.08774, iterate with kNN-blending variant (second submission).
