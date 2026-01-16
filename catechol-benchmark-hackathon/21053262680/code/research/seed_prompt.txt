@@ -3,6 +3,7 @@
 - Best LB score: 0.0877 from exp_030
 - Target: 0.0347 | Gap to target: 0.0530 (152.7%)
 - Remaining submissions: 3
+- Latest experiment: exp_117 (Physics-Constrained Ensemble) CV=0.009215
 
 ## CV-LB Relationship Analysis (CRITICAL)
 - Linear fit: LB = 4.09 × CV + 0.0546 (R² = 0.96)
@@ -15,15 +16,17 @@
 We MUST change the CV-LB relationship, not just improve CV.
 
 ## Response to Evaluator
-- Technical verdict was TRUSTWORTHY. The TRUE GNN experiment executed correctly.
-- Evaluator's top priority: Physics-constrained ensemble with conservative extrapolation. **AGREE** - this is the most promising unexplored direction.
+- Technical verdict was TRUSTWORTHY. The physics-constrained model is correctly implemented.
+- Evaluator's top priority: Submit exp_117 to test if physics constraints change the CV-LB relationship. **AGREE** - this is a reasonable diagnostic step.
 - Key concerns raised:
-  1. TRUE GNN (CV=0.0113) is 39% worse than best tabular (CV=0.0081). **CONFIRMED** - GNN doesn't help.
-  2. All 118 experiments fall on the same CV-LB line. **CONFIRMED** - the problem is distribution shift.
+  1. Post-hoc physics constraints may not change the CV-LB relationship. **AGREE** - constraints applied AFTER prediction don't change how the model learns.
+  2. CV=0.009215 is 13.8% worse than best CV=0.0081. **NOTED** - expected LB if on line is 0.0923.
   3. Only 3 submissions remain. **CRITICAL** - must be extremely strategic.
 
+**My synthesis**: The evaluator recommends submitting exp_117 as a diagnostic. However, I'm concerned that post-hoc physics constraints are unlikely to change the CV-LB relationship. The constraints only clip/normalize predictions that violate physics - they don't change the model's learned representation. Given we only have 3 submissions, I recommend a more aggressive approach.
+
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop118_analysis.ipynb` for CV-LB analysis
+- Reference notebooks: See `exploration/evolver_loop119_analysis.ipynb` for CV-LB analysis
 - Key patterns:
   1. All model families (MLP, LGBM, XGB, CatBoost, GP, Ridge, GNN) fall on the SAME CV-LB line
   2. The intercept (0.0546) represents STRUCTURAL extrapolation error
@@ -39,9 +42,10 @@ We MUST change the CV-LB relationship, not just improve CV.
 - Gaussian Process (5+ experiments)
 - Ridge Regression (3+ experiments)
 - Random Forest (3+ experiments)
-- GNN with fingerprints (5+ experiments - NOT true GNN)
+- GNN with fingerprints (5+ experiments)
 - TRUE GNN with PyTorch Geometric (exp_116 - CV=0.0113, worse than tabular)
 - ChemBERTa embeddings (5+ experiments)
+- Physics-constrained ensemble (exp_117 - CV=0.009215)
 
 ### Feature Engineering (ALL on same CV-LB line):
 - Spange descriptors (13 features)
@@ -56,72 +60,155 @@ We MUST change the CV-LB relationship, not just improve CV.
 - Similarity-weighted predictions
 - Conservative extrapolation
 - Pseudo-labeling
-- Domain adversarial training
 - Prediction calibration
 - Uncertainty weighting
+- Post-hoc physics constraints (mass balance, clipping)
 
 ## Recommended Approaches (PRIORITY ORDER)
 
-### PRIORITY 1: Physics-Constrained Ensemble with Mass Balance
-**Why**: Physics constraints generalize to ANY solvent, regardless of structure.
+### PRIORITY 1: Softmax Output Layer with Physics-Informed Training
+**Why**: Unlike post-hoc constraints, this CHANGES how the model learns.
 
 **Implementation**:
 ```python
-class PhysicsConstrainedModel:
-    def __init__(self, base_model):
-        self.base_model = base_model
-        self.train_mean = None
+class SoftmaxYieldModel:
+    """Predict yields as a probability distribution over outcomes.
+    
+    Key insight: SM + P2 + P3 should sum to 1 (or close to it).
+    By using softmax, we enforce this constraint DURING training,
+    not just post-processing.
+    """
+    def __init__(self, data='single'):
+        self.data_type = data
+        self.featurizer = Featurizer(mixed=(data=='full'))
+        self.scaler = StandardScaler()
+        self.model = None
         
     def train_model(self, X_train, y_train):
-        self.base_model.train_model(X_train, y_train)
-        self.train_mean = y_train.values.mean(axis=0)
+        X_feat = self.featurizer.featurize(X_train)
+        X_scaled = self.scaler.fit_transform(X_feat)
+        
+        # Convert yields to log-odds (inverse softmax)
+        y_vals = y_train.values
+        y_vals = np.clip(y_vals, 1e-6, 1-1e-6)  # Avoid log(0)
+        
+        # Train model to predict log-odds
+        self.model = CatBoostRegressor(...)
+        self.model.fit(X_scaled, np.log(y_vals))
         
     def predict(self, X):
-        pred = self.base_model.predict(X)
+        X_feat = self.featurizer.featurize(X)
+        X_scaled = self.scaler.transform(X_feat)
         
-        # 1. Enforce mass balance: SM + P2 + P3 <= 1
-        total = pred.sum(axis=1, keepdims=True)
-        pred = np.where(total > 1, pred / total, pred)
+        # Get log-odds predictions
+        log_odds = self.model.predict(X_scaled)
         
-        # 2. Enforce physical bounds: 0 <= yield <= 1
-        pred = np.clip(pred, 0, 1)
+        # Apply softmax to ensure sum = 1
+        exp_pred = np.exp(log_odds)
+        pred = exp_pred / exp_pred.sum(axis=1, keepdims=True)
         
-        return pred
+        return torch.tensor(pred)
 ```
 
 **Why this might change the CV-LB relationship**:
-- Mass balance is a HARD constraint that holds for ANY solvent
-- Reduces extreme predictions that cause high LB error
-- Doesn't depend on learning patterns from training data
+- Enforces a HARD constraint that SM + P2 + P3 = 1
+- Changes the model's output space, not just post-processing
+- May reduce extreme predictions for unseen solvents
 
-### PRIORITY 2: Chemprop with Directed Message-Passing and Calibration
-**Why**: Chemprop is specifically designed for molecular property prediction with:
-- Directed message-passing neural networks (D-MPNN)
-- Built-in uncertainty quantification and calibration
-- Pre-training and transfer learning workflows
-- Proven performance on OOD chemical tasks
-
-### PRIORITY 3: Ensemble with Fundamentally Different Representations
-**Why**: Different representations may have different CV-LB relationships.
+### PRIORITY 2: Median Ensemble for Robustness
+**Why**: If the problem is outlier predictions for unseen solvents, median aggregation might help.
 
 **Implementation**:
-- Model 1: Spange descriptors (physicochemical)
-- Model 2: Morgan fingerprints (structural)
-- Model 3: DRFP (reaction-aware)
-- Model 4: Arrhenius-only (physics-based)
-- Use MEDIAN aggregation for robustness to outliers
+```python
+class MedianEnsembleModel:
+    """Ensemble with median aggregation for robustness to outliers."""
+    def __init__(self, data='single', n_models=10):
+        self.data_type = data
+        self.n_models = n_models
+        self.models = []
+        
+    def train_model(self, X_train, y_train):
+        for seed in range(self.n_models):
+            model = CatBoostXGBModel(data=self.data_type, seed=seed)
+            model.train_model(X_train, y_train)
+            self.models.append(model)
+            
+    def predict(self, X):
+        preds = [model.predict(X).numpy() for model in self.models]
+        # Use MEDIAN instead of mean
+        pred = np.median(preds, axis=0)
+        return torch.tensor(pred)
+```
 
-### PRIORITY 4: GroupKFold-Based Training (Like Mixall Kernel)
-**Why**: The mixall kernel uses GroupKFold(n_splits=5) instead of Leave-One-Out.
-This might give different CV-LB relationship!
+**Why this might help**:
+- Median is more robust to outliers than mean
+- If some models make extreme predictions for unseen solvents, median ignores them
+- May reduce the intercept in the CV-LB relationship
+
+### PRIORITY 3: Yield Ratio Prediction
+**Why**: Instead of predicting absolute yields, predict ratios.
+
+**Implementation**:
+```python
+class YieldRatioModel:
+    """Predict yield ratios instead of absolute yields.
+    
+    Key insight: The ratio P2/(P2+P3+SM) might be more stable
+    across different solvents than absolute yields.
+    """
+    def __init__(self, data='single'):
+        self.data_type = data
+        self.featurizer = Featurizer(mixed=(data=='full'))
+        self.scaler = StandardScaler()
+        self.total_model = None  # Predicts total yield
+        self.ratio_model = None  # Predicts ratios
+        
+    def train_model(self, X_train, y_train):
+        X_feat = self.featurizer.featurize(X_train)
+        X_scaled = self.scaler.fit_transform(X_feat)
+        
+        y_vals = y_train.values
+        total = y_vals.sum(axis=1, keepdims=True)
+        ratios = y_vals / (total + 1e-6)
+        
+        # Train model to predict total yield
+        self.total_model = CatBoostRegressor(...)
+        self.total_model.fit(X_scaled, total.ravel())
+        
+        # Train model to predict ratios
+        self.ratio_model = CatBoostRegressor(...)
+        self.ratio_model.fit(X_scaled, ratios)
+        
+    def predict(self, X):
+        X_feat = self.featurizer.featurize(X)
+        X_scaled = self.scaler.transform(X_feat)
+        
+        total = self.total_model.predict(X_scaled).reshape(-1, 1)
+        ratios = self.ratio_model.predict(X_scaled)
+        
+        # Ensure ratios sum to 1
+        ratios = ratios / ratios.sum(axis=1, keepdims=True)
+        
+        # Reconstruct yields
+        pred = ratios * total
+        pred = np.clip(pred, 0, 1)
+        
+        return torch.tensor(pred)
+```
+
+### PRIORITY 4: Submit Best CV Model (exp_030 replica)
+**Why**: If novel approaches don't work, ensure we have our best model submitted.
+
+The best LB (0.0877) came from exp_030 with CV=0.0083. If we haven't submitted our best CV model recently, we should ensure we have a solid baseline.
 
 ## What NOT to Try
 1. ❌ More MLP variants - exhaustively tested, all on same line
 2. ❌ More feature engineering for tabular models - doesn't change intercept
-3. ❌ Multi-seed ensembles - we're 152% away from target
+3. ❌ Multi-seed ensembles with mean aggregation - we're 152% away from target
 4. ❌ Hyperparameter tuning - won't change the CV-LB relationship
 5. ❌ More GNN variants - TRUE GNN already tested, worse than tabular
 6. ❌ More ChemBERTa variants - already tested, on same line
+7. ❌ Post-hoc physics constraints alone - exp_117 shows this doesn't help CV
 
 ## Validation Notes
 - CV scheme: Leave-one-solvent-out (24 folds single, 13 folds full)
@@ -129,17 +216,31 @@ This might give different CV-LB relationship!
 - After EVERY submission, update CV-LB analysis to check if relationship changed
 
 ## Submission Strategy (3 remaining)
-1. **Submission 1**: Physics-constrained ensemble with mass balance
-   - Use best CV model (CatBoost + XGBoost) as base
-   - Add mass balance constraint
-   - Only submit if approach is fundamentally different
 
-2. **Submission 2**: Chemprop with D-MPNN (if available)
-   - Or: Diverse ensemble with median aggregation
-   - Only if submission 1 doesn't change the line
-
+### Option A: Aggressive (Recommended)
+1. **Submission 1**: Softmax output layer model
+   - This fundamentally changes how predictions are made
+   - If it changes the CV-LB relationship, iterate on this approach
+   
+2. **Submission 2**: Based on Submission 1 results
+   - If softmax helped: Iterate on softmax approach
+   - If softmax didn't help: Try median ensemble
+   
 3. **Submission 3**: Best approach from submissions 1-2
-   - Iterate on the approach that shows most promise
+
+### Option B: Conservative
+1. **Submission 1**: exp_117 (Physics-Constrained Ensemble)
+   - Tests if post-hoc physics constraints help
+   - Expected LB if on line: 0.0923
+   
+2. **Submission 2**: Softmax output layer if exp_117 doesn't help
+   
+3. **Submission 3**: Best approach
+
+**I recommend Option A** because:
+- Post-hoc physics constraints are unlikely to change the CV-LB relationship
+- Softmax output layer is a more fundamental change
+- With only 3 submissions, we need to try approaches that might actually work
 
 ## Critical Reminders
 1. **VERIFY MODEL CLASS CONSISTENCY**: Before logging ANY experiment, verify that submission cells use the EXACT same model class as CV computation.
@@ -150,11 +251,12 @@ This might give different CV-LB relationship!
 
 4. **ONLY 3 SUBMISSIONS LEFT**: Be strategic. Only submit if the approach might change the CV-LB relationship.
 
-## Key Insight from 118 Experiments
+## Key Insight from 119 Experiments
 The problem is NOT:
 - Model architecture (MLP, GNN, GP all fail)
 - Feature representation (Spange, DRFP, Morgan all fail)
 - Ensemble strategy (averaging, stacking all fail)
+- Post-hoc constraints (physics constraints don't help CV)
 
 The problem IS:
 - STRUCTURAL distribution shift between training and test solvents
@@ -162,7 +264,16 @@ The problem IS:
 - We need approaches that CHANGE THE RELATIONSHIP, not improve CV
 
 ## The Path Forward
-1. **Physics constraints** that hold for ANY solvent (mass balance, Arrhenius)
-2. **Calibration methods** that specifically target OOD performance
-3. **Robust aggregation** (median instead of mean) to reduce outlier impact
-4. **Different evaluation setup** (GroupKFold instead of LOO) to match actual evaluation
+1. **Softmax output layer** - enforces sum=1 DURING training
+2. **Median ensemble** - robust to outlier predictions
+3. **Yield ratio prediction** - predict ratios instead of absolute values
+4. **Physics-INFORMED training** - constraints in loss function, not post-processing
+
+## Research Insights
+From web search on predicting yields for unseen solvents:
+1. **Large-scale pre-training** (ReaMVP) with 3D geometric information helps OOD prediction
+2. **Physics-based surrogate data** (COSMO-RS) can augment training
+3. **Active representation learning** (RS-Coreset) adapts to novel solvents
+4. **Joint reaction-solvent embeddings** via graph models generalize better
+
+However, these require infrastructure we don't have. Focus on simpler approaches that change the output space (softmax, median, ratios).
