@@ -1,6 +1,6 @@
 ## What I Understood
 
-The junior researcher attempted to fix the featurization issue from exp_110 while maintaining the chemical similarity-based extrapolation detection approach. The key fix was changing from concatenation-based mixture featurization to weighted-average featurization, which is more physically meaningful (solvent properties blend linearly with composition). The goal was to test whether chemical similarity-based conservative predictions could change the CV-LB relationship (currently LB ≈ 4.29 × CV + 0.053).
+The junior researcher attempted to use pseudo-labeling to adapt the model to the test distribution. The hypothesis was that by using confident predictions (low variance across seeds) as smoothed labels, the model could reduce extrapolation error. The approach trains 5 models with different seeds, identifies samples where predictions have low variance, replaces their labels with the ensemble mean, and retrains on this smoothed data. The goal was to break the CV-LB relationship (LB = 4.07 × CV + 0.0548) where the intercept (0.0548) exceeds the target (0.0347).
 
 ---
 
@@ -9,22 +9,22 @@ The junior researcher attempted to fix the featurization issue from exp_110 whil
 **Validation**: SOUND ✓
 - Leave-One-Out validation correctly implemented (24 folds single, 13 folds full)
 - Same validation scheme as baseline experiments for fair comparison
-- CV scores verified in metrics.json
+- CV scores verified in metrics.json: CV=0.009566
 
 **Leakage Risk**: None detected ✓
-- Fingerprints computed from SMILES (no target leakage)
-- Similarity computed only to training solvents (not test)
-- Blending uses training mean (not test data)
+- Pseudo-labels are computed from training data only
+- No information from validation fold leaks into training
+- Ensemble variance computed on training predictions
 
 **Score Integrity**: VERIFIED ✓
-- exp_111 CV=0.01023 (from metrics.json)
-- Baseline CV=0.00949 (also verified)
-- Similarity blending adds ~8% to CV (expected behavior)
+- exp_113 CV=0.009566 (from metrics.json)
+- Baseline CV=0.009487 (also verified)
+- Pseudo-labeling adds ~0.8% to CV (expected - smoothing doesn't help in-distribution)
 
 **Code Quality**: GOOD ✓
-- Featurization correctly uses weighted average for mixtures
-- Submission format is correct (task, fold, row, target_1, target_2, target_3)
-- Model class in submission cells matches CV computation (SimilarityAwareModel)
+- Model class consistency: PseudoLabelingModel used in both CV and submission cells
+- Submission format correct: ['id', 'task', 'fold', 'row', 'target_1', 'target_2', 'target_3']
+- Submission file generated and copied to /home/submission/
 
 **Verdict: TRUSTWORTHY**
 
@@ -34,141 +34,155 @@ The junior researcher attempted to fix the featurization issue from exp_110 whil
 
 ### CV-LB Relationship Analysis (CRITICAL)
 
-Based on 12 valid submissions (excluding outlier exp_073):
+Based on 13 valid submissions (excluding outlier exp_073):
 
 | Metric | Value |
 |--------|-------|
-| Linear fit | LB = 4.29 × CV + 0.0528 |
-| R-squared | 0.9523 (VERY STRONG) |
-| Intercept | 0.0528 |
-| Target | 0.0347 |
+| Linear fit | **LB = 4.07 × CV + 0.0548** |
+| R-squared | **0.9623** (VERY STRONG) |
+| Intercept | **0.0548** |
+| Target | **0.0347** |
 | Best LB achieved | 0.0877 (exp_030, CV=0.0083) |
 
-**CRITICAL INSIGHT**: The intercept (0.0528) is HIGHER than the target (0.0347). This means:
-- Even with CV=0, the expected LB would be 0.0528
-- To hit target LB=0.0347, we would need CV = -0.0042 (IMPOSSIBLE)
+**CRITICAL INSIGHT**: The intercept (0.0548) is HIGHER than the target (0.0347). This means:
+- Even with CV=0, the expected LB would be 0.0548
+- To hit target LB=0.0347, we would need CV = (0.0347 - 0.0548) / 4.07 = **-0.0049** (IMPOSSIBLE)
 - **The target is mathematically unreachable with approaches that fall on this line**
 
-### Approach Fit: CORRECT DIRECTION
+### Approach Fit: CONCEPTUALLY FLAWED
 
-The chemical similarity approach is the RIGHT direction because:
-1. It addresses distribution shift directly (test solvents are structurally different)
-2. It's fundamentally different from model tuning
-3. It could potentially change the CV-LB intercept by being more conservative on truly novel solvents
+The pseudo-labeling approach has a fundamental problem:
 
-However, the key question is: **Does this approach change the CV-LB relationship?**
+**What it does:**
+1. Train 5 models on training data
+2. Predict on TRAINING data
+3. Smooth labels for confident training samples
+4. Retrain on smoothed training data
 
-We won't know until we submit and get an LB score.
+**Why it won't help:**
+- The approach smooths labels on **training data**, not on unseen solvents
+- The distribution shift problem is that **test solvents are different from training solvents**
+- Smoothing training labels doesn't help the model generalize to new solvents
+- This is essentially label smoothing / self-training, which helps with noise but not distribution shift
 
-### Effort Allocation: REASONABLE
+**What would actually help:**
+- Pseudo-labeling on **validation fold** (unseen solvents) and adding those to training
+- But this would be leakage in the CV setup!
+- The real solution is to change the representation or use domain adaptation techniques
 
-The researcher:
-1. ✓ Fixed the featurization issue from exp_110
-2. ✓ Verified the submission format is correct
-3. ✓ Tested multiple configurations (st=0.3/0.5/0.6, bw=0.2/0.4/0.5)
-4. ✓ Selected the best configuration (st=0.3, bw=0.2)
+### Expected LB from Line
 
-### Comparison to exp_108
+For exp_113 (CV=0.009566):
+- Expected LB from line: 4.07 × 0.009566 + 0.0548 = **0.0937**
 
-| Experiment | CV Score | Featurization | Format |
-|------------|----------|---------------|--------|
-| exp_108 | 0.00920 | Weighted avg | WRONG |
-| exp_110 | 0.01291 | Concatenation | CORRECT |
-| exp_111 | 0.01023 | Weighted avg | CORRECT |
+If actual LB is significantly different from 0.0937, we've found a way to change the CV-LB relationship. But given the approach doesn't address the actual problem (unseen solvents), I expect it to fall on the line.
 
-The CV improved from exp_110 (0.01291) to exp_111 (0.01023), but it's still worse than exp_108 (0.00920). The difference is likely due to:
-1. Different ensemble weights (exp_108: 0.65/0.35 vs exp_111: 0.538/0.462 for single)
-2. Minor hyperparameter differences (bagging_temperature, rsm)
+### Effort Allocation: MISALLOCATED
+
+The researcher is spending effort on approaches that don't address the core problem:
+- **Core problem**: Test solvents are structurally different from training solvents
+- **Current approach**: Smoothing labels on training data
+- **What's needed**: Approaches that generalize to unseen chemical structures
 
 ### Blind Spots
 
-**1. No submission made yet**
-Despite having 4 submissions remaining, no submission has been made to test the chemical similarity hypothesis on LB. This is the MOST IMPORTANT thing to do.
+**1. The ens-model kernel achieves good LB with simple CatBoost+XGBoost ensemble**
+- The ens-model kernel uses CatBoost + XGBoost with carefully tuned hyperparameters
+- It uses different weights for single (7:6) vs full (1:2) data
+- It includes clipping and renormalization
+- This is a strong baseline that should be replicated exactly
 
-**2. Aggressive blending configurations hurt CV too much**
-The more aggressive configurations (st=0.5, bw=0.4 and st=0.6, bw=0.5) significantly hurt CV:
-- st=0.3, bw=0.2: CV=0.01023
-- st=0.5, bw=0.4: CV=0.01546 (51% worse)
-- st=0.6, bw=0.5: CV=0.01878 (84% worse)
+**2. No true domain adaptation techniques tried**
+- Domain-adversarial training
+- Importance weighting based on solvent similarity
+- Conformal prediction for uncertainty quantification
 
-This suggests the blending is too aggressive. However, if the goal is to reduce the intercept, we might need to accept worse CV for better LB.
-
-**3. Expected LB from line**
-For exp_111 (CV=0.01023):
-- Expected LB from line: 4.29 × 0.01023 + 0.0528 = 0.0967
-
-If the actual LB is significantly different from 0.0967, we've found a way to change the CV-LB relationship!
+**3. GNN/Transformer approaches haven't been properly validated**
+- Earlier GNN experiments had model class mismatches
+- ChemBERTa experiments also had issues
+- These representation changes could potentially break the CV-LB line
 
 ---
 
 ## What's Working
 
-1. **Correct identification of the problem**: The CV-LB relationship and need to change the intercept
-2. **Chemical similarity approach**: Using Tanimoto similarity on Morgan fingerprints is principled
-3. **Submission format fixed**: The format is now correct
-4. **Featurization fixed**: Weighted average is physically meaningful
-5. **Model class consistency**: SimilarityAwareModel used in both CV and submission cells
+1. **Technical execution is sound**: The code runs correctly, validation is proper, no leakage
+2. **Submission format is correct**: The format matches the template requirements
+3. **Model class consistency**: PseudoLabelingModel used in both CV and submission cells
+4. **Systematic exploration**: The researcher has tried many approaches (113 experiments!)
 
 ---
 
 ## Key Concerns
 
-### HIGH: Need to Submit to Test Hypothesis
+### CRITICAL: Pseudo-Labeling Doesn't Address Distribution Shift
 
-**Observation**: 4 submissions remain but no submission has been made to test chemical similarity.
+**Observation**: The pseudo-labeling approach smooths labels on training data, not on unseen solvents.
 
 **Why it matters:**
-- We cannot learn whether chemical similarity changes the CV-LB relationship
+- The CV-LB gap is caused by test solvents being different from training solvents
+- Smoothing training labels doesn't help the model generalize to new solvents
+- This approach will likely fall on the same CV-LB line
+
+**Suggestion:**
+This experiment is unlikely to break the CV-LB line. However, with only 3 submissions remaining, we should still submit to confirm this hypothesis. If LB ≈ 0.094 (on the line), we've confirmed that label smoothing doesn't help.
+
+### HIGH: Need to Try True Distribution Shift Strategies
+
+**Observation**: All 113 experiments have fallen on the same CV-LB line.
+
+**Why it matters:**
+- The intercept (0.0548) > target (0.0347) means no amount of CV improvement will reach the target
+- We need approaches that CHANGE the CV-LB relationship, not improve CV
+
+**Suggestions for remaining experiments:**
+1. **Exact replication of ens-model kernel**: The public kernel achieves good LB - replicate it exactly
+2. **Conservative predictions for dissimilar solvents**: Blend toward training mean when test solvent is dissimilar
+3. **Uncertainty-weighted predictions**: Use ensemble variance to weight predictions
+
+### MEDIUM: Only 3 Submissions Remaining
+
+**Observation**: 3 submissions remain out of 5.
+
+**Why it matters:**
 - Each submission is valuable data about the CV-LB relationship
-- The hypothesis remains untested
+- We need to be strategic about what we submit
 
 **Suggestion:**
-Submit immediately to test the hypothesis. The expected LB from the line is 0.0967. If actual LB is significantly different (especially lower), we've found a breakthrough.
-
-### MEDIUM: CV Regression from exp_108
-
-**Observation**: exp_111 CV (0.01023) is worse than exp_108 CV (0.00920).
-
-**Why it matters:**
-- The baseline model in exp_111 has different weights and hyperparameters
-- This could be masking the true benefit of the similarity approach
-
-**Suggestion:**
-If the current submission doesn't break the CV-LB line, try:
-1. Using the exact ensemble weights from exp_108 (0.65/0.35 for single, 0.60/0.40 for full)
-2. Using the exact hyperparameters from exp_108
-
-### LOW: Consider More Aggressive Blending for LB
-
-**Observation**: The best CV configuration (st=0.3, bw=0.2) is very conservative.
-
-**Why it matters:**
-- The CV-LB gap suggests we need to be MORE conservative on test data
-- Higher blend weights might hurt CV but help LB
-- The current approach may not be aggressive enough to change the intercept
-
-**Suggestion:**
-After testing the current approach on LB, if it doesn't break the line, try:
-- Submit with st=0.5, bw=0.4 (even though CV is worse)
-- The goal is to reduce the intercept, not the CV
+- Submit exp_113 to confirm pseudo-labeling doesn't help
+- If it falls on the line, pivot to a fundamentally different approach
+- Consider submitting the exact ens-model kernel as a baseline
 
 ---
 
 ## Top Priority for Next Experiment
 
-### IMMEDIATE: SUBMIT TO LB
+### IMMEDIATE: Submit exp_113 and Analyze Result
 
-The experiment is technically sound and ready for submission. The most important thing now is to **submit and get an LB score**.
+The experiment is technically sound and ready for submission. Submit it to test the hypothesis.
 
 **Expected outcome:**
-- If LB ≈ 0.097 (on the line): Chemical similarity doesn't change the relationship
-- If LB < 0.090: We've found a way to reduce the intercept!
-- If LB > 0.100: Something is wrong with the approach
+- If LB ≈ 0.094 (on the line): Pseudo-labeling doesn't change the relationship → pivot to different approach
+- If LB < 0.090: We've found something! → iterate on pseudo-labeling
+- If LB > 0.100: Something is wrong → investigate
 
-**After submission:**
-1. If LB is on the line → Try more aggressive blending (st=0.5, bw=0.4)
-2. If LB is below the line → Iterate on the similarity approach
-3. If LB is above the line → Investigate what went wrong
+### AFTER SUBMISSION: Pivot Strategy
+
+If exp_113 falls on the line (most likely), the next experiment should try:
+
+1. **Exact ens-model kernel replication**: The public kernel achieves good LB. Replicate it exactly to establish a strong baseline.
+
+2. **Solvent similarity-based conservative predictions**: 
+   - Compute Tanimoto similarity between test solvent and all training solvents
+   - If max similarity < threshold, blend prediction toward training mean
+   - This directly addresses the "unseen solvent" problem
+
+3. **Domain-adversarial training**:
+   - Train a discriminator to distinguish training vs validation solvents
+   - Train the predictor to fool the discriminator
+   - This encourages learning solvent-invariant features
+
+**The key insight**: We need to find an approach that CHANGES the CV-LB relationship. The target IS reachable (benchmark paper achieved 0.0039), but we need a fundamentally different approach.
 
 ---
 
@@ -177,26 +191,26 @@ The experiment is technically sound and ready for submission. The most important
 | Dimension | Assessment |
 |-----------|------------|
 | Technical Execution | ✅ TRUSTWORTHY |
-| Strategic Direction | ✅ CORRECT APPROACH |
-| Key Issue | ⚠️ NO SUBMISSION YET |
-| Top Priority | **SUBMIT IMMEDIATELY** |
+| Strategic Direction | ⚠️ CONCEPTUALLY FLAWED |
+| Key Issue | Pseudo-labeling doesn't address distribution shift |
+| Top Priority | **SUBMIT and PIVOT if on line** |
 
 ## Confidence Levels
 
-- **Very High (99%)**: The featurization is now correct (weighted average)
 - **Very High (99%)**: The submission format is correct
-- **High (90%)**: The model class matches between CV and submission
-- **Medium (60%)**: Chemical similarity approach might change the CV-LB relationship
-- **Low (30%)**: The current configuration (st=0.3, bw=0.2) is aggressive enough
+- **Very High (99%)**: The model class matches between CV and submission
+- **High (90%)**: Pseudo-labeling will fall on the same CV-LB line
+- **Medium (60%)**: Solvent similarity-based blending could break the line
+- **Low (30%)**: The target is reachable with remaining submissions
 
 ## THE TARGET IS REACHABLE
 
 The benchmark paper achieved MSE 0.0039. The current best LB is 0.0877. The target (0.0347) is between these values.
 
-**The key insight**: We need to find an approach that CHANGES the CV-LB relationship. The chemical similarity approach is a principled attempt to do this. We MUST submit to test the hypothesis.
+**The key insight**: We need to find an approach that CHANGES the CV-LB relationship. The pseudo-labeling approach is unlikely to do this, but we should submit to confirm. Then pivot to approaches that directly address the "unseen solvent" problem.
 
-**IMMEDIATE ACTION:**
-1. Submit exp_111 to LB
-2. Compare actual LB to expected LB (0.0967)
-3. If LB is on the line → Try more aggressive blending
-4. If LB is below the line → We've found a breakthrough!
+**IMMEDIATE ACTIONS:**
+1. Submit exp_113 to LB
+2. Compare actual LB to expected LB (0.094)
+3. If LB is on the line → Pivot to solvent similarity-based approach
+4. If LB is below the line → Iterate on pseudo-labeling (unlikely)
