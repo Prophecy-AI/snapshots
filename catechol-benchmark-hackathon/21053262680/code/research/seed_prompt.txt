@@ -1,100 +1,119 @@
 ## Current Status
-- Best CV score: 0.0081 from exp_049/exp_050/exp_053 (tied)
-- Best LB score: 0.0877 from exp_030 (CV=0.0083)
-- Target: 0.0347 | Gap to target: 0.053 (152.8%)
-- Experiments: 103 | Submissions: 23/27 used, 4 remaining
+- Best CV score: 0.0081 from exp_049 (CatBoost+XGBoost)
+- Best LB score: 0.0877 from exp_030 (GP Ensemble)
+- Target: 0.0347 | Gap to target: 152.8%
 
 ## CV-LB Relationship Analysis (CRITICAL)
-- Linear fit: LB = 4.29 × CV + 0.0528 (R² = 0.95)
+- Linear fit: LB = 4.29 × CV + 0.0528 (R² = 0.9523)
 - Intercept interpretation: Even at CV=0, expected LB is 0.0528
-- **CRITICAL**: Intercept (0.0528) > Target (0.0347) → Target is BELOW the intercept!
-- Required CV for target: (0.0347 - 0.0528) / 4.29 = -0.0042 (IMPOSSIBLE with current approaches)
-- All 12+ valid submissions fall on the SAME LINE
+- Are all approaches on the same line? **YES** (12/13 submissions)
+- **CRITICAL**: Intercept (0.0528) > Target (0.0347)
+- Required CV for target: (0.0347 - 0.0528) / 4.29 = -0.0042 (IMPOSSIBLE)
 
 ## Response to Evaluator
-
-**Technical verdict was CONCERNS** - The evaluator correctly identified a CRITICAL BUG:
-
-### 🚨 SolventB% Scaling Bug (MUST FIX)
-The evaluator found that exp_102 divides SolventB% by 100:
-```python
-sb_pct = X['SolventB%'].values.reshape(-1, 1) / 100.0  # BUG!
-```
-
-But SolventB% is ALREADY in [0, 1] range (verified: min=0.0, max=1.0).
-
-**Impact**: A 50/50 mixture is treated as 99.5/0.5 - completely wrong!
-
-**Fix Required**:
-```python
-sb_pct = X['SolventB%'].values.reshape(-1, 1)  # Already in [0, 1]
-```
-
-**I FULLY AGREE with the evaluator.** This bug must be fixed before any submission.
-
-### Evaluator's Top Priority: Fix the SolventB% bug
-**I AGREE.** The next experiment MUST fix this bug and re-run CV.
+- Technical verdict was **TRUSTWORTHY**. The SolventB% bug fix was correct.
+- Evaluator's top priority: **SUBMIT exp_103 to check CV-LB relationship**. I agree this is valuable to verify if GroupKFold gives a different CV-LB relationship.
+- Key concerns raised: CV (0.01124) is higher than best CV (0.0083), predicted LB ≈ 0.10 (worse than best). This is expected since GroupKFold (5 splits) is an easier validation task than leave-one-out (24 folds).
+- The evaluator correctly identifies that we need to check if GroupKFold changes the CV-LB relationship.
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop100_analysis.ipynb` for CV-LB analysis
+- Reference notebooks: See `exploration/evolver_loop104_analysis.ipynb` for CV-LB analysis
 - Key patterns:
-  1. All tabular models (MLP, LGBM, XGB, CatBoost, GP, Ridge) fall on SAME CV-LB line
-  2. The intercept (0.0528) represents structural extrapolation error
-  3. SolventB% is in [0, 1] range, NOT [0, 100]
-  4. The mixall kernel uses GroupKFold (5 splits) instead of Leave-One-Out
+  1. ALL tabular models (MLP, LGBM, XGB, CatBoost, GP, Ridge) fall on the SAME CV-LB line
+  2. The intercept (0.0528) represents STRUCTURAL extrapolation error
+  3. Test solvents are fundamentally different from training solvents
+  4. No amount of CV improvement can reach target if intercept > target
 
 ## Recommended Approaches
 
-### PRIORITY 1: Fix the SolventB% Bug (IMMEDIATE)
-Create exp_103 that:
-1. Removes the `/ 100.0` from `PrecomputedFeaturizerMixed.featurize()`
-2. Re-runs CV with the corrected mixture features
-3. Generates a valid submission
+### PRIORITY 1: Post-hoc Bias Correction (NEW - from web research)
+**Rationale**: Web research revealed that post-hoc intercept-bias correction is a standard technique for reducing systematic offset when deploying models on unseen chemicals.
 
-This is a BLOCKING bug that invalidates all mixture predictions.
-
-### PRIORITY 2: Test if Corrected Mixall Gives Different CV-LB Relationship
-After fixing the bug:
-- If LB follows a DIFFERENT line than LB = 4.29*CV + 0.0528, this approach is promising
-- If LB follows the SAME line, we need to try other approaches
-
-### PRIORITY 3: Try the "Ens Model" Kernel Approach
-The "Ens Model" kernel (9 votes) uses a different approach:
-1. **CatBoost + XGBoost only** (no MLP, RF, LightGBM)
-2. **Different weights**: single=7:6 (Cat:XGB), full=1:2
-3. **Combined features**: spange + acs_pca + drfps + fragprints + smiles
-4. **Correlation-based feature filtering** with priority
-5. **Numeric feature engineering**: T_x_RT, RT_log, T_inv, RT_scaled
-
-This is a fundamentally different approach that might give a different CV-LB relationship.
-
-### PRIORITY 4: Extrapolation Detection + Conservative Predictions
-If all approaches still fall on the same line:
+**Implementation**:
 ```python
-from sklearn.neighbors import NearestNeighbors
-nn = NearestNeighbors(n_neighbors=5).fit(X_train_features)
-distances, _ = nn.kneighbors(X_test_features)
-extrapolation_score = distances.mean(axis=1)
+# After training, compute average residual on validation set
+preds = model.predict(X_val)
+bias = preds.mean() - y_val.mean()
 
-# Blend toward mean when extrapolating
-weight = np.clip(extrapolation_score / threshold, 0, 1)
-final_pred = (1 - weight) * model_pred + weight * train_mean
+# Apply correction to test predictions
+corrected_pred = model.predict(X_test) - bias
+```
+
+This directly addresses the intercept problem by calibrating predictions based on validation residuals.
+
+### PRIORITY 2: Submit exp_049 (Best Pending CV)
+**Rationale**: exp_049 has CV=0.0081 (best pending). If it falls on the same CV-LB line, predicted LB ≈ 0.0875. This would confirm the line relationship holds for CatBoost+XGBoost.
+
+**Expected outcome**: LB ≈ 0.0875 (on the line) or potentially slightly better if CatBoost generalizes differently.
+
+### PRIORITY 3: Ensemble with Bias Correction
+**Rationale**: Combine the best models (MLP, XGBoost, CatBoost, LightGBM) with per-fold bias correction.
+
+**Implementation**:
+```python
+class BiasCorrectingEnsemble:
+    def __init__(self, models):
+        self.models = models
+        self.biases = []
+    
+    def train_model(self, X_train, Y_train):
+        # Train all models
+        for model in self.models:
+            model.train_model(X_train, Y_train)
+        
+        # Compute bias on training data (OOB or validation)
+        preds = self.predict_raw(X_train)
+        self.bias = preds.mean(axis=0) - Y_train.values.mean(axis=0)
+    
+    def predict(self, X_test):
+        preds = self.predict_raw(X_test)
+        return preds - self.bias  # Apply bias correction
+```
+
+### PRIORITY 4: Target-Specific Bias Correction
+**Rationale**: Different targets (Product 2, Product 3, SM) may have different biases.
+
+**Implementation**:
+```python
+# Compute per-target bias
+for target_idx in range(3):
+    bias[target_idx] = preds[:, target_idx].mean() - y_val[:, target_idx].mean()
+```
+
+### PRIORITY 5: Fold-Specific Bias Correction
+**Rationale**: Different folds (solvents) may have different biases. Apply fold-specific correction.
+
+**Implementation**:
+```python
+# During CV, track per-fold bias
+fold_biases = []
+for fold, ((train_X, train_Y), (test_X, test_Y)) in enumerate(splits):
+    model.train_model(train_X, train_Y)
+    preds = model.predict(test_X)
+    fold_bias = preds.mean() - test_Y.values.mean()
+    fold_biases.append(fold_bias)
+
+# Use average fold bias for test predictions
+avg_bias = np.mean(fold_biases)
 ```
 
 ## What NOT to Try
-- ❌ More MLP/LGBM/XGB/CatBoost variants without changing the CV-LB relationship
-- ❌ Multi-seed ensembles (we're 152% away from target)
-- ❌ Hyperparameter tuning (won't change the intercept)
-- ❌ Any approach that divides SolventB% by 100
+- ❌ More MLP/LGBM/XGB variants without bias correction (all fall on same line)
+- ❌ GNN/ChemBERTa without proper model class verification (previous attempts had issues)
+- ❌ Multi-seed ensembles (optimization is forbidden when gap > 5%)
+- ❌ Hyperparameter tuning (doesn't change the intercept)
 
 ## Validation Notes
-- Use GroupKFold (5 splits) for faster iteration
-- Track BOTH single-solvent MSE and full-data MSE separately
-- After EVERY submission, check if LB follows the same line or a different one
-- The goal is to CHANGE the CV-LB relationship, not just improve CV
+- CV scheme: Leave-One-Out (24 folds for single, 13 for full) or GroupKFold (5 splits)
+- Key insight: GroupKFold gives higher CV but might have different CV-LB relationship
+- After submission, plot (CV, LB) point to check if it's on the line or below
 
-## CRITICAL REMINDERS
-1. **FIX THE SolventB% BUG FIRST** - Remove `/ 100.0`
-2. **Verify submission cells match CV model class** - Always check!
-3. **Don't submit exp_102** - It has the bug
-4. **The target IS reachable** - We just need to find the right approach
+## Immediate Action Plan
+1. **First**: Implement bias correction on the best model (exp_030 or exp_049)
+2. **Second**: Submit to check if bias correction reduces the intercept
+3. **Third**: If bias correction works, apply to ensemble
+
+## Key Insight from Web Research
+> "Apply a post‑hoc intercept‑bias correction – after fitting, compute the average residual on a small validation set of known compounds and subtract that mean bias from all future predictions."
+
+This is the key to reducing the intercept! The intercept represents systematic bias that can be corrected post-hoc.
