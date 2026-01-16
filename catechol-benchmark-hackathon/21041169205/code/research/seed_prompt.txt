@@ -1,113 +1,133 @@
 ## Current Status
-- Best CV score: 0.0081 from exp_049/050/053 (CatBoost+XGBoost ensemble)
-- Best LB score: 0.0877 from exp_030 AND exp_067 (both achieved same LB!)
-- Target: 0.0347 | Gap to target: 0.0530 (60% reduction needed)
-- Remaining submissions: 4
+- Best CV score: 0.008092 from exp_049 (CatBoost + XGBoost)
+- Best LB score: 0.0877 from exp_030 (GP+MLP+LGBM ensemble)
+- Target: 0.0347 | Gap to target: 0.0530 (LB needs to improve by 60%)
 
-## CV-LB Relationship Analysis (CRITICAL - UPDATED WITH 13 SUBMISSIONS)
+## CV-LB Relationship Analysis (CRITICAL)
 - Linear fit: LB = 4.34 * CV + 0.0523 (R² = 0.957)
 - Intercept interpretation: Even at CV=0, expected LB is 0.0523
-- Are all approaches on the same line? **YES - All 13 successful submissions fall on this line**
-- **CRITICAL: The intercept (0.0523) is ABOVE the target (0.0347)**
-- Required CV for target: (0.0347 - 0.0523) / 4.34 = -0.0041 (IMPOSSIBLE)
-- **Gap between intercept and target: 0.0176 (33.6% of target)**
+- Are all approaches on the same line? YES
+- CRITICAL: Intercept (0.0523) > Target (0.0347)
+- Required CV for target: (0.0347 - 0.0523) / 4.34 = -0.004 (IMPOSSIBLE)
+
+**THIS IS A DISTRIBUTION SHIFT PROBLEM. Standard CV optimization CANNOT reach the target.**
 
 ## Response to Evaluator
-- Technical verdict was TRUSTWORTHY - Sigmoid fix correctly implemented
-- Evaluator's top priority: Submit to verify pipeline, then restore best model
-- Key concerns raised:
-  1. The CV-LB gap is structural (intercept > target)
-  2. Standard CV optimization CANNOT reach the target
-  3. Need distribution-shift-aware strategies
-- **AGREE**: The evaluator is correct. We've now verified exp_067 works (LB=0.0877).
+- Technical verdict was CONCERNS due to fundamental flaw in extrapolation detection logic
+- Evaluator correctly identified that in leave-one-out CV, the test solvent is ALWAYS far from training distribution BY DESIGN
+- The extrapolation detection compared to fold solvents (which excludes the test solvent), so blend_weights = 1.0 for ALL samples
+- Result: All predictions became the mean, causing CV=0.057 (7x worse than best)
 
-## CRITICAL INSIGHT FROM LATEST SUBMISSION
-**Exp_067 (sigmoid output) achieved LB=0.0877 - SAME as exp_030!**
-- This confirms the submission pipeline is working correctly
-- The sigmoid output didn't hurt LB performance
-- The CV-LB relationship is consistent: CV=0.0083 → LB=0.0877
-
-## THE FUNDAMENTAL PROBLEM
-All 13 submissions fall on the same CV-LB line:
-- MLP, LGBM, XGBoost, GP, CatBoost, ensembles - ALL on the same line
-- The intercept (0.0523) represents STRUCTURAL DISTRIBUTION SHIFT
-- Test solvents are fundamentally different from training solvents
-- **Standard ML approaches CANNOT reach the target**
-
-## WHAT THE RESEARCH SHOWS
-A GNN paper (arXiv:2512.19530) achieved **MSE 0.0039** on this exact dataset:
-- Used Graph Attention Networks (GAT) + DRFP + mixture-aware encodings
-- 25x better than tabular methods (which got ~0.099)
-- This proves the target IS achievable, but requires different approaches
+**FIX REQUIRED:** Compare to ALL 24 solvents, not just training fold solvents.
 
 ## Data Understanding
-- Reference notebooks: See `exploration/eda.ipynb` for feature analysis
+- Reference notebooks: See `exploration/evolver_loop72_analysis.ipynb` for CV-LB analysis
 - Key patterns:
-  1. Leave-one-solvent-out CV simulates predicting for unseen solvents
-  2. Test solvents may be "harder" (more extreme properties)
-  3. The CV-LB gap (~4.34x multiplier + 0.0523 intercept) is consistent
+  1. CV-LB relationship is highly linear (R²=0.957) with intercept > target
+  2. All model types (MLP, LGBM, XGB, CatBoost, GP) fall on the same line
+  3. The benchmark achieved MSE 0.0039 using GNN - 22x better than our best LB
+  4. The gap is due to distribution shift, not model architecture
 
 ## Recommended Approaches
 
-### CRITICAL: We have only 4 submissions left!
-
-### Priority 1: Try GNN-based Approach
-The GNN paper achieved 0.0039 MSE. Key components:
-1. Graph Attention Networks (GAT) for molecular structure
-2. DRFP (Differential Reaction Fingerprints) features
-3. Mixture-aware solvent encodings
-4. Continuous mixture encoding (not just linear interpolation)
-
-**Implementation strategy:**
-- Use PyTorch Geometric for GAT
-- Use DRFP features from the provided lookup
-- Add mixture-aware encoding for solvent blends
-- This could fundamentally change the CV-LB relationship
-
-### Priority 2: Extrapolation Detection + Conservative Predictions
-If GNN is too complex, try:
-1. Compute distance from test solvent to nearest training solvents
-2. When extrapolating (high distance), blend toward population mean
-3. This could reduce the intercept by making conservative predictions for hard cases
+### PRIORITY 1: Fix Extrapolation Detection (MUST TRY)
+The concept is correct but implementation was flawed. Here's the corrected approach:
 
 ```python
-def extrapolation_weighted_prediction(pred, extrapolation_score, mean_pred, threshold=0.5):
-    # Higher extrapolation_score = more conservative prediction
-    weight = min(1.0, extrapolation_score / threshold)
-    return (1 - weight) * pred + weight * mean_pred
+class ExtrapolationAwareModel(BaseModel):
+    def __init__(self, base_model, blend_threshold=2.0):
+        self.base_model = base_model
+        self.blend_threshold = blend_threshold
+        
+        # Fit on ALL solvents (not just training fold)
+        self.all_solvent_features = SPANGE_DF.values  # All 24 solvents
+        self.scaler = StandardScaler()
+        self.scaled_features = self.scaler.fit_transform(self.all_solvent_features)
+        
+        # Compute mean distance between solvents for normalization
+        from scipy.spatial.distance import pdist
+        self.mean_dist = np.mean(pdist(self.scaled_features))
+    
+    def predict(self, X):
+        raw_pred = self.base_model.predict(X)
+        
+        # Get test solvent features
+        test_features = SPANGE_DF.loc[X["SOLVENT NAME"]].values
+        test_scaled = self.scaler.transform(test_features)
+        
+        # Compute distance to nearest 3 solvents (from ALL 24, not just fold)
+        nn = NearestNeighbors(n_neighbors=3)
+        nn.fit(self.scaled_features)
+        distances, _ = nn.kneighbors(test_scaled)
+        avg_dist = distances.mean(axis=1)
+        
+        # Normalize by mean inter-solvent distance
+        normalized_dist = avg_dist / self.mean_dist
+        
+        # Only blend for solvents that are TRUE outliers
+        blend_weights = np.clip((normalized_dist - 1.0) / self.blend_threshold, 0, 1)
+        
+        # Blend toward mean only for outliers
+        mean_pred = self.train_Y.mean(axis=0)
+        blended = (1 - blend_weights.reshape(-1, 1)) * raw_pred + blend_weights.reshape(-1, 1) * mean_pred
+        
+        return blended
 ```
 
-### Priority 3: Study Top Public Kernels
-- "System Malfunction V1" (29 votes): Simple MLP with sigmoid
-- "mixall" (9 votes): MLP+XGB+RF+LGBM ensemble with Optuna
-- These kernels may have techniques we haven't tried
+Key changes:
+1. Compare to ALL 24 solvents, not just training fold solvents
+2. Use k=3 nearest neighbors, not k=1
+3. Normalize by mean inter-solvent distance
+4. Only blend for TRUE outliers (distance > mean + threshold * std)
+5. Use the best base model (GP+MLP+LGBM from exp_030), not a simple MLP
 
-### Priority 4: Physics-Informed Features
-- Arrhenius kinetics features (1/T, ln(t), interaction)
-- Solvent polarity, dielectric constant, hydrogen bonding
-- These constraints hold even for unseen solvents
+### PRIORITY 2: GP Uncertainty-Weighted Predictions
+The GP model already provides uncertainty estimates. Use these directly:
+
+```python
+# In GP predict method
+mean, var = gp.predict(X, return_var=True)
+uncertainty = np.sqrt(var)
+
+# Blend toward population mean when uncertain
+blend_weight = np.clip(uncertainty / uncertainty_threshold, 0, 1)
+conservative_pred = (1 - blend_weight) * mean + blend_weight * population_mean
+```
+
+This is more principled than distance-based extrapolation detection.
+
+### PRIORITY 3: Solvent Clustering with Class-Specific Models
+Group solvents by chemical class and use class-specific models:
+- Alcohols: Methanol, Ethanol, IPA, etc.
+- Ethers: THF, 2-MeTHF, etc.
+- Esters: Ethyl Acetate, etc.
+- Polar aprotic: DMF, DMSO, Acetonitrile, etc.
+
+When test solvent is in a known class → use class-specific model
+When test solvent is in a novel class → use conservative prediction
+
+### PRIORITY 4: Mixall Kernel Approach
+The mixall kernel uses MLP+XGB+RF+LGBM ensemble with weights [0.4, 0.2, 0.2, 0.2].
+This is different from our GP+MLP+LGBM approach. Try this combination.
 
 ## What NOT to Try
-- More CV optimization without addressing the intercept problem
-- Simple ensembles of tabular models (all fall on the same CV-LB line)
-- Hyperparameter tuning (diminishing returns, doesn't change intercept)
+- Standard CV optimization (all approaches fall on the same CV-LB line)
+- More complex architectures (deep residual MLP failed with CV 0.052)
+- DRFP features alone (CV 0.017, worse than Spange)
+- Larger ensembles without diversity (marginal improvement)
 
 ## Validation Notes
-- CV scheme: Leave-one-solvent-out for single solvent, leave-one-ramp-out for full data
-- CV-LB gap: ~4.34x multiplier + 0.0523 intercept
-- The intercept represents EXTRAPOLATION ERROR
+- Use official Leave-One-Out CV (24 folds for single solvent, 13 folds for full data)
+- The CV-LB gap is ~10.6x (LB/CV ratio)
+- The intercept (0.0523) represents structural distribution shift
+- To reach target, we need to REDUCE THE INTERCEPT, not just improve CV
 
-## STRATEGIC DECISION
-With 4 submissions left, we need to be strategic:
-1. **Try GNN approach** - Could fundamentally change the CV-LB relationship
-2. **Try extrapolation detection** - Could reduce the intercept
-3. **Keep 1-2 submissions for final attempts** - In case we find something that works
+## Critical Insight
+The target IS reachable. The benchmark achieved MSE 0.0039 using GNN.
+The gap is due to distribution shift between train and test solvents.
+We need approaches that CHANGE THE CV-LB RELATIONSHIP, not just improve CV.
 
-## Key Insight
-The target IS reachable - the benchmark achieved MSE 0.0039.
-But standard tabular ML approaches CANNOT reach it.
-The solution requires fundamentally different representations (GNN) or
-strategies that address distribution shift (extrapolation detection).
-
-**DO NOT keep optimizing CV if all approaches fall on the same CV-LB line!**
-The intercept won't change. We must try fundamentally different strategies.
+## Submission Strategy
+- We have 4 submissions remaining
+- exp_049 (CV=0.008092) has not been submitted - consider submitting to verify if better CV translates to better LB
+- If extrapolation detection works, it could reduce the intercept and beat the target
