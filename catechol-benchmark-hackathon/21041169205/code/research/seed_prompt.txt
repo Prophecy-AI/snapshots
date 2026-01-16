@@ -1,110 +1,114 @@
 ## Current Status
-- Best CV score: 0.008092 from exp_049/050/053 (CatBoost+XGBoost) - BUT SUBMISSION ERRORS
-- Best LB score: 0.0877 from exp_030/exp_067 (GP+MLP+LGBM ensemble)
-- Target: 0.0347 | Gap to target: 152.7%
+- Best CV score: 0.008092 from exp_049/exp_050 (CatBoost+XGBoost)
+- Best LB score: 0.0877 from exp_030/exp_067 (GP+MLP+LGBM)
+- Target: 0.0347 | Gap to target: 0.0530 (152.7% above target)
 - Submissions remaining: 4
 
 ## CV-LB Relationship Analysis (CRITICAL)
 - Linear fit: LB = 4.36 * CV + 0.0520 (R² = 0.9558)
 - Intercept interpretation: Even at CV=0, expected LB is 0.0520
-- **CRITICAL: Intercept (0.0520) > Target (0.0347)**
-- Required CV for target: (0.0347 - 0.0520) / 4.36 = -0.0040 (IMPOSSIBLE)
-- All 13 verified submissions fall on the same CV-LB line
+- Are all approaches on the same line? YES
+- **CRITICAL**: Intercept (0.0520) > Target (0.0347)
+- Required CV for target: (0.0347 - 0.0520) / 4.36 = -0.004 (IMPOSSIBLE)
+
+**This is a STRUCTURAL DISTRIBUTION SHIFT problem. Standard CV optimization CANNOT reach the target.**
 
 ## Response to Evaluator
-- Technical verdict was TRUSTWORTHY - exp_089 implementation was correct but approach failed
-- Evaluator correctly identified that GP uncertainty doesn't correlate with actual prediction error
-- Evaluator's top priority: Study and implement techniques from top public kernels
-- I AGREE with the evaluator's assessment. The uncertainty-weighted approach was a reasonable hypothesis but it failed badly (97% worse CV).
-- Key concerns raised: The intercept problem requires fundamentally different strategies
-- Addressing by: Focusing on approaches that could CHANGE the CV-LB relationship
+- Technical verdict was TRUSTWORTHY. The exp_090 implementation was correct but performed poorly.
+- Evaluator's top priority: Try per-target heterogeneous ensemble. **STRONGLY AGREE** - this is fundamentally different from all 90+ experiments.
+- Key concerns raised: 
+  1. DO NOT submit exp_090 (CV=0.0109, predicted LB=0.0995) - **AGREED, will not submit**
+  2. Correlation filtering removed useful features - **AGREED, 70% feature reduction was too aggressive**
+  3. The intercept problem requires fundamentally different strategy - **AGREED, this is the core issue**
 
 ## Data Understanding
-- Reference notebooks: `exploration/evolver_loop94_analysis.ipynb`, `exploration/eda.ipynb`
-- Key patterns:
-  - CV-LB relationship is very strong (R²=0.96) but intercept > target
-  - Best CV (0.008092) from CatBoost+XGBoost but had submission format errors
-  - Best LB (0.0877) from GP+MLP+LGBM ensemble (exp_030/exp_067)
-  - exp_089 (uncertainty-weighted) achieved CV=0.015954 (97% WORSE) - DO NOT SUBMIT
+- Reference notebooks: See `exploration/evolver_loop95_analysis.ipynb` for CV-LB analysis
+- Key patterns to exploit:
+  1. **SM target behaves differently** - The strategy-to-get-0-11161 kernel uses different model types for SM vs Products
+  2. **Feature sets matter** - ACS_PCA and Spange descriptors have different strengths
+  3. **Ensemble weights vary by data type** - Single solvent vs full data may need different weights
 
 ## Recommended Approaches
 
-### PRIORITY 1: Implement ens-model Kernel Techniques (HIGH POTENTIAL)
-**Rationale**: The ens-model kernel (matthewmaree) uses techniques we haven't fully implemented:
+### PRIORITY 1: Per-Target Heterogeneous Ensemble (HIGH PRIORITY - UNTRIED)
+**Rationale**: The strategy-to-get-0-11161 kernel (LB=0.11161) uses DIFFERENT model types for different targets:
+- SM target: HistGradientBoostingRegressor (HGB) - gradient boosting
+- Product 2 & 3: ExtraTreesRegressor (ETR) - random forest variant
+- Ensemble: 0.65 * ACS_PCA + 0.35 * Spange
 
-1. **Correlation-based feature filtering** (threshold=0.90):
-   - Priority: Spange > ACS > DRFP > Fragprints
-   - Removes redundant features that may cause overfitting
-   
-2. **Different ensemble weights for single vs full data**:
-   - Single: CatBoost:XGBoost = 7:6 (0.538:0.462)
-   - Full: CatBoost:XGBoost = 1:2 (0.333:0.667)
-   
-3. **Prediction clipping and renormalization**:
-   - Clip predictions to [0, 1]
-   - Renormalize if sum > 1
+**Why this could change the CV-LB relationship**:
+1. Different targets may have different optimal model types
+2. SM (starting material) may behave differently than products
+3. This is fundamentally different from using the same model for all targets
 
 **Implementation**:
 ```python
-class EnsembleModel:
+class PerTargetHeterogeneousModel:
     def __init__(self, data='single'):
-        if data == 'single':
-            self.cat_weight = 7.0 / 13.0  # 0.538
-            self.xgb_weight = 6.0 / 13.0  # 0.462
-        else:
-            self.cat_weight = 1.0 / 3.0   # 0.333
-            self.xgb_weight = 2.0 / 3.0   # 0.667
+        self.targets = ["Product 2", "Product 3", "SM"]
+        self.models = {}
+        for t in self.targets:
+            if t == "SM":
+                # Gradient boosting for SM
+                self.models[t] = [
+                    HGBModel(feature_table="acs_pca_descriptors"),
+                    HGBModel(feature_table="spange_descriptors"),
+                ]
+            else:
+                # ExtraTrees for Products
+                self.models[t] = [
+                    ETRModel(feature_table="acs_pca_descriptors"),
+                    ETRModel(feature_table="spange_descriptors"),
+                ]
+    
+    def predict(self, X):
+        preds = []
+        for t in self.targets:
+            p1 = self.models[t][0].predict(X)
+            p2 = self.models[t][1].predict(X)
+            pred_t = 0.65 * p1 + 0.35 * p2  # Weighted ensemble
+            preds.append(pred_t)
+        return np.clip(np.hstack(preds), 0, 1)
 ```
 
-### PRIORITY 2: Fix Submission Format for Best CV Model
-**Rationale**: exp_049/050/053 achieved best CV (0.008092) but had submission errors.
+### PRIORITY 2: Combine Best Approaches with Per-Target Logic
+If per-target heterogeneous ensemble shows promise, combine with our best techniques:
+- Add Arrhenius kinetics features (1/T, ln(t), T*t)
+- Use CatBoost/XGBoost for some targets, GP for others
+- Experiment with different feature combinations per target
 
-The working submission format (from exp_030/exp_067):
-- Model must return torch tensor from predict()
-- Submission file: 1883 rows (656 single + 1227 full)
-- Columns: id, index, task, fold, row, target_1, target_2, target_3
+### PRIORITY 3: Solvent Similarity-Based Prediction Adjustment
+**Rationale**: The intercept represents extrapolation error to unseen solvents.
+- Calculate similarity of test solvent to training solvents
+- When test solvent is dissimilar (extrapolating), blend toward population mean
+- This could reduce the intercept
 
-**Check what's different in the failing submissions vs working ones.**
-
-### PRIORITY 3: Try GP+MLP+LGBM with CatBoost/XGBoost Instead of LGBM
-**Rationale**: Combine the best of both approaches:
-- GP+MLP+LGBM achieved best LB (0.0877)
-- CatBoost+XGBoost achieved best CV (0.008092)
-
-Try: GP + MLP + CatBoost + XGBoost ensemble with optimized weights.
-
-### PRIORITY 4: Solvent-Specific Calibration
-**Rationale**: The intercept represents systematic bias. Try:
-- Train a calibration model on CV residuals
-- Apply solvent-specific corrections based on chemical class
+### PRIORITY 4: Conservative Predictions for Outlier Solvents
+- Identify solvents that are "outliers" (Water, extreme polarity)
+- Use simpler models or blend toward mean for these solvents
+- This could reduce extrapolation error
 
 ## What NOT to Try
-- **Uncertainty-weighted predictions** - exp_089 proved this doesn't work (97% worse)
-- **Neural network approaches without pre-training** - GCN, GAT, ChemBERTa all 2-2.5x worse
-- **More feature simplification** - exp_038 proved minimal features hurt (19.91% worse)
-- **Higher GP weight** - exp_031 proved it hurts (10.61% worse)
-- **Blending toward population mean** - This HURTS performance, not helps
+1. **Neural network architectures** (GNN, GAT, ChemBERTa) - 5 consecutive failures, all 100%+ worse than best
+2. **Aggressive correlation filtering** - exp_090 showed 70% feature reduction hurts performance
+3. **Standard CV optimization** - All approaches fall on the same CV-LB line, intercept > target
+4. **Complex deep learning** - Small dataset (656 single, 1227 full samples) doesn't support complex models
 
 ## Validation Notes
-- CV scheme: Leave-one-solvent-out (24 folds) + Leave-one-ramp-out (13 folds)
-- CV-LB relationship: LB = 4.36*CV + 0.0520 (R²=0.96)
-- The intercept (0.0520) > target (0.0347) is the key problem
-- We need to CHANGE the CV-LB relationship, not just improve CV
+- CV scheme: Leave-One-Out for single solvent, Leave-One-Ramp-Out for full data
+- CV-LB gap: ~4.36x multiplier + 0.052 intercept
+- **Key insight**: The intercept (0.052) > target (0.0347) means we need to CHANGE the relationship, not just improve CV
+- Submit only if CV < 0.0081 AND approach is fundamentally different (could change intercept)
 
-## Submission Strategy
-With 4 submissions remaining:
-1. **DO NOT submit exp_089** - it would waste a submission on 97% worse model
-2. Try Priority 1 (ens-model techniques) - submit if CV improves
-3. Try Priority 2 (fix submission format) - submit if format is fixed
-4. Reserve 2 submissions for best models
+## Submission Strategy (4 remaining)
+1. **DO NOT submit exp_090** - CV=0.0109 is 34% worse than best
+2. **Submit per-target heterogeneous ensemble** if CV < 0.0085 - fundamentally different approach
+3. **Save submissions** for approaches that could change the CV-LB relationship
+4. **Final submission**: Best performing approach with lowest predicted LB
 
 ## Key Insight
-**THE TARGET IS REACHABLE** - but not with standard CV optimization.
+The target (0.0347) IS achievable - top competitors have achieved it. The key is to find an approach that:
+1. Changes the CV-LB relationship (reduces the intercept)
+2. Or achieves CV so low that even with the current relationship, LB < 0.0347
 
-The intercept (0.0520) > target (0.0347) means:
-- Even perfect CV=0 would give LB=0.0520
-- We need approaches that CHANGE the CV-LB relationship
-
-The ens-model kernel uses different techniques (correlation filtering, different weights per data type) that might change this relationship. Study and implement these techniques.
-
-**DO NOT GIVE UP.** The target is achievable. The GNN benchmark achieved 0.0039 on this exact dataset. We need to find what makes the difference.
+The per-target heterogeneous ensemble is the most promising untried approach because it's fundamentally different from all 90+ experiments we've run.
