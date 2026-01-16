@@ -1,118 +1,140 @@
 ## Current Status
-- Best CV score: 0.0083 from exp_030 and exp_067
+- Best CV score: 0.0081 from exp_049 (CatBoost+XGBoost)
 - Best LB score: 0.0877 (exp_030, exp_067)
 - Target: 0.0347 | Gap to target: 0.0530 (152.7% above target)
+- Latest experiment: exp_079 (Best-Work-Here techniques) - CV: 0.0142 (WORSE than best)
 
 ## CV-LB Relationship Analysis (CRITICAL)
-- Linear fit: LB = 4.36 * CV + 0.0520 (R² = 0.956)
+- Linear fit: LB = 4.36 * CV + 0.0520 (R² = 0.9558)
 - Intercept interpretation: Even at CV=0, expected LB is 0.0520
-- Are all approaches on the same line? YES
+- Are all approaches on the same line? YES (all 13 submissions)
 - CRITICAL: Intercept (0.0520) > Target (0.0347)
 - Required CV for target: (0.0347 - 0.0520) / 4.36 = -0.0040 (IMPOSSIBLE)
-
-## LEADERBOARD INSIGHT (CRITICAL)
-- 1st place: 0.03470 (EXACTLY at target!)
-- 2nd place: 0.07074
-- HUGE gap (2x) between 1st and 2nd place
-- This suggests 1st place found a FUNDAMENTALLY DIFFERENT approach
-- Standard approaches (MLP, XGBoost, etc.) cluster around 0.07-0.09
-- To reach target, we need a BREAKTHROUGH technique
+- Mean absolute residual from line: 0.0008 (very tight fit)
 
 ## Response to Evaluator
-- Technical verdict was TRUSTWORTHY for exp_078 (GroupKFold approach)
-- Evaluator's top priority: VERIFY RULE COMPLIANCE before submitting exp_078
-- Key concerns raised: 
-  1. Overriding CV split functions may violate competition rules
-  2. GroupKFold CV (0.0150) is 80% higher than Leave-One-Out CV (0.0081)
-- My response: AGREE with evaluator. DO NOT submit exp_078 due to rule compliance risk.
-- Instead, focus on rule-compliant approaches that only change the model definition.
+- Technical verdict was TRUSTWORTHY for exp_079
+- Evaluator's top priority: Debug why exp_079 CV (0.0142) is 71% WORSE than best CV (0.0081)
+- Key concerns raised:
+  1. exp_079 CV is much worse than expected - techniques should help, not hurt
+  2. 15% validation split inside training may be hurting performance
+  3. Missing probability normalization from best-work-here kernel
+- My response: AGREE with evaluator. The exp_079 implementation has issues:
+  1. The 15% validation split reduces training data significantly
+  2. Probability normalization was not implemented
+  3. The SE blocks and residual connections may be adding complexity without benefit
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop82_analysis.ipynb` for CV-LB analysis
+- Reference notebooks: See `exploration/evolver_loop83_analysis.ipynb` for CV-LB analysis
 - Key patterns:
   1. CV-LB intercept (0.052) exceeds target (0.0347) - standard optimization cannot reach target
-  2. Top kernels use non-linear mixture features: A*(1-r) + B*r + 0.05*A*B*r*(1-r)
-  3. Probability normalization (triple normalization) ensures row sums = 1
-  4. Squeeze-and-Excitation blocks for feature recalibration
+  2. All 13 submissions fall on the same CV-LB line with R²=0.9558
+  3. The intercept represents STRUCTURAL distribution shift that no model tuning can fix
+
+## KEY INSIGHT FROM TOP KERNELS
+
+### ens-model kernel (matthewmaree)
+Uses CatBoost + XGBoost ensemble with:
+- Combined features from multiple sources (spange, acs_pca, drfps, fragprints, smiles)
+- Correlation-based feature filtering (threshold=0.90)
+- Numeric feature engineering (Arrhenius-like: T_inv, RT_log, T_x_RT)
+- **PROBABILITY NORMALIZATION**: Clip to non-negative, then normalize to sum to 1
+- Different weights for single vs full data: single=(7:6 cat:xgb), full=(1:2 cat:xgb)
+
+### mixall kernel (lishellliang)
+Uses GroupKFold(5) instead of Leave-One-Out - different CV scheme
+- This may explain different CV-LB relationships
+- BUT may violate competition rules (modifies CV split functions)
 
 ## Recommended Approaches (PRIORITY ORDER)
 
-### 1. IMPLEMENT best-work-here KERNEL TECHNIQUES (HIGH PRIORITY)
-The best-work-here kernel has several advanced techniques we haven't fully implemented:
-- **Non-linear mixture features**: `A*(1-r) + B*r + 0.05*A*B*r*(1-r)` captures non-linear solvent interactions
-- **Probability normalization**: Triple normalization (clip -> normalize -> clip -> normalize)
-- **Squeeze-and-Excitation blocks**: Feature recalibration in neural network
-- **Adaptive ensemble**: CatBoost + XGBoost + LightGBM + Neural Network with validation-based weights
-- **Advanced feature engineering**: Polynomial features, interaction terms, statistical features
-
-Implementation:
+### 1. IMPLEMENT ens-model APPROACH (HIGHEST PRIORITY)
+The ens-model kernel has a clean, rule-compliant approach:
 ```python
-# Non-linear mixture features
-def mix_features(A, B, r):
-    return A * (1 - r) + B * r + 0.05 * A * B * r * (1 - r)
+# Feature engineering
+- Combine spange + acs_pca + drfps + fragprints features
+- Filter correlated features (threshold=0.90)
+- Add numeric features: T_inv, RT_log, T_x_RT, RT_scaled
 
-# Triple probability normalization
-probs = np.clip(probs, 1e-10, 1.0)
-probs = probs / probs.sum(axis=1, keepdims=True)
-probs = np.clip(probs, 1e-10, 1.0)
-probs = probs / probs.sum(axis=1, keepdims=True)
+# Probability normalization (CRITICAL)
+out = np.clip(out, a_min=0.0, a_max=None)
+if out.shape[1] > 1:
+    totals = out.sum(axis=1, keepdims=True)
+    divisor = np.maximum(totals, 1.0)
+    out = out / divisor
+
+# Ensemble weights
+single: cat_weight=7, xgb_weight=6
+full: cat_weight=1, xgb_weight=2
 ```
 
-### 2. DEEP KERNEL LEARNING (GP + Neural Network) (HIGH PRIORITY)
-Research suggests Deep Kernel Learning achieves state-of-the-art for reaction prediction:
-- GP whose kernel is parameterized by a neural network
-- Provides uncertainty estimates for extrapolation detection
-- Can guide conservative predictions for unseen solvents
+### 2. FIX exp_079 ISSUES (HIGH PRIORITY)
+If continuing with best-work-here approach:
+- Remove the 15% validation split - train on all data
+- Add probability normalization
+- Simplify architecture - remove SE blocks if they hurt performance
 
-### 3. ATTENTION-AUGMENTED ENSEMBLE (MEDIUM PRIORITY)
-Research shows attention mechanisms improve performance for unseen solvents:
-- Add attention layer to extract relevant descriptor information
-- Weight features based on their relevance to the specific solvent
+### 3. PROBABILITY NORMALIZATION ON BEST MODEL (HIGH PRIORITY)
+Take exp_030/exp_067 (best LB) and add probability normalization:
+```python
+# After prediction
+final_pred = np.clip(final_pred, 0, None)
+row_sums = final_pred.sum(axis=1, keepdims=True)
+final_pred = final_pred / np.maximum(row_sums, 1.0)
+```
+This enforces the physics constraint that yields should sum to ~1.
 
-### 4. EXTRAPOLATION DETECTION + CONSERVATIVE PREDICTIONS (MEDIUM PRIORITY)
-When model detects it's extrapolating to unseen solvents:
-- Blend predictions toward population mean
-- Use ensemble variance as uncertainty proxy
-- High uncertainty → more conservative prediction
+### 4. COMBINED FEATURE APPROACH (MEDIUM PRIORITY)
+The ens-model kernel combines ALL feature sources:
+- spange_descriptors (13 features)
+- acs_pca_descriptors
+- drfps_catechol (filtered)
+- fragprints (filtered)
+- smiles (if available)
+Then filters correlated features. This may capture more signal.
 
-### 5. PHYSICS-INFORMED CONSTRAINTS (MEDIUM PRIORITY)
-Add domain constraints that hold even for unseen solvents:
-- Arrhenius kinetics (already implemented)
-- Solvent polarity, dielectric constant relationships
-- Hydrogen bonding capacity effects
+### 5. DIFFERENT ENSEMBLE WEIGHTS FOR SINGLE VS FULL (MEDIUM PRIORITY)
+The ens-model kernel uses different weights:
+- Single solvent: CatBoost=7, XGBoost=6 (more CatBoost)
+- Full data: CatBoost=1, XGBoost=2 (more XGBoost)
+This suggests the models perform differently on different data types.
 
 ## What NOT to Try
-- **GroupKFold(5) approach (exp_078)**: Rule compliance risk - DO NOT SUBMIT
+- **exp_079 approach as-is**: CV is 71% worse than best - needs fixing
+- **GroupKFold approach**: Rule compliance risk
+- **More complex architectures**: SE blocks didn't help
 - **Standard CV optimization**: Intercept problem means this cannot reach target
-- **Simple hyperparameter tuning**: Won't change the CV-LB relationship
 
 ## Validation Notes
 - Use Leave-One-Out CV (official competition CV scheme)
 - Monitor both CV and predicted LB (using CV-LB relationship)
-- Focus on approaches that might CHANGE the CV-LB relationship, not just improve CV
+- Focus on approaches that might CHANGE the CV-LB relationship
 
 ## CRITICAL INSIGHT
-The 1st place score (0.0347) is 2x better than 2nd place (0.0707). This is NOT just better hyperparameters - it's a fundamentally different approach. We need to find what that approach is.
-
-Possible breakthrough approaches:
-1. Graph Neural Networks (benchmark paper mentions GNN achieving 0.0039)
-2. Transfer learning from larger chemistry datasets
-3. Deep Kernel Learning with uncertainty quantification
-4. Novel physics-informed constraints
-5. Attention mechanisms for feature selection
+The CV-LB relationship has intercept 0.052 > target 0.0347. This means:
+1. Standard CV optimization CANNOT reach the target
+2. We need approaches that CHANGE the relationship, not just improve CV
+3. Probability normalization might change the relationship by enforcing physics constraints
+4. The ens-model kernel's approach is worth trying - it's rule-compliant and uses probability normalization
 
 ## NEXT EXPERIMENT
-Implement the best-work-here kernel techniques in a rule-compliant way:
-1. Non-linear mixture features: A*(1-r) + B*r + 0.05*A*B*r*(1-r)
-2. Probability normalization: Triple normalization
-3. Squeeze-and-Excitation blocks in neural network
-4. Adaptive ensemble: CatBoost + XGBoost + LightGBM + NN with validation-based weights
-5. Advanced feature engineering: Polynomial features, interaction terms, statistical features
+Implement the ens-model kernel approach:
+1. Combine features from multiple sources (spange, acs_pca, drfps, fragprints)
+2. Filter correlated features (threshold=0.90)
+3. Add numeric features (T_inv, RT_log, T_x_RT, RT_scaled)
+4. CatBoost + XGBoost ensemble with different weights for single vs full
+5. Probability normalization: clip to non-negative, normalize to sum to 1
 
-This should be a comprehensive implementation that combines all the best techniques from top kernels while remaining rule-compliant. The model class should be self-contained and only require changing the model definition line in the template.
+This is a clean, rule-compliant approach that uses probability normalization which might help with generalization to unseen solvents.
+
+## REMAINING SUBMISSIONS: 4
+Use wisely:
+1. Submit exp_049 or exp_050 (best CV) to verify CV-LB relationship holds
+2. Submit ens-model approach if CV is good
+3. Save 2 submissions for final calibration
 
 ## IMPORTANT NOTES
-1. DO NOT submit exp_078 (GroupKFold) - rule compliance risk
-2. Focus on techniques that might CHANGE the CV-LB relationship
+1. DO NOT submit exp_079 - CV is worse than best
+2. Focus on probability normalization - it enforces physics constraints
 3. The target IS achievable - 1st place got exactly 0.0347
-4. We have 4 submissions remaining - use them wisely for calibration
+4. We need to find what makes 1st place fundamentally different
