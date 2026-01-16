@@ -1,105 +1,86 @@
 ## What I Understood
-You implemented **exp_073 (AD_shrinkage_template_safe)**: a **template-compliant** version of your strong exp_030-style **GP+MLP+LGBM ensemble**, augmented with an **applicability-domain / distance-aware mean-shrinkage layer**. The hypothesis is that the public LB gap is driven by **OOD solvents/ramps**, so shrinking predictions toward a conservative baseline (train mean) as distance-to-training increases could **reduce the CV→LB intercept** even if it slightly worsens in-domain CV.
+You ran **exp_074 / “AD_shrinkage_v2_template_safe”**: a **template-compliant** version of your strong **GP+MLP+LGBM ensemble (exp_030 family)**, now with a more careful **applicability-domain (AD) shrinkage** mechanism. The hypothesis is that the public LB gap is dominated by **OOD solvents/ramps**, so an **OOD-triggered blend toward a safer fallback** (here: kNN-mean-y) can reduce the **CV→LB intercept** while keeping in-domain behavior close to the base model.
 
 ## Technical Execution Assessment
 
-**Validation**: Mostly sound
-- Strong positive: notebook appears **template-safe** (last 3 cells preserved; output to `/home/submission/submission.csv`; uses template split generators). This removes the “misaligned submission” failure mode.
-- The reported overall score **0.0091106** (single=0.008861, full=0.009244) is plausible relative to the A0 template-safe baseline (0.008621).
-- One methodological nuance: your **inner calibration split** uses `GroupShuffleSplit` with groups = solvent (single) / solvent-pair (full). That’s reasonable for learning a distance→shrink function, but it may not perfectly match the evaluator’s outer split definition for “full” (leave-one-ramp-out). It’s not invalid, just something to be aware of when interpreting CV movement.
+**Validation**: Sound (for what the competition requires)
+- You are using the **exact template split generators** (leave-one-solvent-out for single; leave-one-(A,B)-pair-out for “full”) and the **template’s prediction loops** in the last three cells.
+- The model used in CV loops matches the model instantiated in the submission cells: `GPMLPLGBM_ADShrinkageV2()` for single and `GPMLPLGBM_ADShrinkageV2(data='full')` for full. ✅ (This avoids the historical “model class mismatch” failure mode.)
 
-**Leakage Risk**: Low
-- Distance scaler + NN are fit only on `X_tr` inside the fold; isotonic calibration uses only `X_cal` from the same fold.
-- No target information from outer test fold is used.
-- I see no obvious contamination across folds.
+**Leakage Risk**: Low (with one nuance)
+- Supervised calibration (learning alpha(d)) uses only a fold-internal split (`GroupShuffleSplit` on solvent or canonical solvent-pair). That’s appropriate.
+- Unsupervised distance components (scaler+kNN) are refit on the full fold training set after calibration, which is leakage-safe.
+- Nuance (low/medium confidence): for full data, your inner split groups on **canonical pair only**. If there is meaningful structure at the **experiment/ramp** level that should not be mixed even within training, calibration could be slightly optimistic. However, the *outer* evaluator also splits by pair, so this is not an obvious violation—just something to keep in mind when interpreting alpha(d).
 
-**Score Integrity**: Reasonably trustworthy
-- You’re computing predictions via the same loop structure the evaluator uses (template cells), and the score is computed from those per-fold predictions. That’s the right way to avoid “CV computed on a different split than submission”.
+**Score Integrity**: Mostly trustworthy
+- Session history shows **exp_074 CV ≈ 0.008726** (improving over AD-v1 at 0.00911, but still slightly worse than the template-safe A0 control at 0.008621).
+- Because the score is computed using the same split/predict loop structure as the submission, it’s a meaningful estimate of what this exact notebook will do under evaluation.
 
-**Code Quality**: Minor design/consistency issues (not fatal, but likely hurting performance)
-1) **Mean target mismatch vs refit base** (medium confidence)
-   - You set `mu_train = mean(y_tr)` (train_inner), but then refit the base model on **full fold** `X_train`.
-   - This means the shrink target is based on a smaller subset than the model you finally deploy inside that fold.
-   - Likely better: set `mu_train = mean(y_train)` and (optionally) also refit the distance model on full `X_train` after calibration.
+**Code Quality**: Good overall; a couple high-impact edge cases to check
+1) **Distance features for full are NOT flip-invariant** (high confidence)
+   - Base predictions are flip-invariant (you average flipped inputs), but `_dist_features_full(..., flip=False)` depends on the A/B order.
+   - This means the **kNN distance + kNN fallback** can behave differently for the same physical mixture expressed as A/B swapped.
+   - You already fixed canonicalization for grouping, but distance itself should also be canonicalized.
 
-2) **Distance model fit only on train_inner** (medium confidence)
-   - For prediction you use NN/scaler fitted on `X_tr` only. That’s clean, but it makes the distance estimate noisier than necessary.
-   - Because distance is unsupervised, you can safely refit scaler+NN on full fold `X_train` after calibration (still no leakage) to stabilize d(x) and reduce variance.
+2) **kNN fallback uses raw training rows, not flip-augmented rows** (low confidence concern)
+   - This is not leakage and it’s consistent, but it may underutilize symmetry. If A/B swapped rows exist, the neighbor set might be fragmented.
 
-3) **Full-data grouping for calibration likely needs canonicalization** (medium confidence)
-   - You group full data by `A||B`. If the dataset contains the same physical pair in swapped order across rows, this will treat them as different groups and can leak mixture identity across train/cal within the fold.
-   - Safer: define group as `'||'.join(sorted([A,B]))` and incorporate `SolventB%` bin if needed.
-
-Verdict: **CONCERNS**
-- I’m confident this run is **submission-structure-correct** and the CV number is meaningful.
-- I’m moderately confident a couple internal consistency choices (mu and NN fit set, pair canonicalization) are suppressing performance and could be fixed without changing the overall idea.
+Verdict: **TRUSTWORTHY (with one important design concern)**
+- I’m confident the notebook is template-compliant and the CV is “real”.
+- I’m also confident the biggest remaining technical opportunity is making **distance + fallback flip-invariant** for the full task.
 
 ## Strategic Assessment
 
 **Approach Fit**
-- This direction is aligned with the real bottleneck: your history shows a tight **CV→LB line** with a large intercept (distribution shift). A distance-aware conservative correction is exactly the kind of mechanism that can reduce the intercept.
+- This is the right strategic direction given the established **LB ≈ 4.3×CV + ~0.052 intercept** pattern across many submissions. AD shrinkage (especially hinged, neighbor-based) is exactly the kind of mechanism that can reduce the **intercept** rather than just moving along the line.
 
 **Effort Allocation**
-- Good: you didn’t spend time on marginal tabular tuning; you’re targeting OOD behavior and staying template-safe.
-- With **4 submissions left today**, the highest leverage is to iterate on **one or two** shrinkage variants that preserve baseline CV while changing OOD predictions (to test whether the CV-LB relationship breaks).
+- Good: you are not spending submissions on marginal MLP/LGBM tuning.
+- With **4 submissions remaining today**, the best use is: **1–2 LB probes** of carefully chosen AD variants that are maximally likely to break the CV→LB relationship.
 
 **Assumptions**
-- Assumption: kNN distance in (Spange+DRFP+ACS) space correlates with “OOD hardness” of held-out solvents/ramps.
-- Assumption: shrinking to a **global mean** is the right conservative fallback.
-  - This may be too blunt; for chemistry, a **nearest-neighbor target fallback** (or solvent-cluster mean) often dominates global mean reversion.
+- kNN distance in your descriptor space correlates with OOD hardness (seems true for full mixtures per your earlier analysis).
+- kNN-mean-y is a better conservative fallback than global mean (generally true in chemistry; also less bias).
 
-**Blind Spots (high-leverage variants not yet fully exploited)**
-1) **Hinge / “only shrink when truly OOD”**
-   - Your isotonic fit may apply non-zero shrink even at small distances, hurting CV without helping LB.
-   - Enforce `alpha(d)=0` for d below a threshold τ (learn τ on calibration) or add anchor points forcing near-zero shrink at low d.
+**Blind Spots / High-leverage next variants**
+1) **Flip-invariant distance + neighbor fallback (full task)**
+   - This is the most direct “bug/feature” gap I see: base model is symmetric, but the AD mechanism isn’t.
+   - If the test set contains a different A/B ordering convention than train (or simply more A/B swaps), this can directly drive LB error.
 
-2) **Neighbor-based fallback instead of global mean**
-   - Replace `mu_train` with **kNN average of training y** (per target) using the same NN used for distance. Then blend: `pred = (1-a)*base + a*knn_mean_y`.
-   - This is still conservative but far less biased than global mean.
-
-3) **Mixture-aware distance**
-   - For full data, blending A/B descriptors linearly can collapse distinct pairs into similar embeddings.
-   - Consider distance features that keep identity: `[A_feats, B_feats, pct, pct*(1-pct), |A-B|, A*B]` with symmetric canonicalization. This usually improves OOD detection for mixtures.
+2) **Distance feature choice for full: consider adding kinetics back in (controlled test)**
+   - Your `_dist_features_full` currently excludes kinetics by design. If the hard OOD cases are also at unusual **T/RT regimes**, the AD gate will miss them.
+   - A disciplined variant would append `[RT, Temp, invT, logRT, invT*logRT]` to the full distance vector, but keep the *base model* unchanged.
 
 **Trajectory**
-- Even though CV worsened (0.00862 → 0.00911), this experiment is still valuable because the objective is **changing LB behavior**. The next iteration should aim to **recover baseline CV** via “hinged shrinkage” + “refit distance on full fold” so you can justify an LB submission with minimal downside.
+- AD-v2 recovered much of the CV hit from AD-v1 (0.00911 → 0.00873). That’s a meaningful improvement in “cost of robustness”.
+- The remaining question is whether this changes LB (intercept reduction). That requires an LB submission.
 
 **CV-LB Relationship** (after 3+ submissions)
-Using the logged submission history (13 points with both CV and LB), the fitted line is:
-- **LB ≈ 4.34 × CV + 0.0523** with **R² ≈ 0.957**
-This is classic structural distribution shift: model-family tuning mostly moves along the same line.
-Your shrinkage idea is a direct attempt to reduce the **intercept**, so it’s strategically on-target.
+- From your recorded history: **LB ≈ 4.34 × CV + 0.0523 (R² ≈ 0.957)**.
+- The only way to beat the target is to **break this line** (reduce intercept and/or slope). AD-v2 is a credible attempt to do exactly that.
 
 ## What’s Working
-- You’re now operating in a **template-compliant scaffold**, which is mandatory and eliminates a major source of false negatives.
-- You’re explicitly targeting **OOD robustness / intercept reduction**, not squeezing CV.
-- Calibration is fold-internal and group-aware, which is the right hygiene for this kind of method.
+- **Template safety**: last-three-cells structure is correct; model class matches in CV/submission.
+- **Better AD design** than v1: hinged activation, refit NN on full fold, and kNN-mean-y fallback are all strong choices.
+- **Selective application**: disabling shrinkage on single by default is a pragmatic way to avoid harming the part where distance didn’t correlate with error.
 
 ## Key Concerns
 
-1) **Observation**: Shrink target and distance model are fit on train_inner, but the deployed base is refit on full fold.
-- **Why it matters**: Inconsistency increases noise and can apply shrink in the wrong regions, worsening CV and potentially LB.
-- **Suggestion**: After learning alpha(d) on (train_inner, cal), **refit**:
-  - `mu_train = mean(y_train)` (full fold)
-  - scaler+NN on `X_train` (unsupervised)
-  Keep alpha(d) fixed.
+1) **Observation**: AD distance/fallback for full mixtures is order-dependent (not flip-invariant).
+- **Why it matters**: Your base predictor is symmetric, but the correction layer isn’t; that can introduce systematic errors under distribution shift in how mixtures are represented (A/B ordering conventions), exactly the kind of shift that inflates the LB intercept.
+- **Suggestion**: Canonicalize full-distance features the same way you canonicalize groups:
+  - If `A > B`, swap A/B and set `pct = 1-pct` before computing distance features.
+  - Then kNN distance + kNN fallback become invariant to representation.
 
-2) **Observation**: Full-data grouping for calibration uses raw `A||B` ordering.
-- **Why it matters**: If A/B swapping exists in the data, you can get subtle leakage across the inner split and a miscalibrated alpha(d).
-- **Suggestion**: Canonicalize pair groups with `sorted([A,B])` (and optionally include a coarse pct bin), and keep distance features symmetric.
+2) **Observation**: CV is slightly worse than the template-safe control, so AD is still “paying rent”.
+- **Why it matters**: You want robustness without losing the base model’s strong in-domain fit.
+- **Suggestion**: Tighten AD activation further for full if needed (e.g., `tau_q=0.80` or smaller `alpha_max` like 0.4) *after* flip-invariance is fixed, so you’re not compensating for an avoidable artifact.
 
-3) **Observation**: Shrinkage likely activates even for in-domain points.
-- **Why it matters**: This is the most common reason AD methods lose CV without gaining LB.
-- **Suggestion**: Implement **hinged shrinkage**:
-  - learn τ on calibration (e.g., 80th percentile of d for “ID-like” points)
-  - use `d' = max(0, d-τ)` and fit isotonic on d'
-  - force alpha(0)=0 by adding an anchor sample.
+3) **Observation**: No LB confirmation yet for AD-v2.
+- **Why it matters**: The whole point is intercept reduction; CV alone can’t verify it.
+- **Suggestion**: Use **one** of the remaining submissions to probe this exact AD-v2 (or the flip-invariant tweak) and immediately update the CV-LB plot. Even a small deviation from the line is actionable.
 
 ## Top Priority for Next Experiment
-Implement a **v2 AD shrinkage** that is still template-safe but fixes the two biggest performance killers:
-1) **Refit NN/scaler + mu_train on full fold training data** after calibration (unsupervised + target mean).
-2) Add **hinged shrinkage** so alpha≈0 for low distances, and consider switching the fallback from global mean to **kNN-mean y**.
+Make the **full-task AD mechanism flip-invariant** (canonicalize A/B + pct inside `_dist_features_full` and/or before calling it), then submit that variant once to measure whether it **breaks the CV→LB line** (intercept reduction). 
 
-Then (given only 4 submissions left today) submit *one* carefully chosen AD variant that preserves baseline CV while meaningfully changing OOD behavior—this is your best shot at breaking the CV→LB line.
-
-Confidence level: **High** that the notebook is template-compliant and the CV is meaningful; **Medium** that the specific AD design choices above are the main reason CV worsened; **Medium** that a hinged/kNN-based shrinkage will reduce the LB intercept (worth testing with one submission).
+Confidence level: **High** that the notebook is template-compliant and results are executable as evaluated; **High** that flip-invariance in the AD layer is currently a key technical/strategic opportunity; **Medium** that adding kinetics to full-distance will help (worth a controlled test if flip-invariance alone doesn’t move LB).
