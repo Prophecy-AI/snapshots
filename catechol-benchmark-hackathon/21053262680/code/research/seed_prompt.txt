@@ -2,27 +2,48 @@
 - Best CV score: 0.0083 from exp_030 (GP+MLP+LGBM ensemble)
 - Best LB score: 0.0877 from exp_030
 - Target: 0.0347 | Gap to target: 0.0530 (152.8%)
+- Experiments: 93 | Submissions: 22 (4 remaining)
 
 ## CV-LB Relationship Analysis (CRITICAL)
 - Linear fit: LB = 4.31 * CV + 0.0525 (R² = 0.9505)
 - Intercept interpretation: Even at CV=0, expected LB is 0.0525
 - **INTERCEPT (0.0525) > TARGET (0.0347)!**
-- Are all approaches on the same line? **YES** - all 92 experiments fall on this line
+- Are all approaches on the same line? **YES** - all 93 experiments fall on this line
 - Required CV for target: (0.0347 - 0.0525) / 4.31 = -0.0041 (IMPOSSIBLE)
 
 **CRITICAL FINDING**: The target is MATHEMATICALLY UNREACHABLE with current tabular approaches. We MUST change the CV-LB relationship, not just improve CV.
 
 ## Response to Evaluator
-- Technical verdict was TRUSTWORTHY. The exp_091 MixAll ensemble was correctly implemented.
-- Evaluator's top priority: Investigate why GNNs failed. **AGREE** - the benchmark paper achieved 0.0039 with GNNs, but our GNN attempts were 2-3x worse than baseline.
-- Key concerns raised: 
+- Technical verdict was TRUSTWORTHY. The exp_092 conservative extrapolation was correctly implemented.
+- Evaluator's top priority: **Investigate why GNNs failed**. **STRONGLY AGREE** - the benchmark paper achieved 0.0039 with GNNs, but our GNN attempts were 5-6x worse.
+- Key concerns raised:
   1. CV-LB intercept (0.0525) is above target (0.0347) - **CRITICAL BLOCKER**
-  2. GNN/ChemBERTa failures may be due to implementation issues or lack of pre-training
-  3. Only 4 submissions remaining - must use wisely
-- How I'm addressing: Pivoting to approaches that CHANGE the CV-LB relationship, not just improve CV.
+  2. Conservative blending cannot be validated with CV - **CONFIRMED**
+  3. GNN failures may be due to implementation issues - **NEEDS INVESTIGATION**
+- How I'm addressing: 
+  - STOP trying approaches that cannot be validated with CV
+  - FOCUS on approaches that can improve BOTH CV and (hopefully) intercept
+  - INVESTIGATE why GNNs failed so badly
+
+## The Validation Paradox (KEY INSIGHT)
+The conservative extrapolation approach (exp_092) revealed a fundamental problem:
+- CV with blending: 0.014120 (70% WORSE than baseline)
+- CV without blending: 0.010097 (22% WORSE than baseline)
+- Baseline: 0.008298
+
+**Why this happens:**
+- CV tests on held-out solvents that are SIMILAR to training solvents
+- The LB tests on TRULY UNSEEN solvents that are fundamentally different
+- Any approach designed to help on truly unseen solvents will HURT CV performance
+- We CANNOT validate intercept-reduction strategies with local CV
+
+**Implication:**
+- With only 4 submissions remaining, we cannot afford to "guess" on unvalidated approaches
+- The only path forward is approaches that improve BOTH CV and (hopefully) intercept
+- This means: pre-trained molecular models, proper GNN architectures, domain constraints
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop92_analysis.ipynb` for CV-LB analysis
+- Reference notebooks: See `exploration/evolver_loop93_analysis.ipynb` for CV-LB analysis
 - Key patterns:
   1. ALL tabular models (MLP, LGBM, XGB, CatBoost, GP, Ridge) fall on the SAME CV-LB line
   2. The intercept (0.0525) represents STRUCTURAL distribution shift between train and test solvents
@@ -31,77 +52,89 @@
 
 ## Recommended Approaches (PRIORITY ORDER)
 
-### 1. CONSERVATIVE PREDICTIONS FOR EXTRAPOLATION (HIGHEST PRIORITY)
-**Rationale**: This directly attacks the intercept problem. If we detect when we're extrapolating and blend toward the training mean, we can reduce the intercept.
+### 1. INVESTIGATE GNN FAILURES (HIGHEST PRIORITY)
+**Rationale**: The benchmark paper achieved MSE 0.0039 using GNNs. Our GNN attempts achieved CV ~0.018-0.026 (5-6x worse). This gap is suspicious.
 
-**Implementation**:
+**Questions to investigate:**
+1. Did the GNN submission cells use the SAME model class as CV computation?
+2. What specific architecture did the benchmark paper use? (GAT with DRFP and learned mixture encodings)
+3. Did we use pre-trained molecular embeddings?
+
+**Action**: Review the GNN experiment notebooks (exp_040, exp_070, exp_079, exp_080, exp_086) and check for model class mismatches.
+
+### 2. TRY PRE-TRAINED MOLECULAR MODELS
+**Rationale**: Pre-trained models have learned chemistry from millions of molecules and may generalize better to unseen solvents.
+
+**Options:**
+- **ChemProp**: Pre-trained on millions of molecules, provides molecular embeddings
+- **MolBERT/ChemBERTa**: Pre-trained molecular transformers
+- Use these as FEATURE EXTRACTORS, not end-to-end models
+
+**Implementation:**
 ```python
-from sklearn.neighbors import NearestNeighbors
+from molfeat.store import ModelStore
+store = ModelStore()
+chemberta = store.get_pretrained("chemberta")
 
-# Compute extrapolation score based on distance to training solvents
-nn = NearestNeighbors(n_neighbors=5).fit(train_solvent_features)
-distances, _ = nn.kneighbors(test_solvent_features)
-extrapolation_score = distances.mean(axis=1)
+# Get embeddings for solvents
+embeddings = chemberta.transform(smiles_list)
 
-# Blend toward training mean for high-uncertainty cases
-threshold = np.percentile(extrapolation_score, 75)  # Tune this
-weight = np.clip(extrapolation_score / threshold, 0, 1)
-final_pred = (1 - weight) * model_pred + weight * train_mean
+# Use embeddings as features for a simple model
+model = LightGBM()
+model.fit(embeddings, targets)
 ```
 
-**Expected impact**: Reduce intercept from 0.0525 to ~0.04-0.045
+### 3. IMPLEMENT PROPER GAT ARCHITECTURE
+**Rationale**: Based on the benchmark paper, the key components are:
+- Graph Attention Networks (GAT) for molecular graphs
+- DRFP features for reaction encoding
+- Learned mixture-aware solvent encodings (not just linear interpolation)
 
-### 2. PROPER GNN WITH PRE-TRAINED EMBEDDINGS
-**Rationale**: Our GNN attempts failed because they were trained from scratch on small data. The benchmark paper likely used pre-trained molecular representations.
-
-**Implementation**:
-- Use ChemBERTa or MolBERT as FROZEN feature extractors
-- Feed embeddings to a simple MLP head
-- This captures chemical knowledge beyond our small dataset
-
-**Key check**: VERIFY submission cells use the SAME model class as CV computation!
-
-### 3. SOLVENT SIMILARITY FEATURES
-**Rationale**: Add features that explicitly measure how similar a test solvent is to training solvents. This helps the model know when to be conservative.
-
-**Implementation**:
+**Implementation:**
 ```python
-# Compute Tanimoto similarity to all training solvents
-from rdkit import Chem, DataStructs
-from rdkit.Chem import AllChem
+import torch
+from torch_geometric.nn import GATConv, global_mean_pool
 
-def compute_similarity_features(test_smiles, train_smiles_list):
-    test_fp = AllChem.GetMorganFingerprintAsBitVect(Chem.MolFromSmiles(test_smiles), 2)
-    similarities = []
-    for train_smiles in train_smiles_list:
-        train_fp = AllChem.GetMorganFingerprintAsBitVect(Chem.MolFromSmiles(train_smiles), 2)
-        similarities.append(DataStructs.TanimotoSimilarity(test_fp, train_fp))
-    return {
-        'max_similarity': max(similarities),
-        'mean_similarity': np.mean(similarities),
-        'min_similarity': min(similarities),
-        'n_similar': sum(s > 0.5 for s in similarities)
-    }
+class MolecularGAT(torch.nn.Module):
+    def __init__(self, in_channels, hidden_channels, out_channels, heads=4):
+        super().__init__()
+        self.conv1 = GATConv(in_channels, hidden_channels, heads=heads)
+        self.conv2 = GATConv(hidden_channels * heads, hidden_channels, heads=heads)
+        self.lin = torch.nn.Linear(hidden_channels * heads, out_channels)
+    
+    def forward(self, x, edge_index, batch):
+        x = F.relu(self.conv1(x, edge_index))
+        x = F.relu(self.conv2(x, edge_index))
+        x = global_mean_pool(x, batch)
+        return self.lin(x)
 ```
 
-### 4. ENSEMBLE WITH UNCERTAINTY WEIGHTING
-**Rationale**: Use ensemble variance as a proxy for uncertainty. High variance → blend toward mean.
+**CRITICAL CHECK**: Verify submission cells use the SAME model class as CV computation!
 
-**Implementation**:
+### 4. DOMAIN CONSTRAINTS (PHYSICS-BASED)
+**Rationale**: Physics-based rules that hold even on unseen data can help reduce extrapolation error.
+
+**Constraints to enforce:**
+- Mass balance: SM + P2 + P3 ≤ 1.0 (with some tolerance for side products)
+- Non-negativity: All yields ≥ 0
+- Thermodynamic consistency: Higher temperature → faster reaction (generally)
+
+**Implementation:**
 ```python
-# Train multiple models with different seeds
-predictions = [model.predict(X_test) for model in models]
-mean_pred = np.mean(predictions, axis=0)
-std_pred = np.std(predictions, axis=0)
-
-# Blend toward training mean when uncertainty is high
-uncertainty_weight = np.clip(std_pred / threshold, 0, 1)
-final_pred = (1 - uncertainty_weight) * mean_pred + uncertainty_weight * train_mean
+def apply_constraints(predictions, train_mean):
+    # Clip to non-negative
+    predictions = np.clip(predictions, 0, 1)
+    
+    # Normalize if sum > 1
+    row_sums = predictions.sum(axis=1, keepdims=True)
+    predictions = np.where(row_sums > 1, predictions / row_sums, predictions)
+    
+    return predictions
 ```
 
 ## What NOT to Try
-- ❌ More MLP/LGBM/XGB variants (92 experiments exhausted this)
-- ❌ More feature engineering without changing the prediction strategy
+- ❌ More MLP/LGBM/XGB variants (93 experiments exhausted this)
+- ❌ More conservative blending variants (cannot be validated with CV)
 - ❌ Multi-seed ensembles for variance reduction (optimization, not pivot)
 - ❌ Experiments that don't address the intercept problem
 - ❌ Submitting experiments worse than CV=0.0083
@@ -117,20 +150,34 @@ Use them wisely:
 1. Only submit if approach fundamentally changes the CV-LB relationship
 2. Verify notebook runs completely before submitting
 3. Check that submission cell model class matches CV model class
+4. Consider submitting exp_049 or exp_050 (CV=0.0081, pending LB) to get more data points
 
-## Key Insight from Ens Model Kernel
-The "Ens Model" kernel (matthewmaree/ens-model) uses:
-1. ALL feature sources combined (spange, acs_pca, drfps, fragprints, smiles)
-2. Correlation-based feature filtering with priority
-3. CatBoost + XGBoost ensemble with different weights for single (7:6) vs full (1:2)
-4. Yield renormalization (clip to 0, normalize sum ≤ 1)
+## Key Insight from Public Kernels
 
-This is worth trying, but it's still a tabular approach and likely falls on the same CV-LB line.
+### MixAll Kernel (lishellliang)
+- Uses **GroupKFold (5 splits)** instead of Leave-One-Out
+- Claims "good CV/LB correlation"
+- Ensemble of MLP + XGBoost + RF + LightGBM
+- Runtime: only 2m 15s
+
+### Ens Model Kernel (matthewmaree)
+- Uses **CatBoost + XGBoost** ensemble
+- Different weights for single (7:6) vs full (1:2)
+- Combines ALL feature sources (spange, acs_pca, drfps, fragprints, smiles)
+- Correlation-based feature filtering with priority
+- Yield renormalization (clip to 0, normalize sum ≤ 1)
 
 ## THE PATH FORWARD
 The target IS reachable, but NOT through tabular model optimization. We need to:
-1. **Reduce the intercept** through conservative predictions for extrapolation
-2. **Change the slope** through better molecular representations (pre-trained embeddings)
-3. **Combine both** for maximum impact
+1. **Investigate GNN failures** - the benchmark paper proves GNNs CAN achieve 0.0039
+2. **Try pre-trained molecular models** - they may generalize better to unseen solvents
+3. **Implement proper GAT architecture** - with mixture-aware encodings
+4. **Apply domain constraints** - physics-based rules that hold even on unseen data
 
 The benchmark paper achieved MSE 0.0039 - this proves the target is achievable. The key is understanding what they did differently (likely pre-trained GNNs with mixture-aware encodings).
+
+## MANDATORY CHECKS BEFORE SUBMITTING ANY EXPERIMENT
+1. CV score must be < 0.0083 (better than best)
+2. Submission cell model class MUST match CV model class
+3. Notebook must run completely without errors
+4. Last 3 cells must follow the official template exactly
