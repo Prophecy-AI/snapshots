@@ -13,11 +13,11 @@
 
 ## Response to Evaluator
 - Technical verdict was **TRUSTWORTHY**. The notebook structure and model class are correct.
-- Evaluator's top priority: **Submit exp_064 to verify submissions work, then pivot to intercept-reducing approaches**. I AGREE - we need to confirm GP+MLP+LGBM still works before pivoting.
+- Evaluator's top priority: **Submit exp_064 to verify submissions work, then pivot to intercept-reducing approaches**. 
+- STRATEGIC DECISION: We have only 5 submissions left. exp_064 is a replication of exp_030 (LB 0.0877). Submitting it would just confirm the same result. Instead, we should PIVOT to fundamentally different approaches that could change the CV-LB relationship, then submit when we have something new.
 - Key concerns raised: 
   1. The intercept problem is UNSOLVABLE with current approach - I AGREE, this is the core issue
   2. CatBoost/XGBoost failure root cause unknown - Valid concern, but we should focus on working approaches
-  3. Experiment ran incomplete - The CV score is from original exp_030 run, which is acceptable
 
 ## Data Understanding
 - Reference notebooks: 
@@ -29,74 +29,67 @@
   3. **8 consecutive CatBoost/XGBoost submissions failed** - Use GP+MLP+LGBM instead
   4. **Benchmark achieved MSE 0.0039** using multi-task GP approach
 
-## Recommended Approaches
+## Recommended Approaches (PRIORITY ORDER)
 
-### IMMEDIATE PRIORITY: Verify Submissions Work
-1. **Submit exp_064** (GP+MLP+LGBM replication) to confirm submissions still work
-   - This uses the same architecture as successful exp_030 (LB 0.0877)
-   - If successful, we have a working baseline to iterate from
-
-### AFTER SUBMISSION WORKS: Pivot to Intercept-Reducing Approaches
-
-**Priority 1: Multi-Task Gaussian Process (MTGP)**
+### Priority 1: Multi-Task Gaussian Process (MTGP) - IMPLEMENT THIS FIRST
 - The benchmark explicitly mentions "imputing any missing values using a multi-task GP"
 - MTGP learns shared covariance across tasks (solvents), enabling better generalization
 - Research shows MTGP can "borrow statistical strength" from related tasks
-- Implementation: Use GPyTorch's MultitaskGaussianLikelihood
-- WHY: This could fundamentally change the CV-LB relationship by learning cross-solvent patterns
+- Implementation using GPyTorch:
+```python
+import gpytorch
+from gpytorch.models import ExactGP
+from gpytorch.likelihoods import MultitaskGaussianLikelihood
+from gpytorch.kernels import RBFKernel, ScaleKernel, IndexKernel
 
-**Priority 2: Uncertainty-Weighted Predictions**
+class MultitaskGPModel(ExactGP):
+    def __init__(self, train_x, train_y, likelihood, num_tasks):
+        super().__init__(train_x, train_y, likelihood)
+        self.mean_module = gpytorch.means.MultitaskMean(
+            gpytorch.means.ConstantMean(), num_tasks=num_tasks
+        )
+        self.covar_module = gpytorch.kernels.MultitaskKernel(
+            ScaleKernel(RBFKernel()), num_tasks=num_tasks, rank=1
+        )
+    
+    def forward(self, x):
+        mean_x = self.mean_module(x)
+        covar_x = self.covar_module(x)
+        return gpytorch.distributions.MultitaskMultivariateNormal(mean_x, covar_x)
+```
+- WHY: This could fundamentally change the CV-LB relationship by learning cross-solvent patterns
+- CRITICAL: Use GP+MLP+LGBM ensemble structure for submission (not CatBoost/XGBoost)
+
+### Priority 2: Uncertainty-Weighted Predictions
 - When GP uncertainty is high (unseen solvent), blend toward population mean
 - This makes predictions more conservative for extrapolation cases
-- Implementation:
-```python
-# Get GP predictions and uncertainty
-mean, var = gp.predict(X_test, return_std=True)
-# Blend toward population mean when uncertain
-uncertainty_weight = np.clip(var / threshold, 0, 1)
-final_pred = (1 - uncertainty_weight) * mean + uncertainty_weight * train_mean
-```
 - WHY: Reduces extreme predictions on unseen solvents, potentially lowering intercept
 
-**Priority 3: Solvent Similarity Features**
+### Priority 3: Solvent Similarity Features
 - Add features measuring distance to training distribution
 - Use Tanimoto similarity to nearest training solvents
-- Implementation:
-```python
-from rdkit import Chem
-from rdkit.Chem import AllChem, DataStructs
-# Compute Morgan fingerprints
-fps_train = [AllChem.GetMorganFingerprintAsBitVect(mol, 2) for mol in train_mols]
-fps_test = [AllChem.GetMorganFingerprintAsBitVect(mol, 2) for mol in test_mols]
-# Compute similarity to nearest training solvent
-similarity = [max(DataStructs.TanimotoSimilarity(fp, fp_train) for fp_train in fps_train) for fp in fps_test]
-```
 - WHY: Model can learn to be conservative when similarity is low
-
-**Priority 4: ReaMVP-style Multi-View Pre-training**
-- Recent research shows 3D geometric information improves generalization
-- Pre-train on molecular structure, then fine-tune on yield prediction
-- WHY: Better molecular representations may generalize better to unseen solvents
 
 ## What NOT to Try
 - ❌ **More MLP/LGBM/XGB/CatBoost variants** - All fall on the same CV-LB line
 - ❌ **Multi-seed ensembles** - We're 152% away from target, optimization is premature
 - ❌ **Hyperparameter tuning** - Won't change the intercept
 - ❌ **CatBoost/XGBoost submissions** - 8 consecutive failures, use GP+MLP+LGBM instead
-- ❌ **Feature engineering alone** - Won't change the fundamental CV-LB relationship
+- ❌ **Submitting exp_064** - It's just a replication of exp_030, save submissions for new approaches
 
 ## Validation Notes
 - CV scheme: Leave-one-solvent-out (24 folds for single, 13 folds for full)
 - The CV-LB gap is ~10x (CV 0.008 → LB 0.088)
 - This gap is STRUCTURAL - caused by distribution shift to unseen solvents
-- The "mixall" kernel uses GroupKFold (5 splits) instead of LOO - may have different relationship
 - After implementing new approaches, ALWAYS check if they fall on the same CV-LB line
+- If new approach has DIFFERENT CV-LB relationship, that's a breakthrough!
+
+## Submission Strategy
+1. **DO NOT** submit exp_064 - it's just a replication, save submissions
+2. Implement multi-task GP and check if it has a DIFFERENT CV-LB relationship
+3. If different: Submit to verify the new relationship
+4. If same: Try uncertainty-weighted predictions or solvent similarity features
+5. Only submit when we have evidence of a fundamentally different approach
 
 ## Key Insight from Research
 Multi-task GPs can "borrow statistical strength" from related tasks (solvents) to improve predictions on unseen tasks. This is exactly what we need - the ability to generalize to unseen solvents by learning shared patterns across all solvents. The benchmark's success (MSE 0.0039) using multi-task GP suggests this is the right direction.
-
-## Submission Strategy
-1. **First**: Submit exp_064 to verify GP+MLP+LGBM still works (expected LB ~0.088)
-2. **Then**: Implement multi-task GP and check if it has a DIFFERENT CV-LB relationship
-3. **If different**: Optimize within the new approach
-4. **If same**: Try uncertainty-weighted predictions or solvent similarity features
