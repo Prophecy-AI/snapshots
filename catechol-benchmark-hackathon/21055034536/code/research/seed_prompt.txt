@@ -1,52 +1,71 @@
 ## Current Status
-- Best CV score: 0.0081 (exp_049/050/053 variants; some LB pending)
-- Best confirmed LB score: 0.0877 (exp_030 and exp_068)
-- Latest experiment: exp_073_AD_shrinkage_template_safe | CV: 0.0091106 | LB: not submitted/unknown
-- Target LB: 0.034700 | Gap to target (best LB): 0.053020
+- Best CV score: **0.0081** (exp_049/050/053 family; LB pending)
+- Best confirmed LB score: **0.0877** (exp_030 / exp_068)
+- Latest experiment: **exp_074 AD_shrinkage_v2_template_safe** | CV **0.008726** | LB not submitted yet
+- Target: **0.034700** | Gap to target (best LB): **+0.053020**
 
 ## CV-LB Relationship Analysis (CRITICAL)
-- Fitted on completed submissions: **LB 										 			 	 	 	 LB 
-  
-  
-  LB 
-**LB 
-  
-  LB**
-- Practical: as evaluator computed: **LB        **: **LB  4.34     CV + 0.0523 (R 0.957)**
-- Interpretation: large structural intercept ~0.052 dominates; we must reduce intercept by OOD-aware test-time behavior.
-- Are all approaches on the same line? **YES**.
+- Fitted on confirmed submissions: **LB ≈ 4.34 × CV + 0.0523** (R² ≈ 0.957)
+- Interpretation: the **~0.052 intercept** is a structural OOD/representation issue; CV-only improvements move along the line.
+- Are all approaches on the same line? **YES (so far)**
+- Goal of next work: **change the relationship** by reducing intercept via shift-aware prediction.
 
-## Response to Evaluator
-- Technical verdict: **CONCERNS**. Agree: template-safe; CV meaningful; internal consistency suppressing performance.
-- Top priority: implement **v2 AD shrinkage** with (1) refit NN/scaler + mu on full fold, (2) hinged shrinkage (alpha~0 for ID), (3) neighbor-based fallback instead of global mean.
-- We will do exactly this.
-- Additional synthesis with new analysis: distance correlates with error strongly for **full/mixtures** but not for **single**, so we should improve single distance features (add kinetics) or disable shrinkage on single.
+## Response to Evaluator (MANDATORY)
+- Technical verdict was **TRUSTWORTHY**. Agree; keep the template’s last-3-cells intact and keep CV/submission model class identical.
+- Evaluator’s top priority: **make full-task AD layer flip-invariant**. **Strongly agree**.
+- Key concern raised: distance + kNN fallback in full mode is **order-dependent** while base model is flip-invariant.
+- New supporting evidence (from our analysis): In `exploration/evolver_loop74_analysis.ipynb`, the full dataset has **13 canonical pairs and each pair appears in only one A/B orientation** (no pair appears in both orientations). Therefore, if the test set uses a different A/B ordering convention for a pair, an order-dependent AD distance/fallback can catastrophically mis-trigger shrinkage. This makes flip-invariant canonicalization a high-leverage fix.
 
 ## Data Understanding
-- See loop66-69 for CV-LB intercept analysis.
-- Loop73 analysis (new):
-  - Full-data blended embedding kNN distance correlates with per-row error (Spearman ~0.27). Top 30% most-distant rows contribute ~43% of full-data MSE.
-  - Single-solvent embedding distance does not correlate positively with error.
+- See `exploration/evolver_loop74_analysis.ipynb`: **full data pairs are one-orientation-only**, with ~28.7% of rows non-canonical (A>B) overall.
+- This implies: **any order-dependent mechanism is brittle under representation shift**.
 
 ## Recommended Approaches (priority order)
-1) **AD Shrinkage v2 (hinged + refit + kNN-mean-y fallback)**
-   - New model class: `GPMLPLGBM_ADShrinkageV2`
-   - Calibrate alpha(d) on inner split, then refit base + NN/scaler on full fold.
-   - Use hinge threshold tau (e.g., q=0.7) so alpha=0 for d<=tau.
-   - Replace global mean fallback with kNN mean of y (per target) in training space.
+### 1) exp_075: Flip-invariant AD distance + kNN fallback (FULL MODE) + LB probe
+**Objective:** keep base predictor unchanged, but make the AD correction layer invariant to A/B ordering.
 
-2) **Distance feature upgrades**
-   - Single: add kinetics to distance vector: [RT, Temp, invT, logRT, invT*logRT] + solvent_embed.
-   - Full: keep blend embedding + add pct, pct*(1-pct), and ||A-B|| in embed space.
+Implementation details (do exactly this):
+1. Copy exp_074 notebook to a new experiment folder: `075_AD_shrinkage_v3_flip_invariant`.
+2. In `GPMLPLGBM_ADShrinkageV2` (or rename to V3), implement a helper:
+   - `canonicalize_full_rows(X):`
+     - read A,B as strings, pct as float
+     - `swap = A > B` (lexicographic)
+     - for swapped rows: swap A/B and set `pct = 1 - pct`
+     - return canonical A,B,pct
+3. Use canonicalization **everywhere distance/fallback touches full data**:
+   - `_dist_features_full(X, ...)` should internally canonicalize A/B/pct BEFORE computing embeddings/blend/diff_norm.
+   - `_groups()` already canonicalizes for full; keep consistent.
+   - Ensure the kNN training matrix is built from **canonicalized features** and the query distances are computed on canonicalized features.
+4. Optional but safe: remove `flip` argument from `_dist_features_full` entirely after canonicalization, to avoid accidental order dependence.
+5. Re-run full template CV (single + full) to get CV score.
+6. **Submit** this experiment (1 of 4 remaining submissions) to test whether LB deviates from the historical line.
 
-3) **Surgical version if needed**
-   - Apply AD only on `data='full'`; keep single as base (alpha=0) to avoid harming single.
+**Hard checks (do not skip):**
+- Verify the model class used in CV is EXACTLY the class instantiated in BOTH submission cells:
+  - `model = GPMLPLGBM_ADShrinkageV3()` and `model = GPMLPLGBM_ADShrinkageV3(data='full')` (or whichever exact class name).
+
+### 2) exp_076 (only if exp_075 doesn’t move LB): add kinetics into full distance gate (controlled)
+**Rationale:** OOD might be driven by unusual T/RT regimes as well as solvent structure.
+- Keep base model unchanged.
+- For distance features only, append: `[Residence Time, Temperature, invT, logRT, invT*logRT]` to the full distance vector.
+- Keep canonicalization in place.
+- Then LB probe (only if we still have enough submissions after exp_075).
+
+### 3) Tighten activation AFTER fixing invariance (no LB probe unless exp_075 improved)
+If CV drops meaningfully or LB doesn’t improve, adjust robustness-cost tradeoff:
+- Increase hinge quantile: `tau_q=0.80` (shrinks only for more extreme OOD)
+- Reduce `alpha_max` from 0.6 → 0.4
 
 ## What NOT to Try
-- More optimization of standard tabular models, multi-seed, sweeps.
-- Global-mean shrinkage without hinge.
+- Any more pure tabular model tuning (MLP/LGBM/XGB/CatBoost/GP weight tweaks, feature selection sweeps, multi-seed ensembles). This won’t fix the intercept.
+- New AD variants that keep order-dependent full distance/fallback.
 
 ## Validation Notes
-- Must keep last 3 template cells unchanged except the model line.
-- Verify submission model class equals CV model class for both single and full.
-- Add debug checks in development: alpha near zero for low distances; alpha activates in tail.
+- Must use template split generators + the template’s last 3 cells unchanged except the `model = ...` line.
+- After LB comes back, update the CV→LB scatter/fit and compare exp_075 against the historical line. We are explicitly hunting for: **same-ish CV but meaningfully better LB** (intercept reduction).
+
+## Execution Plan for This Loop
+1) Build exp_075 (flip-invariant AD)
+2) Run full template CV to log CV
+3) Generate submission.csv
+4) Submit exp_075 for LB feedback
