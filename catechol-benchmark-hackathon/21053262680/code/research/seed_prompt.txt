@@ -23,17 +23,10 @@
 3. GNN implementation issues need root cause analysis
 4. The benchmark paper proves the target IS reachable with the right approach
 
-**Key concerns raised:**
-1. Model class mismatch in GNN notebooks - MUST verify submission cells match CV
-2. 8 submissions failed with evaluation errors - wasted quota
-3. 95 experiments without addressing the fundamental problem
-
 ## Data Understanding
 
 Reference notebooks:
 - `exploration/evolver_loop95_analysis.ipynb` - CV-LB relationship analysis
-- `exploration/evolver_loop87_analysis.ipynb` - Previous CV-LB analysis
-- `exploration/evolver_loop88_analysis.ipynb` - Benchmark paper findings
 
 Key patterns:
 1. **The benchmark paper (arXiv:2512.19530) achieved MSE 0.0039** using:
@@ -47,178 +40,157 @@ Key patterns:
    - Missing DRFP integration with graph representation
    - Missing learned mixture-aware encodings
 
-3. **The CV-LB intercept (0.0528)** represents:
-   - Structural distribution shift between train/test solvents
-   - Test solvents are structurally different from training solvents
-   - Tabular features cannot capture molecular structure for unseen solvents
+## MANDATORY NEXT EXPERIMENT: Proper GNN with GAT + DRFP
 
-## Recommended Approaches (PRIORITY ORDER)
+The benchmark paper achieved MSE 0.0039. We MUST implement this approach correctly:
 
-### MANDATORY PIVOT: Stop all tabular model optimization
+### Architecture Requirements:
+1. **Graph Attention Networks (GAT)** for molecular graph message-passing
+2. **DRFP features** integrated with graph representation
+3. **Learned mixture-aware encodings** for continuous solvent compositions
+4. **Proper node/edge features** from RDKit molecular graphs
 
-### Priority 1: Implement Proper GNN with GAT + DRFP (HIGHEST PRIORITY)
+### Implementation Steps:
+1. Convert SMILES to molecular graphs using RDKit
+2. Create node features (atom type, degree, charge, etc.)
+3. Create edge features (bond type, aromaticity, etc.)
+4. Build GAT layers for message passing
+5. Pool graph representations
+6. Integrate DRFP features
+7. Add reaction condition features (T, RT)
+8. Output 3 targets (Product 2, Product 3, SM)
 
-The benchmark paper achieved MSE 0.0039. We need to replicate this approach:
+### CRITICAL VERIFICATION:
+- **BEFORE running CV**: Note the exact model class name
+- **AFTER CV**: Verify submission cells use the EXACT SAME model class
+- **If mismatch**: FIX submission cells before logging experiment
 
+### Code Template:
 ```python
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch_geometric.nn import GATConv, global_mean_pool
+from torch_geometric.data import Data, Batch
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
-class SolventGNN(nn.Module):
-    def __init__(self, node_dim=64, edge_dim=16, hidden_dim=128, drfp_dim=2048):
+class MoleculeGraph:
+    """Convert SMILES to PyTorch Geometric graph."""
+    
+    ATOM_FEATURES = ['C', 'N', 'O', 'S', 'F', 'Cl', 'Br', 'I', 'P', 'other']
+    
+    @staticmethod
+    def smiles_to_graph(smiles):
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            return None
+        
+        # Node features
+        node_features = []
+        for atom in mol.GetAtoms():
+            features = [
+                atom.GetAtomicNum(),
+                atom.GetDegree(),
+                atom.GetFormalCharge(),
+                atom.GetNumRadicalElectrons(),
+                int(atom.GetHybridization()),
+                int(atom.GetIsAromatic()),
+                atom.GetTotalNumHs(),
+            ]
+            node_features.append(features)
+        
+        # Edge index
+        edge_index = []
+        for bond in mol.GetBonds():
+            i, j = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+            edge_index.extend([[i, j], [j, i]])
+        
+        x = torch.tensor(node_features, dtype=torch.float)
+        edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
+        
+        return Data(x=x, edge_index=edge_index)
+
+class GATModel(nn.Module):
+    """Graph Attention Network for solvent property prediction."""
+    
+    def __init__(self, node_dim=7, hidden_dim=64, drfp_dim=2048, num_heads=4):
         super().__init__()
+        
         # Node embedding
         self.node_embed = nn.Linear(node_dim, hidden_dim)
         
         # GAT layers
-        self.gat1 = GATConv(hidden_dim, hidden_dim, heads=4, concat=False)
-        self.gat2 = GATConv(hidden_dim, hidden_dim, heads=4, concat=False)
+        self.gat1 = GATConv(hidden_dim, hidden_dim, heads=num_heads, concat=False)
+        self.gat2 = GATConv(hidden_dim, hidden_dim, heads=num_heads, concat=False)
         
-        # DRFP integration
+        # DRFP projection (optional, if using DRFP)
         self.drfp_proj = nn.Linear(drfp_dim, hidden_dim)
         
-        # Mixture encoding
-        self.mixture_encoder = nn.Sequential(
-            nn.Linear(hidden_dim * 2 + 1, hidden_dim),  # 2 solvents + %B
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim)
-        )
-        
-        # Output head
+        # Output head (graph_feat + T + RT)
         self.output = nn.Sequential(
-            nn.Linear(hidden_dim + 2, 64),  # + T, RT
+            nn.Linear(hidden_dim + 2, 64),
             nn.ReLU(),
-            nn.Linear(64, 3)  # 3 targets
+            nn.Dropout(0.2),
+            nn.Linear(64, 3)
         )
     
-    def forward(self, data, drfp, T, RT, pct_b=None):
-        # Graph message passing
+    def forward(self, data, T, RT, drfp=None):
+        # Node embedding
         x = self.node_embed(data.x)
+        
+        # GAT message passing
         x = F.relu(self.gat1(x, data.edge_index))
         x = F.relu(self.gat2(x, data.edge_index))
+        
+        # Global pooling
         x = global_mean_pool(x, data.batch)
         
-        # Add DRFP features
-        drfp_feat = self.drfp_proj(drfp)
-        x = x + drfp_feat
-        
-        # Mixture encoding (if applicable)
-        if pct_b is not None:
-            # Handle mixture solvents
-            pass
+        # Add DRFP features if available
+        if drfp is not None:
+            drfp_feat = self.drfp_proj(drfp)
+            x = x + drfp_feat
         
         # Combine with reaction conditions
         x = torch.cat([x, T, RT], dim=1)
+        
         return self.output(x)
-```
 
-**CRITICAL**: Ensure submission cells use the EXACT SAME model class as CV computation!
-
-### Priority 2: Transductive Learning Approach
-
-Use test set structure (without labels) to adapt the model:
-
-```python
-# 1. Train initial model on training data
-# 2. Generate pseudo-labels for test set
-# 3. Retrain with confident pseudo-labels
-# 4. Iterate until convergence
-
-def transductive_training(model, train_X, train_Y, test_X, n_iterations=3):
-    for i in range(n_iterations):
-        # Train on current data
-        model.train_model(train_X, train_Y)
+class GATModelWrapper(BaseModel):
+    """Wrapper for GATModel to match competition template."""
+    
+    def __init__(self, data='single'):
+        self.data_mode = data
+        self.model = None
+        self.graph_cache = {}
         
-        # Generate pseudo-labels
-        pseudo_Y = model.predict(test_X)
-        
-        # Select confident predictions (low variance across ensemble)
-        confidence = compute_confidence(pseudo_Y)
-        confident_mask = confidence > threshold
-        
-        # Add confident pseudo-labels to training
-        train_X = pd.concat([train_X, test_X[confident_mask]])
-        train_Y = pd.concat([train_Y, pseudo_Y[confident_mask]])
+    def train_model(self, train_X, train_Y, device=None, verbose=False):
+        # Implementation here
+        pass
     
-    return model
-```
-
-### Priority 3: Extrapolation Detection + Conservative Predictions
-
-```python
-from sklearn.neighbors import NearestNeighbors
-
-def extrapolation_aware_predict(model, X_train, X_test, train_mean):
-    # Compute distance to training distribution
-    nn = NearestNeighbors(n_neighbors=5).fit(X_train)
-    distances, _ = nn.kneighbors(X_test)
-    extrapolation_score = distances.mean(axis=1)
-    
-    # Get model predictions
-    model_pred = model.predict(X_test)
-    
-    # Blend toward mean for high extrapolation scores
-    threshold = np.percentile(extrapolation_score, 75)
-    weight = np.clip(extrapolation_score / threshold, 0, 1).reshape(-1, 1)
-    
-    # Conservative prediction
-    final_pred = (1 - weight) * model_pred + weight * train_mean
-    
-    return final_pred
+    def predict(self, X):
+        # Implementation here
+        pass
 ```
 
 ## What NOT to Try
 
-1. ❌ **More tabular model variants** (MLP, LGBM, XGB, CatBoost, Ridge, RF)
-   - All fall on the same CV-LB line
-   - 95 experiments have exhausted this approach
-
-2. ❌ **More feature engineering within tabular paradigm**
-   - Spange, DRFP, ACS-PCA, fragprints all tested
-   - Different combinations all tested
-
-3. ❌ **Hyperparameter tuning of existing models**
-   - Won't change the CV-LB intercept
-
-4. ❌ **Multi-seed ensembles or weight optimization**
-   - Gap is 153%, not 1-2%
-   - Optimization is FORBIDDEN until within 2% of target
-
-5. ❌ **Submitting experiments with CV > 0.008298**
-   - Only submit if CV is better than baseline
-   - Or if approach shows promise for changing CV-LB relationship
+1. ❌ **More tabular model variants** - All fall on same CV-LB line
+2. ❌ **More feature engineering within tabular paradigm** - Exhausted
+3. ❌ **Hyperparameter tuning of existing models** - Won't change intercept
+4. ❌ **Multi-seed ensembles** - Gap is 153%, not 1-2%
+5. ❌ **Submitting experiments with CV > 0.008298** - Only submit if better
 
 ## Validation Notes
 
 1. **CV Scheme**: Leave-One-Solvent-Out for single solvent, Leave-One-Ramp-Out for full data
 2. **Model Class Consistency**: ALWAYS verify submission cells use the EXACT model class from CV
-3. **Before submitting**:
-   - Verify notebook runs completely without errors
-   - Check submission.csv format matches expected structure
-   - Verify model class in submission cells matches CV computation
-4. **Only 4 submissions remaining** - use wisely
-
-## Key Insight from Benchmark Paper
-
-The benchmark paper achieved MSE 0.0039 (vs our best 0.0877) by:
-1. Operating on MOLECULAR GRAPHS, not tabular features
-2. Using Graph Attention Networks for message-passing
-3. Integrating DRFP features with graph representation
-4. Learning mixture-aware encodings for continuous solvent compositions
-
-This is a **25x improvement** over tabular ensembles. The path forward is clear:
-**IMPLEMENT A PROPER GNN THAT MATCHES THE BENCHMARK ARCHITECTURE**
-
-## Submission Strategy
-
-With only 4 submissions remaining:
-1. **Only submit if**:
+3. **Only 4 submissions remaining** - use wisely
+4. **Only submit if**:
    - CV is better than 0.008298 (baseline)
-   - OR approach shows promise for changing CV-LB relationship (different slope/intercept)
-2. **Before submitting**:
-   - Verify model class consistency
-   - Verify notebook runs without errors
-3. **Priority**: Get LB feedback on a properly implemented GNN
+   - OR approach shows promise for changing CV-LB relationship
+
+## Key Insight
+
+The benchmark paper achieved MSE 0.0039 (vs our best 0.0877) by operating on MOLECULAR GRAPHS, not tabular features. This is a **25x improvement**. The path forward is clear:
+**IMPLEMENT A PROPER GNN THAT MATCHES THE BENCHMARK ARCHITECTURE**
