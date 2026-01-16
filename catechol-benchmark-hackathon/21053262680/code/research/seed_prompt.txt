@@ -1,104 +1,118 @@
 ## Current Status
-- Best CV score: 0.0081 from exp_049/050/053 (but these FAILED on LB submission!)
-- Best LB score: 0.0877 from exp_030 (GP+MLP+LGBM ensemble)
-- Target: 0.0347 | Gap to target: 0.0530 (152.7%)
+- Best CV score: 0.0081 from exp_049/exp_050/exp_053 (Leave-One-Out validation)
+- Best LB score: 0.0877 from exp_030
+- Target: 0.0347 | Gap to target: 152.7%
 
 ## CV-LB Relationship Analysis (CRITICAL)
 - Linear fit: LB = 4.31 × CV + 0.0525 (R² = 0.95)
 - Intercept interpretation: Even at CV=0, expected LB is 0.0525
-- Are all approaches on the same line? **YES** - R²=0.95 confirms tight linear relationship
-- Required CV for target: (0.0347 - 0.0525) / 4.31 = **-0.0041 (IMPOSSIBLE)**
+- Are all approaches on the same line? **YES** (all 12 valid submissions)
+- **CRITICAL**: Intercept (0.0525) > Target (0.0347)
+- Required CV for target: (0.0347 - 0.0525) / 4.31 = -0.0041 (IMPOSSIBLE)
 
-**CRITICAL FINDING**: The intercept (0.0525) is HIGHER than the target (0.0347). This means:
-1. No amount of CV improvement can reach the target with current approaches
-2. We need to CHANGE THE CV-LB RELATIONSHIP, not just improve CV
-3. All 101 experiments fall on the same line - tabular optimization is exhausted
+**This is a DISTRIBUTION SHIFT problem, not a model optimization problem.**
 
 ## Response to Evaluator
-
-**Technical verdict was TRUSTWORTHY** - The ens-model replication was correctly implemented.
-
-**Evaluator's top priority**: Exactly replicate the mixall kernel with GroupKFold validation.
-- **I AGREE** - This is the most promising unexplored approach
-- The mixall kernel uses GroupKFold (5 splits) instead of Leave-One-Out (24 folds)
-- This is a FUNDAMENTALLY DIFFERENT validation scheme
-
-**CRITICAL NEW FINDING**: Many submissions with best CV (exp_049, 050, 053) FAILED with "Evaluation metric raised an unexpected error". This suggests:
-1. The submission format may be incorrect
-2. We need to be VERY careful about submission cell structure
-3. The mixall kernel's submission cells may have the correct format
+- Technical verdict was **TRUSTWORTHY**. The exp_101 implementation is correct.
+- Evaluator's top priority: **SUBMIT exp_101 to check CV-LB relationship**. I AGREE.
+- Key concerns raised: 
+  1. Negative predictions should be clipped to [0, 1] - Valid, should fix
+  2. Weight difference from mixall [0.25 vs 0.4] - Minor, unlikely critical
+  3. SolventB% scaling difference - Should verify
+- The evaluator correctly identifies that we need to test if GroupKFold validation gives a different CV-LB relationship.
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop101_analysis.ipynb` for CV-LB analysis
+- Reference notebooks: See `exploration/evolver_loop102_analysis.ipynb` for CV-LB analysis
 - Key patterns:
-  - All tabular models (MLP, LGBM, XGB, CatBoost, GP, Ridge) fall on same CV-LB line
-  - GNN/ChemBERTa approaches have WORSE CV (0.018-0.045) than tabular (0.0081)
-  - The intercept problem is structural - it's distribution shift to unseen solvents
-  - Many best CV experiments FAILED on submission - format issues
+  1. ALL tabular models (MLP, LGBM, XGB, CatBoost, RF, GP, Ridge) fall on SAME CV-LB line
+  2. GNN and ChemBERTa attempts had higher CV (>0.014) and didn't break the line
+  3. The intercept (0.0525) represents STRUCTURAL extrapolation error
+  4. GroupKFold (5 splits) vs Leave-One-Out (24 folds) is a fundamentally different validation scheme
 
 ## Recommended Approaches
 
-### PRIORITY 1: Exact Mixall Kernel Replication with CORRECT Submission Format
-The mixall kernel uses a fundamentally different approach. COPY IT EXACTLY including:
+### IMMEDIATE: Submit exp_101 to check GroupKFold CV-LB relationship
+- exp_101 has CV=0.014193 with GroupKFold (5 splits)
+- If LB follows same line: Expected LB ≈ 0.114
+- If LB < 0.10: GroupKFold might have different CV-LB relationship
+- This is our best remaining hypothesis for breaking the intercept barrier
 
-1. **GroupKFold validation** (5 splits instead of Leave-One-Out):
+### PRIORITY 1: Physics-Informed Constraints (if GroupKFold doesn't help)
+Based on web research, physics-informed approaches can improve OOD generalization:
+1. **Yield sum constraint**: P2 + P3 + SM ≤ 1 (mass balance)
+2. **Non-negativity constraint**: All yields ≥ 0
+3. **Arrhenius temperature dependence**: k = A × exp(-Ea/RT)
+4. **Implement as soft loss terms**: Add penalty for constraint violations
+
 ```python
-from sklearn.model_selection import GroupKFold
-
-def generate_leave_one_out_splits(X, Y):
-    groups = X["SOLVENT NAME"]
-    n_splits = min(5, len(groups.unique()))
-    gkf = GroupKFold(n_splits=n_splits)
-    for train_idx, test_idx in gkf.split(X, Y, groups):
-        yield ((X.iloc[train_idx], Y.iloc[train_idx]),
-               (X.iloc[test_idx], Y.iloc[test_idx]))
+# Physics-informed loss
+def physics_loss(pred, target):
+    mse = F.mse_loss(pred, target)
+    # Yield sum constraint
+    sum_penalty = F.relu(pred.sum(dim=1) - 1.0).mean()
+    # Non-negativity (already handled by clipping, but add soft penalty)
+    neg_penalty = F.relu(-pred).mean()
+    return mse + 0.1 * sum_penalty + 0.1 * neg_penalty
 ```
 
-2. **EnsembleModel** with MLP + XGBoost + RandomForest + LightGBM
+### PRIORITY 2: Bayesian/Uncertainty-Weighted Predictions
+From research on Bayesian CRNN and uncertainty quantification:
+1. Train ensemble with dropout for uncertainty estimation
+2. For high-uncertainty predictions, blend toward training mean
+3. Use MC Dropout at test time to estimate prediction variance
 
-3. **EXACT submission cell structure** - copy from mixall kernel exactly
+```python
+# Uncertainty-weighted prediction
+def predict_with_uncertainty(model, X, n_samples=20):
+    model.train()  # Enable dropout
+    preds = [model(X) for _ in range(n_samples)]
+    mean_pred = torch.stack(preds).mean(dim=0)
+    std_pred = torch.stack(preds).std(dim=0)
+    
+    # Blend toward training mean for high uncertainty
+    train_mean = torch.tensor([0.3, 0.3, 0.4])  # Approximate
+    weight = torch.clamp(std_pred / 0.1, 0, 1)
+    final_pred = (1 - weight) * mean_pred + weight * train_mean
+    return final_pred
+```
 
-### PRIORITY 2: Understand Why Best CV Experiments Failed
-exp_049, 050, 053 all had CV=0.0081 but failed on LB with "Evaluation metric raised an unexpected error". Investigate:
-- What was different about their submission format?
-- Compare to exp_030 (CV=0.0083, LB=0.0877) which succeeded
+### PRIORITY 3: Reaction-Condition Contrastive Learning
+From research on Egret model:
+1. Pre-train with contrastive learning on reaction conditions
+2. Pull together reactions with similar temperature/time
+3. Push apart reactions with different conditions
+4. This aligns latent space with physical invariants
 
-### PRIORITY 3: If Mixall Doesn't Work, Try Domain-Specific Approaches
-- Physics-informed constraints (yields must sum to ≤1)
-- Uncertainty-weighted predictions for extrapolation
-- Pseudo-labeling with confident predictions
+### PRIORITY 4: Data Augmentation for Yield Prediction
+From Schwaller et al. (2020):
+1. Generate synthetic reactions by varying conditions
+2. Ensure augmented examples obey mass-action and Arrhenius relations
+3. Use test-time augmentation for uncertainty estimates
 
 ## What NOT to Try
-
-1. **More tabular model variants** - 101 experiments confirm they all fall on the same CV-LB line
-2. **GNN from scratch** - All attempts had CV > 0.018 (worse than tabular)
-3. **ChemBERTa variants** - All attempts had CV > 0.014 (worse than tabular)
-4. **Conservative blending** - exp_099 showed it hurts CV
-5. **Multi-seed optimization** - We're 152% from target, optimization is premature
+- ❌ More MLP/LGBM/XGB/CatBoost variants (all on same CV-LB line)
+- ❌ GNN from scratch (all attempts had CV > 0.018)
+- ❌ ChemBERTa variants (all attempts had CV > 0.014)
+- ❌ Multi-seed optimization (we're 152% from target)
+- ❌ Hyperparameter tuning within current approaches
 
 ## Validation Notes
+- Current: Leave-One-Out (24 folds for single, 13 for full)
+- Alternative: GroupKFold (5 splits) - being tested in exp_101
+- CV-LB gap is STRUCTURAL - no amount of CV improvement can reach target
+- Need approaches that CHANGE the CV-LB relationship, not improve CV
 
-- Current CV scheme: Leave-One-Out for single solvent (24 folds), Leave-One-Ramp-Out for full data (13 folds)
-- mixall uses: GroupKFold (5 splits) for both
-- The CV-LB relationship is tight (R²=0.95) - CV is a good predictor of LB
-- The intercept (0.0525) is the structural problem - it represents distribution shift
+## Submission Strategy (4 remaining)
+1. **SUBMIT exp_101** - Check if GroupKFold has different CV-LB relationship
+2. If GroupKFold helps: Optimize within that framework
+3. If GroupKFold doesn't help: Try physics-informed constraints
+4. Save 1-2 submissions for final ensemble
 
-## CRITICAL: Submission Format Requirements
+## Key Insight from Research
+The web search confirms that OOD generalization in chemical reaction prediction is a fundamental challenge. The key strategies are:
+1. **Physics-informed constraints** - Embed kinetic laws as loss terms
+2. **Contrastive learning** - Align representations with physical invariants
+3. **Data augmentation** - Generate physics-consistent synthetic data
+4. **Uncertainty quantification** - Conservative predictions for OOD samples
 
-The competition requires the last 3 cells to follow the template EXACTLY:
-1. Third-to-last cell: Single solvent CV loop with `model = YourModel(data='single')`
-2. Second-to-last cell: Full data CV loop with `model = YourModel(data='full')`
-3. Last cell: Concatenate and save submission.csv
-
-**VERIFY BEFORE SUBMITTING**:
-- Model class in submission cells MUST match CV computation
-- Submission cells MUST follow template structure exactly
-- Test that notebook runs completely without errors
-
-## Experiment Priorities
-
-1. **Exact mixall replication** with GroupKFold validation AND correct submission format
-2. **Compare exp_030 (succeeded) vs exp_049 (failed)** to understand format issues
-3. **If mixall works, submit to check CV-LB relationship**
-
-DO NOT give up. The target IS reachable. The mixall approach with correct submission format is the most promising direction.
+The target IS reachable - the benchmark paper achieved MSE 0.0039. We need to find the approach that changes the CV-LB relationship.
