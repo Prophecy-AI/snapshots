@@ -1,16 +1,17 @@
 ## What I Understood
 
-The junior researcher implemented Experiment 088: ChemBERTa Pre-trained Molecular Embeddings, following my previous recommendation to try pre-trained molecular representations. The hypothesis was that ChemBERTa (pre-trained on 77M molecules from PubChem) would capture molecular knowledge that generalizes to unseen solvents, potentially reducing the CV-LB intercept.
+The junior researcher implemented Experiment 089: Uncertainty-Weighted Predictions, following my previous recommendation to address the CV-LB intercept problem. The hypothesis was that using GP uncertainty to blend CatBoost predictions toward the population mean when extrapolating would reduce the intercept (extrapolation error) that has been the bottleneck.
 
 **Approach:**
-1. Used ChemBERTa (seyonec/ChemBERTa-zinc-base-v1) to extract 768-dim embeddings for each solvent SMILES
-2. Trained simple MLP on ChemBERTa embeddings + Temperature + Residence Time
-3. 300 epochs with cosine annealing LR scheduler
+1. Train GP model on simple features (Spange + Arrhenius kinetics) to get uncertainty estimates
+2. Train CatBoost on full features (Spange + DRFP + ACS PCA + Fragprints + Arrhenius) for best predictions
+3. When GP uncertainty is high, blend prediction toward population mean using: `final = (1 - blend_weight) * catboost_pred + blend_weight * population_mean`
+4. blend_strength parameter set to 0.3
 
 **Results:**
-- Single solvent CV: 0.034691 (VERY POOR - 3.3x worse than best)
-- Full data CV: 0.013002 (reasonable)
-- Overall CV: 0.020558 (154% WORSE than best tabular at 0.008092)
+- Single solvent CV: 0.014987 (44% worse than best 0.010429)
+- Full data CV: 0.016471 (65% worse than best 0.009972)
+- Overall CV: 0.015954 (97% WORSE than best 0.008092)
 
 ## Technical Execution Assessment
 
@@ -18,23 +19,24 @@ The junior researcher implemented Experiment 088: ChemBERTa Pre-trained Molecula
 - Uses official Leave-One-Out CV functions (unmodified)
 - Proper train/test splits with no data leakage
 - Models trained fresh per fold
-- Correct template structure maintained
+- Correct template structure maintained (last 3 cells unchanged)
 
 **Leakage Risk**: None detected ✓
-- ChemBERTa embeddings are computed deterministically from SMILES
-- No target information leaks into features
+- GP uncertainty computed only on training data
+- Population mean computed from training targets only
 - Scalers fitted per fold
+- No target information leaks into features
 
 **Score Integrity**: VERIFIED ✓
-- CV scores match execution output (0.034691 single, 0.013002 full)
-- Submission file has correct format (1883 rows)
-- Predictions in valid range [0.0000, 0.9961]
+- CV scores match execution output (0.014987 single, 0.016471 full, 0.015954 overall)
+- Submission file generated correctly (1883 rows)
+- Predictions in valid range [0.0, 1.0]
 
 **Code Quality**: GOOD ✓
-- Clean implementation using HuggingFace transformers
-- Proper ChemBERTa embedding extraction (CLS token pooling)
-- Mixture handling via weighted average of embeddings
+- Clean implementation with proper GP + CatBoost combination
+- Correct uncertainty-based blending logic
 - 300 epochs with cosine annealing LR scheduler
+- Proper handling of mixed solvents
 
 Verdict: **TRUSTWORTHY** - The implementation is correct, but the approach performed poorly.
 
@@ -42,30 +44,14 @@ Verdict: **TRUSTWORTHY** - The implementation is correct, but the approach perfo
 
 ### Approach Fit
 
-The ChemBERTa experiment was a reasonable hypothesis based on my previous feedback. However, the results reveal a critical insight:
+The uncertainty-weighted approach was a reasonable hypothesis based on my previous feedback about the intercept problem. However, the results reveal a critical insight:
 
-**Why ChemBERTa Failed:**
-1. **Generic vs. Task-Specific Embeddings**: ChemBERTa was pre-trained on molecular SMILES for general molecular property prediction, NOT for solvent-reaction yield prediction. The embeddings don't capture the specific solvent-reaction relationships needed.
+**Why Uncertainty Blending Failed:**
+1. **GP uncertainty doesn't correlate with actual prediction error**: The GP uncertainty is based on distance in feature space, but the actual prediction error depends on how "different" the test solvent is chemically, not just numerically.
 
-2. **Single Solvent Performance is Catastrophic**: CV=0.034691 is 3.3x worse than best tabular (0.010429). This suggests ChemBERTa embeddings are actively HURTING single-solvent predictions.
+2. **Blending toward mean HURTS performance**: The population mean is a poor prediction for most samples. Blending toward it when uncertain actually increases error, not decreases it.
 
-3. **Full Data Performance is Reasonable**: CV=0.013002 is only 1.3x worse than best tabular (0.009972). The mixture handling (weighted average of embeddings) works somewhat.
-
-4. **The Benchmark's Success Came from Different Approach**: The GNN benchmark (arXiv:2512.19530) that achieved 0.0039 CV used:
-   - Task-specific pre-training on reaction data
-   - Graph neural networks with attention mechanisms
-   - DRFP (Differential Reaction Fingerprints) that encode reaction-specific information
-   - NOT generic molecular embeddings
-
-### Effort Allocation
-
-The team has now spent **4 experiments on neural network approaches** with diminishing returns:
-- exp_085 GCN: CV=0.02013
-- exp_086 GAT: CV=0.018474 (8.2% better than GCN)
-- exp_087 DRFP+GAT: CV=0.019437 (5.2% WORSE than GAT)
-- exp_088 ChemBERTa: CV=0.020558 (11.3% WORSE than GAT)
-
-**All neural network approaches are 2-2.5x WORSE than best tabular (0.008092).**
+3. **The intercept problem is NOT about uncertainty**: The intercept (0.052) represents systematic extrapolation error to unseen solvents. This is a DISTRIBUTION SHIFT problem, not an uncertainty problem.
 
 ### CV-LB Relationship Analysis (CRITICAL)
 
@@ -81,108 +67,143 @@ R² = 0.9573 (very strong linear relationship)
 - **The intercept ALONE (0.0523) exceeds the target (0.0347)!**
 - To achieve LB=0.0347, we'd need CV = (0.0347 - 0.0523) / 4.34 = **-0.004** (impossible)
 
-**ChemBERTa Predicted LB:**
+**Current experiment predicted LB:**
 ```
-LB = 4.34 * 0.020558 + 0.0523 = 0.142
+LB = 4.34 * 0.015954 + 0.0523 = 0.1215
 ```
-This would be **62% WORSE** than the best LB (0.0877).
+This would be **38% WORSE** than the best LB (0.0877).
 
-### Assumptions Being Challenged
+### Effort Allocation
 
-1. **Assumption**: Pre-trained molecular embeddings will generalize to unseen solvents
-   - **Reality**: Generic molecular embeddings (ChemBERTa) don't capture task-specific solvent-reaction relationships
+The team has now spent **5 experiments on neural network/advanced approaches** with poor results:
+- exp_085 GCN: CV=0.02013 (149% worse than best)
+- exp_086 GAT: CV=0.018474 (128% worse than best)
+- exp_087 DRFP+GAT: CV=0.019437 (140% worse than best)
+- exp_088 ChemBERTa: CV=0.020558 (154% worse than best)
+- exp_089 Uncertainty-Weighted: CV=0.015954 (97% worse than best)
 
-2. **Assumption**: More sophisticated representations will improve performance
-   - **Reality**: Simple tabular features (Spange descriptors + Arrhenius kinetics) outperform all neural approaches
-
-3. **Assumption**: The benchmark's success can be replicated with similar techniques
-   - **Reality**: The benchmark likely used task-specific pre-training, not generic molecular embeddings
+**All advanced approaches are 2-2.5x WORSE than best tabular (0.008092).**
 
 ### Blind Spots
 
-1. **Task-Specific Pre-training is Missing**: The benchmark's success came from pre-training on REACTION data, not just molecular data. ChemBERTa was pre-trained on molecules, not reactions.
+1. **The "mixall" kernel uses GroupKFold instead of Leave-One-Out**: I noticed in `/home/code/research/kernels/lishellliang_mixall-runtime-is-only-2m-15s-but-good-cv-lb/` that this kernel uses GroupKFold (5 splits) instead of Leave-One-Out CV. This is a DIFFERENT validation strategy that might have a different CV-LB relationship. This hasn't been explored!
 
-2. **The Intercept Problem Remains Unsolved**: 88+ experiments, all falling on the same CV-LB line. No approach has reduced the intercept (0.0523).
+2. **The "ens-model" kernel uses correlation-based feature filtering**: The kernel at `/home/code/research/kernels/matthewmaree_ens-model/` uses:
+   - Correlation-based feature filtering (threshold=0.90)
+   - Different ensemble weights for single vs full data (7:6 for single, 1:2 for full)
+   - Clipping and renormalization of predictions
+   
+   These techniques haven't been fully explored!
 
-3. **Tabular Methods Still Win**: Despite 4 neural network experiments, the best approach remains CatBoost+XGBoost (CV=0.008092).
+3. **The intercept problem remains unsolved**: 89+ experiments, all falling on the same CV-LB line. No approach has reduced the intercept (0.0523).
+
+### Assumptions Being Challenged
+
+1. **Assumption**: GP uncertainty correlates with actual prediction error
+   - **Reality**: GP uncertainty is based on feature-space distance, not chemical similarity
+
+2. **Assumption**: Blending toward mean when uncertain reduces error
+   - **Reality**: The population mean is a poor prediction; blending toward it increases error
+
+3. **Assumption**: The intercept can be reduced by being more conservative
+   - **Reality**: The intercept represents systematic distribution shift, not random uncertainty
 
 ## What's Working
 
-1. **Technical execution is solid**: The ChemBERTa code is correct and trustworthy
-2. **The team correctly identified pre-training as a potential solution**: The hypothesis was sound
-3. **Best tabular model (CV=0.008092) remains the strongest**: exp_049/050 with CatBoost+XGBoost
-4. **Best LB (0.0877) achieved with GP+MLP+LGBM ensemble**: exp_030, exp_067
+1. **Technical execution is solid**: The code is correct and trustworthy
+2. **Best tabular model (CV=0.008092) remains the strongest**: exp_049/050 with CatBoost+XGBoost
+3. **Best LB (0.0877) achieved with GP+MLP+LGBM ensemble**: exp_030, exp_067
+4. **The CV-LB relationship is well-characterized**: LB = 4.34*CV + 0.052, R²=0.96
 
 ## Key Concerns
 
-### CRITICAL: DO NOT SUBMIT THE ChemBERTa EXPERIMENT
+### CRITICAL: DO NOT SUBMIT exp_089
 
-**Observation**: CV=0.020558 is 154% worse than best CV (0.008092)
+**Observation**: CV=0.015954 is 97% worse than best CV (0.008092)
 
 **Why it matters**: The predicted LB using the CV-LB relationship is:
 ```
-LB = 4.34 * 0.020558 + 0.0523 = 0.142
+LB = 4.34 * 0.015954 + 0.0523 = 0.1215
 ```
-This would be **62% WORSE** than our best LB (0.0877). With only 4 submissions remaining, this would be a waste.
+This would be **38% WORSE** than our best LB (0.0877). With only 4 submissions remaining, this would be a waste.
 
-**Suggestion**: Do NOT submit exp_088. Save submissions for approaches that have a chance of improving.
+**Suggestion**: Do NOT submit exp_089. Save submissions for approaches that have a chance of improving.
 
-### HIGH PRIORITY: Neural Network Approaches Without Task-Specific Pre-training are Dead Ends
+### HIGH PRIORITY: The Intercept Problem Requires a Different Strategy
 
-**Observation**: Four neural network experiments (GCN, GAT, DRFP+GAT, ChemBERTa) have all underperformed tabular methods by 2-2.5x.
-
-**Why it matters**: The benchmark achieved 0.0039 CV, but our best neural network achieved 0.018474 - a 4.7x gap. Training from scratch or using generic pre-trained embeddings is insufficient.
-
-**Suggestions**:
-1. **STOP further neural network experiments without task-specific pre-training** - they consistently underperform
-2. If pursuing neural approaches, need REACTION-level pre-training (e.g., ReactionT5, Rxnfp)
-3. Consider fine-tuning on similar reaction yield datasets before this task
-
-### MEDIUM PRIORITY: The Intercept Problem Remains Unsolved
-
-**Observation**: The intercept (0.0523) > target (0.0347). All 88+ experiments fall on the same CV-LB line.
+**Observation**: The intercept (0.0523) > target (0.0347). All 89+ experiments fall on the same CV-LB line.
 
 **Why it matters**: No amount of CV optimization can reach the target. The intercept represents extrapolation error to unseen solvents that no model architecture has been able to reduce.
 
-**Suggestions**:
-1. **Uncertainty-weighted predictions**: Use GP uncertainty to blend toward population mean when extrapolating
-2. **Physics-informed constraints**: Arrhenius kinetics constraints that hold for ALL solvents
-3. **Domain adaptation**: Adversarial training to make representations invariant to solvent identity
-4. **Conservative predictions for outlier solvents**: Water, extreme polarity solvents need special handling
+**Suggestions for reducing the intercept (not just improving CV):**
+
+1. **Study the "mixall" kernel's GroupKFold approach**: This kernel uses GroupKFold (5 splits) instead of Leave-One-Out CV. This might have a different CV-LB relationship because:
+   - GroupKFold trains on more data per fold (80% vs ~96%)
+   - The model sees more diverse solvents during training
+   - This might better simulate the test distribution
+
+2. **Study the "ens-model" kernel's techniques**:
+   - Correlation-based feature filtering (threshold=0.90) to remove redundant features
+   - Different ensemble weights for single vs full data (7:6 for single, 1:2 for full)
+   - Clipping and renormalization of predictions
+
+3. **Try domain adaptation techniques**:
+   - Adversarial training to make representations invariant to solvent identity
+   - Meta-learning to learn how to adapt to new solvents
+   - Transfer learning from similar chemical prediction tasks
+
+4. **Try physics-informed constraints**:
+   - Arrhenius kinetics constraints that hold for ALL solvents
+   - Solvent polarity/dielectric constraints
+   - Conservation laws (yields must sum to ≤1)
+
+### MEDIUM PRIORITY: Neural Network Approaches Without Task-Specific Pre-training are Dead Ends
+
+**Observation**: Five neural network experiments (GCN, GAT, DRFP+GAT, ChemBERTa, Uncertainty-Weighted) have all underperformed tabular methods by 2-2.5x.
+
+**Why it matters**: Training from scratch or using generic pre-trained embeddings is insufficient for this small dataset (656 single solvent samples).
+
+**Suggestion**: STOP further neural network experiments without task-specific pre-training. The benchmark that achieved 0.0039 CV must have used pre-training on large reaction datasets, which we cannot replicate.
 
 ## Top Priority for Next Experiment
 
-### DO NOT SUBMIT exp_088_chemberta
+### DO NOT SUBMIT exp_089_uncertainty_weighted
 
-The ChemBERTa experiment achieved CV=0.020558, which would predict LB≈0.142 - much worse than our best (0.0877). With only 4 submissions remaining, this would be a waste.
+The uncertainty-weighted experiment achieved CV=0.015954, which would predict LB≈0.1215 - much worse than our best (0.0877). With only 4 submissions remaining, this would be a waste.
 
 ### RECOMMENDED NEXT STEPS (in order of priority):
 
-1. **STOP neural network experiments**: Four experiments have shown that without task-specific pre-training, neural networks underperform tabular methods. The benchmark's success came from REACTION-level pre-training, not molecular embeddings.
+1. **Study and implement techniques from top public kernels**:
+   - The "mixall" kernel uses GroupKFold (5 splits) instead of Leave-One-Out CV
+   - The "ens-model" kernel uses correlation-based feature filtering and different ensemble weights
+   - These techniques haven't been fully explored and might change the CV-LB relationship
 
-2. **Focus on the INTERCEPT problem**: The intercept (0.0523) is the bottleneck. Strategies that might help:
-   - **Uncertainty-weighted predictions**: Use GP uncertainty to blend toward population mean when extrapolating
-   - **Conservative predictions for outlier solvents**: Water, extreme polarity solvents have highest error
-   - **Per-solvent error analysis**: Identify which solvents have highest CV error and handle them differently
+2. **Try correlation-based feature filtering**:
+   - The ens-model kernel filters features with |corr| > 0.90
+   - This removes redundant features that might be causing overfitting
+   - Prioritizes Spange > ACS > DRFP > Fragprints features
 
-3. **Try REACTION-level pre-training if pursuing neural approaches**:
-   - ReactionT5 (pre-trained on Open Reaction Database)
-   - Rxnfp (reaction fingerprints)
-   - These encode REACTION information, not just molecular structure
+3. **Try different ensemble weights for single vs full data**:
+   - The ens-model kernel uses 7:6 (CatBoost:XGBoost) for single data
+   - And 1:2 (CatBoost:XGBoost) for full data
+   - This might better handle the different data distributions
 
-4. **Submit best CV model if not already submitted successfully**: exp_049/exp_050 (CV=0.008092) had submission errors. If the submission format can be fixed, this should be submitted. Predicted LB = 0.0874.
+4. **Submit best CV model if not already submitted successfully**:
+   - exp_049/exp_050 (CV=0.008092) had submission errors
+   - If the submission format can be fixed, this should be submitted
+   - Predicted LB = 0.0874 (close to best 0.0877)
 
 ### THE TARGET IS REACHABLE
 
-The GNN benchmark achieved 0.0039 CV, proving the target IS reachable. The key insight is that the benchmark used:
-- **Task-specific pre-training on REACTION data** (not just molecular data)
-- Graph neural networks with attention mechanisms
-- DRFP (Differential Reaction Fingerprints) that encode reaction-specific information
+The target (0.0347) IS reachable - top competitors have achieved it. The key insight is that:
+1. The CV-LB relationship (intercept=0.052) suggests we need to CHANGE the relationship, not just improve CV
+2. Top kernels use different validation strategies (GroupKFold) and feature filtering
+3. The intercept might be reducible by studying what top competitors do differently
 
-**DO NOT GIVE UP.** The target is achievable - the benchmark proves it. But the team needs to:
+**DO NOT GIVE UP.** The target is achievable. But the team needs to:
 1. STOP generic neural network experiments
-2. Focus on reducing the intercept (distribution shift problem)
-3. If pursuing neural approaches, use REACTION-level pre-training
+2. Study and implement techniques from top public kernels
+3. Focus on changing the CV-LB relationship, not just improving CV
 
 ---
 
@@ -191,25 +212,25 @@ The GNN benchmark achieved 0.0039 CV, proving the target IS reachable. The key i
 | Dimension | Assessment |
 |-----------|------------|
 | Technical Execution | ✅ TRUSTWORTHY |
-| CV Performance | ❌ 154% WORSE than best (0.020558 vs 0.008092) |
-| Strategic Direction | ⚠️ Generic pre-trained embeddings don't work |
-| Predicted LB | 0.142 (62% worse than best 0.0877) |
+| CV Performance | ❌ 97% WORSE than best (0.015954 vs 0.008092) |
+| Strategic Direction | ⚠️ Uncertainty blending doesn't work |
+| Predicted LB | 0.1215 (38% worse than best 0.0877) |
 | Recommendation | **DO NOT SUBMIT** |
 
 ## Confidence Levels
 
-- **Very High (99%)**: The ChemBERTa experiment should NOT be submitted
-- **Very High (99%)**: Generic molecular embeddings (ChemBERTa) don't capture task-specific solvent-reaction relationships
+- **Very High (99%)**: The exp_089 experiment should NOT be submitted
+- **Very High (99%)**: GP uncertainty doesn't correlate with actual prediction error for this task
 - **Very High (99%)**: The CV-LB relationship is LB ≈ 4.34*CV + 0.052
 - **Very High (99%)**: Standard CV optimization cannot reach the target (intercept > target)
-- **High (95%)**: Neural networks without task-specific pre-training will continue to underperform tabular methods
-- **High (90%)**: REACTION-level pre-training (ReactionT5, Rxnfp) is the key missing ingredient
-- **Very High (99%)**: The target IS reachable (GNN benchmark achieved 0.0039)
+- **High (95%)**: The "mixall" kernel's GroupKFold approach is worth investigating
+- **High (90%)**: Correlation-based feature filtering might help reduce overfitting
+- **Very High (99%)**: The target IS reachable (top competitors have achieved it)
 
 ## CRITICAL REMINDER
 
 With only **4 submissions remaining**, every submission must count. Do NOT submit experiments with CV worse than the best (0.008092) unless there's strong evidence they will change the CV-LB relationship.
 
-The neural network direction was correct in principle, but the implementation needs REACTION-level pre-training to work. Generic molecular embeddings (ChemBERTa) don't capture the specific solvent-reaction relationships needed for this task.
+The uncertainty-weighted approach was a reasonable hypothesis, but it didn't work. The intercept problem requires a fundamentally different strategy - studying what top public kernels do differently.
 
 **The target is achievable. Don't give up!**
