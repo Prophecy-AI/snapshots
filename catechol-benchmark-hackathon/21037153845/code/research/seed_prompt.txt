@@ -1,14 +1,14 @@
 ## Current Status
-- Best CV score: 0.007944 from exp_067 (Data-Type-Specific Features)
+- Best CV score: 0.007938 from exp_068 (GP + MLP + LGBM with Multi-Target Normalization)
 - Best LB score: 0.0877 from exp_030
-- Target: 0.0347 | Gap to target: 0.0530 (60.5% reduction needed)
+- Target: 0.0347 | Gap to target: 0.0530 (60.4% reduction needed)
 
 ## CV-LB Relationship Analysis (CRITICAL)
 - Linear fit: LB = 4.23 × CV + 0.0533 (R² = 0.98)
 - Intercept interpretation: Even at CV=0, expected LB is 0.0533
 - **CRITICAL**: Intercept (0.0533) > Target (0.0347)
-- Required CV to hit target: NEGATIVE (mathematically impossible)
-- **All 67 experiments fall on the same CV-LB line**
+- Required CV to hit target: NEGATIVE (mathematically impossible with current approach)
+- **All 68 experiments fall on the same CV-LB line**
 - **We MUST change the CV-LB relationship, not just improve CV**
 
 ## Response to Evaluator
@@ -17,23 +17,33 @@
 - Key concerns raised:
   1. CV-LB intercept problem remains unsolved - **CRITICAL, must address**
   2. Only 5 submissions remaining - **Must be strategic**
-  3. Multi-target normalization not implemented - **Will implement**
-- Evaluator correctly identified that we need to try CatBoost + XGBoost ensemble with multi-target normalization.
+  3. Multi-target normalization only provided 0.08% improvement - **Not the solution**
+- Evaluator correctly identified that we need to try fundamentally different approaches.
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop63_analysis.ipynb` for CV-LB analysis
+- Reference notebooks: See `exploration/evolver_loop64_analysis.ipynb` for CV-LB analysis
 - Key patterns:
   1. Fragprints help single solvent (5.7% improvement) but hurt mixtures (2.4x worse)
   2. Data-type-specific features work (CV 0.007944 vs 0.008194)
-  3. All model types (MLP, LGBM, XGB, GP) fall on the same CV-LB line
+  3. All model types (MLP, LGBM, XGB, GP, CatBoost) fall on the same CV-LB line
   4. The intercept (0.0533) represents EXTRAPOLATION ERROR that no model tuning can fix
+  5. Multi-target normalization doesn't significantly change the CV-LB relationship
+
+## CRITICAL INSIGHT: THE TARGET IS REACHABLE
+
+The target (0.0347) IS reachable because:
+1. Someone achieved it (the competition has a leaderboard)
+2. The "Ens Model" kernel and other top kernels may have different CV-LB relationships
+3. We haven't tried ALL possible approaches - just variations of the same approach
+
+The key is to find an approach that CHANGES the CV-LB relationship, not just improves CV.
 
 ## Recommended Approaches (PRIORITY ORDER)
 
-### 1. IMPLEMENT ENS MODEL KERNEL APPROACH (HIGHEST PRIORITY)
-The "Ens Model" kernel (matthewmaree) uses techniques we have NOT tried:
+### 1. IMPLEMENT EXACT "ENS MODEL" KERNEL APPROACH (HIGHEST PRIORITY)
+The "Ens Model" kernel (matthewmaree) uses techniques we have NOT fully implemented:
 
-**a) CatBoost + XGBoost Ensemble** (instead of GP + MLP + LGBM)
+**a) CatBoost + XGBoost ONLY (no MLP, no GP, no LGBM)**
 ```python
 # CatBoost params for single solvent:
 cat_params = dict(
@@ -51,17 +61,7 @@ xgb_params = dict(
 )
 ```
 
-**b) Different Ensemble Weights for Single vs Full**
-```python
-if data == "single":
-    cat_weight = 7.0 / 13.0  # 0.538
-    xgb_weight = 6.0 / 13.0  # 0.462
-else:
-    cat_weight = 1.0 / 3.0   # 0.333
-    xgb_weight = 2.0 / 3.0   # 0.667
-```
-
-**c) Feature Priority-Based Correlation Filtering**
+**b) Feature Priority-Based Correlation Filtering (NOT YET TRIED)**
 ```python
 def feature_priority(name):
     if name.startswith("spange_"): return 5
@@ -73,53 +73,85 @@ def feature_priority(name):
 # When two features are correlated (>0.8), keep the higher-priority one
 ```
 
-**d) Multi-Target Normalization**
+**c) Different Ensemble Weights for Single vs Full (NOT YET TRIED)**
 ```python
-out = np.clip(out, a_min=0.0, a_max=None)
-totals = out.sum(axis=1, keepdims=True)
-divisor = np.maximum(totals, 1.0)
-out = out / divisor
+if data == "single":
+    cat_weight = 7.0 / 13.0  # 0.538
+    xgb_weight = 6.0 / 13.0  # 0.462
+else:
+    cat_weight = 1.0 / 3.0   # 0.333
+    xgb_weight = 2.0 / 3.0   # 0.667
 ```
 
-**Why this might work**: Different model types (CatBoost, XGBoost) may have different extrapolation behavior than GP + MLP + LGBM. The multi-target normalization ensures physical constraints are met, which may reduce extrapolation errors.
-
-### 2. ADD MULTI-TARGET NORMALIZATION TO CURRENT BEST MODEL
-If CatBoost + XGBoost doesn't work, add multi-target normalization to our best GP + MLP + LGBM ensemble:
+**d) Numeric Feature Engineering from Ens Model**
 ```python
-# After ensemble prediction:
-out = np.clip(out, a_min=0.0, a_max=None)
-totals = out.sum(axis=1, keepdims=True)
-divisor = np.maximum(totals, 1.0)
-out = out / divisor
+X_num["T_x_RT"] = T * rt  # Interaction term
+X_num["RT_log"] = np.log(rt + 1e-6)  # Log transformation
+X_num["T_inv"] = 1 / T  # Inverse temperature (in Kelvin)
+X_num["RT_scaled"] = rt / rt.mean()  # Scaled residence time (NEW)
 ```
 
-### 3. SUBMIT NEW BEST CV (0.007944) FOR CALIBRATION
-- Predicted LB: 0.0869 (vs best LB 0.0877)
-- This will verify if the CV-LB relationship still holds
-- If LB is significantly different from predicted, we may have found a way to change the relationship
+**Why this might work**: Different model types (CatBoost, XGBoost) may have different extrapolation behavior than GP + MLP + LGBM. The feature correlation filtering may reduce noise and improve generalization.
+
+### 2. UNCERTAINTY-WEIGHTED PREDICTIONS
+If CatBoost + XGBoost doesn't change the CV-LB relationship:
+- Use GP uncertainty to weight predictions
+- High uncertainty → conservative prediction (closer to mean)
+- This directly addresses extrapolation error
+
+```python
+# For each prediction:
+pred, std = gp.predict(X, return_std=True)
+uncertainty_weight = 1 / (1 + std)  # Lower weight for high uncertainty
+final_pred = uncertainty_weight * pred + (1 - uncertainty_weight) * population_mean
+```
+
+### 3. EXTRAPOLATION DETECTION FEATURES
+Add features that measure distance to training distribution:
+- Tanimoto similarity to nearest training solvents
+- Mahalanobis distance in feature space
+- When extrapolating, blend toward population mean
+
+### 4. SOLVENT CLUSTERING
+Group solvents by chemical class and use class-specific models:
+- Alcohols, ethers, esters, etc.
+- Detect when test solvent is in a known vs novel class
+- Use simpler models for novel classes
 
 ## What NOT to Try
 - More MLP/LGBM/GP variations - all fall on the same CV-LB line
-- Hyperparameter tuning - doesn't change the intercept
+- Hyperparameter tuning of existing models - doesn't change the intercept
 - GNN approaches - exp_051 and exp_056 both failed (CV 0.014 and 0.030)
 - GroupKFold CV - exp_042 showed worse LB (0.1147)
+- Multi-target normalization alone - only 0.08% improvement
 
 ## Validation Notes
 - Use Leave-One-Solvent-Out CV for single solvent (24 folds)
 - Use Leave-One-Ramp-Out CV for full data (87 folds) - this is the correct methodology
 - The CV-LB relationship is LB = 4.23*CV + 0.0533 (R² = 0.98)
 - Any new approach should be evaluated for whether it changes this relationship
+- If a new approach has a DIFFERENT CV-LB relationship, submit for calibration
 
 ## CRITICAL REMINDER
 - 5 submissions remaining
 - Target (0.0347) is UNREACHABLE with current CV-LB relationship
 - We MUST try something that changes the relationship
 - The Ens Model kernel approach is the most promising path
-- If CatBoost + XGBoost doesn't work, try multi-target normalization on current best
-- Consider submitting new best CV (0.007944) to verify relationship
+- DO NOT submit current best (exp_068) - it's on the same CV-LB line
+- ONLY submit if we have evidence of a different CV-LB relationship
 
 ## Competition Constraints
 - Must follow the notebook template structure
 - The line `model = MLPModel()` can be replaced with a new model definition
 - Same hyperparameters must be used across every fold
 - Different hyperparameters for different tasks (single vs full) is allowed
+
+## NEXT EXPERIMENT: exp_069 - Exact Ens Model Approach
+Implement the exact "Ens Model" kernel approach:
+1. CatBoost + XGBoost ensemble (no MLP, no GP, no LGBM)
+2. Feature priority-based correlation filtering (threshold=0.8)
+3. Different weights for single vs full data
+4. Multi-target normalization
+5. All numeric feature engineering from the kernel
+
+This is a fundamentally different approach that may have a different CV-LB relationship.
