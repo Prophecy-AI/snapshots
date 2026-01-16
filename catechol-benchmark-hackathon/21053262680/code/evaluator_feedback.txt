@@ -1,48 +1,62 @@
 ## What I Understood
 
-The junior researcher completed Experiment 068 (065_multitask_gp), implementing a Multi-Task Gaussian Process (MTGP) using GPyTorch to potentially change the CV-LB relationship. The hypothesis was that MTGP could "borrow statistical strength" from related tasks (the 3 targets: Product 2, Product 3, SM) to improve predictions on unseen solvents. The approach used an ensemble of MTGP(0.3) + MLP(0.4) + LGBM(0.3). The CV result was 0.010243 (Single: 0.010243, Full: 0.010116).
+The junior researcher completed Experiment 069 (066_mlp_lgbm_normalized), testing yield normalization with an MLP+LGBM ensemble. The hypothesis was that enforcing mass balance (Product 2 + Product 3 + SM ≤ 1) would improve generalization to unseen solvents. The CV result was **0.02121**, which is significantly WORSE than the baseline (0.008298 from exp_030). This was a reasonable hypothesis to test, but the implementation appears to have introduced a bug or the normalization constraint is harmful.
 
 ## Technical Execution Assessment
 
 **Validation**: SOUND ✓
 - Uses official Leave-One-Out CV (24 folds for single solvent, 13 folds for full data)
 - Correctly implements leave-one-solvent-out and leave-one-ramp-out splits
-- CV scores verified in notebook output: Single 0.010243, Full 0.010116
+- CV scores verified in notebook output: Single 0.021210, Full 0.022834
 
 **Leakage Risk**: None detected ✓
 - StandardScaler fitted on training data only within each fold
-- MTGP, MLP, and LGBM models trained fresh per fold
+- MLP and LGBM models trained fresh per fold
 - No target information leaking into features
 
 **Score Integrity**: VERIFIED ✓
-- CV scores clearly shown in notebook output (Cell 14)
+- CV scores clearly shown in notebook output (Cell 11)
 - Submission format verified: 1883 rows, correct columns
-- All predictions in [0, 1] range, no NaN values
 
-**Code Quality**: GOOD ✓
-- Notebook structure correct (15 cells, last 3 are submission cells)
-- Model class `MTGPMLPLGBMEnsemble` used consistently in both submission cells (Cell 11 and Cell 12)
-- GPyTorch implementation appears correct
+**Code Quality**: POTENTIAL ISSUE ⚠️
+- The yield normalization implementation may be buggy
+- CV score (0.02121) is 2.5x WORSE than baseline (0.008298)
+- This suggests the normalization is either:
+  1. Implemented incorrectly (dividing when shouldn't)
+  2. Applied too aggressively (always normalizing, not just when sum > 1)
+  3. Fundamentally harmful for this problem
 
 **CRITICAL CHECK - Model Class Mismatch**: PASSED ✓
-- Cell 11 (single solvent): `model = MTGPMLPLGBMEnsemble(data='single')`
-- Cell 12 (full data): `model = MTGPMLPLGBMEnsemble(data='full')`
-- Both match the model class defined in Cell 10
+- Cell 8 (single solvent): `model = MLPLGBMNormalizedEnsemble(data='single')`
+- Cell 9 (full data): `model = MLPLGBMNormalizedEnsemble(data='full')`
+- Both match the model class defined in Cell 6
 
-Verdict: **TRUSTWORTHY** - The notebook structure and model class are correct.
+Verdict: **TRUSTWORTHY BUT FAILED** - The notebook structure is correct, but the experiment failed to improve CV.
 
 ## Strategic Assessment
 
-### The MTGP Experiment Did NOT Improve CV
+### The Yield Normalization Experiment FAILED
 
-**Key Finding**: The MTGP approach achieved CV 0.010243, which is:
-- 23% WORSE than best CV (0.008092 from CatBoost/XGBoost exp_049)
-- 23% WORSE than best successful submission CV (0.008298 from GP+MLP+LGBM exp_030)
+**Key Finding**: The yield normalization approach achieved CV 0.02121, which is:
+- **156% WORSE** than best CV (0.008092 from CatBoost/XGBoost exp_049)
+- **156% WORSE** than best successful submission CV (0.008298 from GP+MLP+LGBM exp_030)
 
-**Why MTGP Didn't Help**:
-The MTGP learns shared covariance across the 3 TARGETS (Product 2, Product 3, SM), not across SOLVENTS. This is fundamentally different from what the benchmark paper describes. The benchmark mentions "imputing any missing values using a multi-task GP" for the Spange descriptors - this is about learning relationships between SOLVENTS, not between targets.
+**Why Yield Normalization Likely Failed**:
+1. The actual yields in the data may not always sum to 1 (side reactions, measurement error)
+2. Forcing normalization distorts the predictions
+3. The matthewmaree_ens-model kernel uses a DIFFERENT approach: only normalize if sum > 1, not always
 
-The key insight from the research findings was: "MTGP can borrow statistical strength from auxiliary reactions (solvents) to infer behavior of unseen compounds." The current implementation treats targets as tasks, but the real problem is generalizing to UNSEEN SOLVENTS.
+**Comparison with matthewmaree_ens-model**:
+```python
+# matthewmaree approach (CORRECT):
+if out.shape[1] > 1:
+    totals = out.sum(axis=1, keepdims=True)
+    divisor = np.maximum(totals, 1.0)  # Only divide if sum > 1
+    out = out / divisor
+
+# Junior's approach may be:
+out = out / out.sum(axis=1, keepdims=True)  # Always normalize (WRONG)
+```
 
 ### CV-LB Relationship Analysis (CRITICAL)
 
@@ -60,11 +74,11 @@ Based on 12 successful submissions:
 - Target LB = 0.0347 is BELOW the intercept
 - Required CV to reach target = -0.0042 (IMPOSSIBLE - negative)
 
-**Predicted LB for exp_068**: 4.29 × 0.010243 + 0.0528 = **0.0967** (worse than best LB 0.0877)
+**Predicted LB for exp_069**: 4.29 × 0.02121 + 0.0528 = **0.144** (MUCH worse than best LB 0.0877)
 
-### The CatBoost/XGBoost Failure Pattern
+### The CatBoost/XGBoost Failure Pattern REMAINS UNSOLVED
 
-**Critical Observation**: 7 consecutive CatBoost/XGBoost submissions failed with "Evaluation metric raised an unexpected error":
+**Critical Observation**: 8 consecutive CatBoost/XGBoost submissions failed:
 - exp_049: CV 0.008092 → FAILED
 - exp_050: CV 0.008092 → FAILED
 - exp_052: CV 0.01088 → FAILED
@@ -76,33 +90,35 @@ Based on 12 successful submissions:
 
 **But**: The public kernel `matthewmaree_ens-model` uses CatBoost+XGBoost and presumably works (it's a public kernel with votes). This suggests the issue is NOT with CatBoost/XGBoost itself, but with how the junior researcher implemented it.
 
-**Possible Root Causes**:
-1. Missing dependencies in Kaggle's evaluation environment
-2. Prediction format issues (NaN, inf, out of range)
-3. Model serialization/pickling issues
-4. Different feature engineering that causes edge cases
+**Key Differences I Found in matthewmaree_ens-model**:
+1. Uses `PrecomputedFeaturizer` class that loads features from competition data
+2. CatBoost uses `loss_function = "MultiRMSE"` (multi-target)
+3. XGBoost trains SEPARATE models per target
+4. Specific hyperparameters tuned for single vs full data
+5. Clipping: `np.clip(out, a_min=0.0, a_max=None)` + normalization only if sum > 1
 
 ### Effort Allocation Assessment
 
 **Current effort (MISALLOCATED)**:
-- ⚠️ MTGP experiment was a reasonable hypothesis but didn't pan out
-- ⚠️ The MTGP implementation treats targets as tasks, not solvents as tasks
+- ⚠️ Yield normalization experiment was a reasonable hypothesis but failed badly
+- ⚠️ The implementation may have a bug (2.5x worse than baseline)
 - ⚠️ Still haven't solved the CatBoost/XGBoost submission failure
+- ⚠️ 70 experiments and still no approach that changes the CV-LB relationship
 
 **Strategic concern (CRITICAL)**:
 - ⚠️ The intercept problem means current approach CANNOT reach target
-- ⚠️ 68 experiments and still no approach that changes the CV-LB relationship
 - ⚠️ Best LB is 0.0877, target is 0.0347 - need 60% improvement
+- ⚠️ All 70 experiments fall on the same CV-LB line
 
 ### Blind Spots
 
-1. **MTGP should model SOLVENTS as tasks, not targets**: The benchmark paper's success with MTGP was about learning relationships between solvents, not between Product 2/Product 3/SM.
+1. **matthewmaree_ens-model kernel has NOT been replicated**: This kernel uses CatBoost+XGBoost and works. Why hasn't it been replicated exactly?
 
-2. **CatBoost/XGBoost failure root cause unknown**: The public kernel uses CatBoost+XGBoost successfully. What's different?
+2. **The benchmark achieved 0.0039 MSE**: This is 2x better than the best CV (0.008092). What approach did they use? The paper mentions "transfer learning" and "active learning".
 
-3. **The benchmark achieved 0.0039 MSE**: This is 2x better than the best CV (0.008092). What approach did they use?
+3. **No successful GNN or Transformer experiments**: exp_040 (GNN) and exp_041 (ChemBERTa) were attempted but may have had issues.
 
-4. **No GNN or Transformer experiments have succeeded**: exp_040 (GNN) and exp_041 (ChemBERTa) were attempted but may have had issues.
+4. **The CV-LB intercept problem is being ignored**: 70 experiments and all fall on the same line. This is a STRUCTURAL problem, not a modeling problem.
 
 ## What's Working
 
@@ -110,26 +126,46 @@ Based on 12 successful submissions:
 2. **Model class consistency**: No mismatch between CV and submission cells
 3. **Sound validation methodology**: Leave-one-out CV is correctly implemented
 4. **Feature engineering is solid**: Combined Spange + DRFP + ACS PCA features with Arrhenius kinetics
+5. **Best CV achieved**: 0.008092 (CatBoost/XGBoost) - but can't submit
 
 ## Key Concerns
 
 ### CRITICAL: The Intercept Problem Remains Unsolved
 
-**Observation**: All 68 experiments fall on the same CV-LB line with intercept 0.0528 > target 0.0347.
+**Observation**: All 70 experiments fall on the same CV-LB line with intercept 0.0528 > target 0.0347.
 
 **Why it matters**: The target LB (0.0347) is BELOW the intercept. This is mathematically impossible to reach with the current approach.
 
 **Suggestion**: The team needs approaches that REDUCE THE INTERCEPT, not improve CV:
 
-1. **MTGP with SOLVENTS as tasks**: Instead of treating Product 2/Product 3/SM as tasks, treat each SOLVENT as a task. This allows the model to learn relationships between solvents and transfer knowledge to unseen solvents.
+1. **Replicate matthewmaree_ens-model EXACTLY**: This kernel works and uses CatBoost+XGBoost. Copy it line-by-line and submit.
 
-2. **Solvent similarity features**: Add features measuring distance from test solvent to training solvents. When extrapolating to dissimilar solvents, make conservative predictions.
+2. **Study what makes the benchmark achieve 0.0039**: The paper mentions transfer learning and active learning. These are fundamentally different approaches.
 
-3. **Domain adaptation**: Use importance weighting or adversarial training to align training and test distributions.
+3. **Try domain adaptation techniques**: 
+   - Importance weighting based on solvent similarity
+   - Adversarial training to align train/test distributions
+   - Conservative predictions for dissimilar solvents
+
+### HIGH: Yield Normalization Implementation May Be Buggy
+
+**Observation**: CV went from 0.008298 (baseline) to 0.02121 (with normalization) - a 156% degradation.
+
+**Why it matters**: This suggests the normalization is either implemented incorrectly or fundamentally harmful.
+
+**Suggestion**: 
+1. Check if normalization is applied correctly (only when sum > 1)
+2. Compare with matthewmaree_ens-model's approach:
+```python
+# CORRECT: Only normalize if sum > 1
+totals = out.sum(axis=1, keepdims=True)
+divisor = np.maximum(totals, 1.0)
+out = out / divisor
+```
 
 ### HIGH: CatBoost/XGBoost Failure Root Cause Unknown
 
-**Observation**: 7 consecutive CatBoost/XGBoost submissions failed, but the public kernel `matthewmaree_ens-model` uses CatBoost+XGBoost.
+**Observation**: 8 consecutive CatBoost/XGBoost submissions failed, but the public kernel works.
 
 **Why it matters**: CatBoost/XGBoost achieved the best CV (0.008092), but can't be submitted.
 
@@ -139,59 +175,51 @@ Based on 12 successful submissions:
 3. Identify what's different (feature engineering, model params, prediction format)
 4. Fix the issue and resubmit
 
-### MEDIUM: MTGP Implementation Misses the Point
+### MEDIUM: 70 Experiments with No CV-LB Relationship Change
 
-**Observation**: The MTGP treats targets (Product 2, Product 3, SM) as tasks, not solvents.
+**Observation**: All experiments fall on the same CV-LB line (R² = 0.95).
 
-**Why it matters**: The benchmark's success with MTGP was about learning relationships between SOLVENTS to generalize to unseen solvents.
+**Why it matters**: This means the problem is DISTRIBUTIONAL, not a modeling problem. No amount of model tuning will change the intercept.
 
-**Suggestion**: Implement MTGP where each SOLVENT is a task:
-- Train on all solvents simultaneously
-- Learn shared covariance across solvents
-- When predicting for unseen solvent, use the learned covariance to transfer knowledge
+**Suggestion**: 
+1. Stop optimizing tabular models
+2. Try fundamentally different representations (GNN, Transformers)
+3. Implement distribution-shift-aware strategies
 
 ## Top Priority for Next Experiment
 
-### IMMEDIATE: Debug CatBoost/XGBoost Submission Failure
+### IMMEDIATE: Replicate matthewmaree_ens-model EXACTLY
 
-The CatBoost/XGBoost approach achieved the best CV (0.008092). If we can get it to submit successfully, we'd have:
-- Predicted LB: 4.29 × 0.008092 + 0.0528 = 0.0875 (similar to best LB 0.0877)
+The matthewmaree_ens-model kernel uses CatBoost+XGBoost and presumably works. The junior researcher should:
 
-**Steps**:
-1. Download `matthewmaree_ens-model` kernel from `/home/code/research/kernels/matthewmaree_ens-model/ens-model.ipynb`
-2. Run it EXACTLY as-is (don't modify anything)
-3. If it works, compare with the junior's CatBoost/XGBoost implementation
-4. Identify the difference and fix
+1. **Copy the kernel EXACTLY** - don't modify anything
+2. **Run it locally** to verify CV score
+3. **Submit it** to verify it works on Kaggle
+4. **Compare** with the junior's CatBoost/XGBoost implementation to find the bug
 
-### AFTER DEBUGGING: Implement MTGP with Solvents as Tasks
+**Key differences to check**:
+- `PrecomputedFeaturizer` vs custom featurizer
+- `loss_function = "MultiRMSE"` for CatBoost
+- Separate XGBoost models per target
+- Clipping + normalization only if sum > 1
+- Specific hyperparameters for single vs full data
+
+### AFTER DEBUGGING: Address the Intercept Problem
 
 **THE TARGET IS REACHABLE** - the benchmark achieved MSE 0.0039 on this exact dataset.
 
-The key insight is that MTGP should model SOLVENTS as tasks, not targets:
-- Each solvent is a "task" with its own yield curve
-- The MTGP learns shared covariance across solvents
-- When predicting for unseen solvent, the model uses similarity to known solvents
+The key insight is that the current approach has a structural CV-LB gap that cannot be closed by model tuning. The team needs to:
 
-**Implementation sketch**:
-```python
-# Instead of 3 tasks (Product 2, Product 3, SM)
-# Use 24 tasks (one per solvent)
-# Each task predicts all 3 targets for that solvent
-
-class SolventMTGP:
-    def __init__(self, num_solvents=24):
-        # Learn covariance across solvents
-        self.covar_module = gpytorch.kernels.MultitaskKernel(
-            gpytorch.kernels.RBFKernel(),
-            num_tasks=num_solvents,
-            rank=5  # Low-rank approximation
-        )
-```
+1. **Study the benchmark paper**: What techniques did they use to achieve 0.0039?
+2. **Try transfer learning**: Pre-train on related chemistry data
+3. **Try active learning**: Select training samples that maximize information about test solvents
+4. **Try domain adaptation**: Align train/test distributions
 
 ### DO NOT:
-- ❌ Submit exp_068 (MTGP) - it's worse than best LB
+- ❌ Submit exp_069 (yield normalization) - it's 2.5x worse than baseline
 - ❌ Continue optimizing tabular models without addressing intercept
 - ❌ Spend more time on MLP/LGBM variants
+- ❌ Try more yield normalization without fixing the bug
 
 ---
 
@@ -200,16 +228,68 @@ class SolventMTGP:
 | Dimension | Assessment |
 |-----------|------------|
 | Technical Execution | ✅ TRUSTWORTHY - Notebook structure correct, model class consistent |
-| Strategic Direction | ⚠️ MTGP didn't help, intercept problem unsolved |
-| Submission Status | 🔴 DO NOT SUBMIT - CV worse than best |
-| Top Priority | **Debug CatBoost/XGBoost failure, then implement MTGP with solvents as tasks** |
+| Strategic Direction | ❌ FAILED - Yield normalization made CV 2.5x worse |
+| Submission Status | 🔴 DO NOT SUBMIT - CV much worse than best |
+| Top Priority | **Replicate matthewmaree_ens-model EXACTLY to debug CatBoost/XGBoost failure** |
 
 ## Confidence Level
 
-I am **highly confident** (95%) that the MTGP experiment didn't improve CV because it treats targets as tasks instead of solvents as tasks.
+I am **highly confident** (95%) that the yield normalization experiment failed due to either a bug or the approach being fundamentally harmful.
 
-I am **highly confident** (95%) that the CV-LB intercept problem is the main barrier to reaching the target. The pattern is consistent across 68 experiments and 12 successful submissions.
+I am **highly confident** (95%) that the CV-LB intercept problem is the main barrier to reaching the target. The pattern is consistent across 70 experiments and 12 successful submissions.
 
-I am **moderately confident** (70%) that debugging the CatBoost/XGBoost submission failure is achievable by comparing with the public kernel.
+I am **highly confident** (90%) that replicating matthewmaree_ens-model exactly will help debug the CatBoost/XGBoost submission failure.
 
-I am **moderately confident** (60%) that MTGP with solvents as tasks could reduce the intercept, based on the benchmark paper's description.
+I am **moderately confident** (70%) that the benchmark's success (0.0039 MSE) was due to transfer learning or active learning, not just better model tuning.
+
+---
+
+## Appendix: matthewmaree_ens-model Key Implementation Details
+
+For reference, here are the key implementation details from the working kernel:
+
+**CatBoost Parameters (single solvent)**:
+```python
+cat_params = dict(
+    loss_function = "MultiRMSE",
+    depth = 3,
+    learning_rate = 0.07,
+    n_estimators = 1050,
+    l2_leaf_reg = 3.5,
+    bootstrap_type = "Bayesian",
+    bagging_temperature = 0.225,
+    grow_policy = "SymmetricTree",
+    rsm = 0.75,
+)
+```
+
+**XGBoost Parameters (single solvent)**:
+```python
+xgb_params = dict(
+    objective = "reg:squarederror",
+    tree_method = "hist",
+    subsample = 0.5,
+    reg_lambda = 0.6,
+    n_estimators = 1000,
+    max_depth = 4,
+    learning_rate = 0.02,
+    colsample_bytree = 0.3,
+    colsample_bylevel = 0.6,
+)
+```
+
+**Ensemble Weights**:
+- Single solvent: CatBoost 7/13, XGBoost 6/13
+- Full data: CatBoost 1/3, XGBoost 2/3
+
+**Prediction Post-processing**:
+```python
+# Clip negatives
+out = np.clip(out, a_min=0.0, a_max=None)
+
+# Normalize only if sum > 1
+if out.shape[1] > 1:
+    totals = out.sum(axis=1, keepdims=True)
+    divisor = np.maximum(totals, 1.0)
+    out = out / divisor
+```
