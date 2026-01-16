@@ -1,79 +1,80 @@
 ## Current Status
-- Best CV score (historical): **0.008298** (exp_030). Best *submitted* baseline: **0.008303** (exp_068) → **LB 0.08774**.
-- Latest experiment: **072A0_template_safe** (GP+MLP+LGBM ensemble, template-safe + flip bug fixed) → **CV 0.008621** (not submitted).
-- Target: **0.034700** | Current best LB: **0.08774** | Gap to target: **0.05304**
+- Best CV score: 0.0081 (exp_049/050/053 variants; some LB pending)
+- Best confirmed LB score: 0.0877 (exp_030 and exp_068)
+- Latest experiment: exp_073_AD_shrinkage_template_safe | CV: 0.0091106 | LB: not submitted/unknown (logged 0.0)
+- Target LB: 0.034700 | Gap to target (best LB): 0.053020
 
 ## CV-LB Relationship Analysis (CRITICAL)
-Using actual submission history (13 submissions with CV+LB present):
-- Linear fit: **LB = 4.34 * CV + 0.05226** (R² = **0.957**)
-- Intercept interpretation: Even with extremely strong CV, we still carry a large systematic error term; we must **change the mapping** (reduce intercept), not just improve CV.
-- Are all approaches on the same line? **YES (so far)** → treat as **distribution shift / extrapolation** problem.
+- Fitted on completed submissions: **LB ≈ 4.34 × CV + 0.0523** (R² ≈ 0.957) (per evaluator)
+- Interpretation: large **structural intercept ~0.052** dominates; CV improvements mostly move along same line.
+- Are all approaches on the same line? **YES** (MLP/LGBM/XGB/CatBoost/GP all align).
+- Therefore: we must **change test-time behavior** on OOD solvents/ramps (reduce intercept), not just improve CV.
 
 ## Response to Evaluator (REQUIRED)
-- Technical verdict was **CONCERNS**. I agree: template compliance + fold/index alignment were a real submission risk, and mixture flip/TTA was a real bug.
-- Evaluator’s top priority: **port the A0 model into strict template scaffold and fix flip**. ✅ Done in **072A0_template_safe**:
-  - Uses exact template split generators and writes to `/home/submission/submission.csv`.
-  - Flip now correctly does **swap(A,B) and pct := 1-pct**, and TTA averages std+flip.
-- Key concern remaining: now that submission mechanics are safe, we must spend remaining submissions only on **OOD/intercept reduction layers** (AD shrinkage, uncertainty-aware fallback), not more base-model tweaks.
+- Technical verdict was **CONCERNS**. I agree the run is template-safe and CV is meaningful, but internal consistency issues likely suppressed performance.
+- Evaluator’s top priority: **v2 AD shrinkage** with (1) refit distance+mu on full fold, (2) hinged shrinkage, (3) consider kNN-mean-y fallback.
+- We will implement exactly these fixes. Additionally, we’ll react to the new analysis: distance correlates with error strongly for **full/mixtures** but not for **single**, so we should (a) improve single distance features (include kinetics) or (b) disable/attenuate shrinkage for single.
 
 ## Data Understanding
-- Reference CV↔LB diagnostics: `exploration/evolver_loop66_analysis.ipynb` … `loop72_analysis.ipynb`.
-- Known mixture modeling signal: `exploration/evolver_loop69_analysis.ipynb` showed strong gains from **pairwise+interaction** mixture features vs linear blending (at least for Ridge baseline). This suggests mixture nonlinearity is real and may be part of OOD failure.
+- Reference: `exploration/evolver_loop66_analysis.ipynb` … `loop69` confirm CV→LB line/intercept.
+- New (loop73 analysis):
+  - Full-data blended-embedding kNN distance correlates with per-row error (Spearman ~0.27). Top 30% most-distant rows contribute ~43% of full-data MSE.
+  - Single-solvent embedding distance does **not** positively correlate with error → shrinkage there is likely harmful unless distance includes kinetics/conditions.
 
 ## Recommended Approaches (priority order)
 
-### 1) Template-safe Applicability-Domain (AD) Shrinkage Layer (MINIMAL DELTA, INTERCEPT TARGET)
-**Goal:** change OOD behavior: when a sample is far from training solvents/ramps, shrink predictions toward a conservative fallback.
+### 1) **AD Shrinkage v2 = hinged + refit + kNN fallback (NEW prediction family)**
+This is a pivot away from pure tabular/global models into a **hybrid local (instance-based) correction** designed to reduce the LB intercept.
 
-Implement a new model class (keep last 3 template cells unchanged except model line):
-- Base model: reuse **GP+MLP+LGBM** from `072A0_template_safe` (so we keep strong ID accuracy).
-- Add an AD module in `predict()`:
-  1. Build a **distance feature space** using solvent descriptors only (recommended):
-     - For `data='single'`: use Spange+DRFP(nzvar)+ACS PCA for SOLVENT NAME.
-     - For `data='full'`: use blended descriptors for A/B with pct (same blending as base featurizer) **but distance should ignore kinetics** to focus on solvent similarity; append pct.
-  2. Fit `StandardScaler` on train-distance-features; fit `NearestNeighbors(k=10)`.
-  3. Calibrate **alpha(distance)** *within each fold* (no leakage):
-     - Inside `train_model`, split the fold’s training set into `train_inner` and `cal_inner` by **group**:
-       - single: group = solvent name
-       - full: group = (SOLVENT A NAME, SOLVENT B NAME)
-     - Train base ensemble on `train_inner` only.
-     - On `cal_inner`, compute distance-to-`train_inner` and base predictions.
-     - Choose alpha by a simple grid search on cal_inner to minimize MSE of:
-       - `pred_shrunk = (1-alpha)*pred + alpha*mu`, where `mu` is the per-target mean label on `train_inner`.
-       - Do this **per distance bin** (e.g., 10 quantile bins), then fit a monotone `IsotonicRegression` mapping `distance -> alpha` (clip to [0,1]).
-     - Refit base ensemble on **full fold training data** (train_inner + cal_inner) for final use.
-     - Store: scaler, knn index, isotonic model, and `mu_train`.
-  4. In `predict`, compute distance d; alpha = iso(d); output shrunk blend.
-  5. Keep current clipping to [0,1]. Optionally add conservative quantile clip to [q01,q99] of train labels.
+Implement a new model class (e.g., `GPMLPLGBM_ADShrinkageV2`) starting from the template-safe notebook scaffold (072A0/073):
 
-**Why this is priority:** This directly targets **intercept reduction** by being conservative on OOD ramps/solvents. It is a true “distribution-shift-aware” change, not CV optimization.
+**Inside each outer fold (single and full):**
+1. Split X_train into train_inner/cal_inner using GroupShuffleSplit (same as 073) **only for learning alpha(d)**.
+2. Train `base_inner` on train_inner, predict cal_inner.
+3. Fit scaler+NearestNeighbors on train_inner distance-features; compute d_cal.
+4. Learn a **hinge threshold τ** so shrinkage is ~0 for in-domain:
+   - Set τ = quantile(d_cal, q) where q in {0.60, 0.70, 0.80} (choose one; 0.70 is a good start).
+   - Use d’ = max(0, d - τ).
+   - Force alpha(0)=0 by adding an anchor point (d’=0, alpha=0) when fitting isotonic.
+5. **Fallback target = kNN-mean-y**, not global mean:
+   - For each cal point, compute `y_knn_cal` = mean of y_train_inner over its k nearest neighbors in distance space.
+   - Compute per-sample optimal alpha to blend `p_cal` with `y_knn_cal`, then aggregate by distance bins and isotonic-fit alpha(d’).
+   - Prediction rule: `pred = (1-alpha)*base_pred + alpha*y_knn_pred`.
+6. **Refit stage (fix evaluator concern):** after alpha(d’) is learned,
+   - Refit **base** on full fold X_train.
+   - Refit scaler+NN on full fold X_train distance-features (unsupervised).
+   - Set any global baselines (if still used) from full y_train.
 
-**Deliverable:** new experiment folder `experiments/073_AD_shrinkage_template_safe/` created by copying `072A0_template_safe` scaffold, changing only Cell 5 definitions, and updating the model line to `model = GPMLPLGBM_ADShrinkage(...)`.
+**Key implementation notes:**
+- Keep `alpha(d’)` fixed from calibration; only refit NN/scaler/base on full fold.
+- Ensure the **same class** is used in CV and both submission model lines (single and full). No mismatches.
 
-**After local CV computed:** **SUBMIT** this model (uses 1 submission). Even if CV is slightly worse than 0.0083, it’s acceptable if LB improves (we need to break the line).
+### 2) Improve distance features (esp. SINGLE)
+Given analysis, do NOT use solvent-embedding-only distance for single.
 
-### 2) kNN Blending (alternative to mean shrinkage; more adaptive)
-If mean-shrinkage doesn’t move LB, try a second variant (can reuse same distance features):
-- For each query, compute kNN among training points in distance space and compute `y_knn = weighted_avg(y_train_neighbors)`.
-- Blend: `pred = (1-w)*base_pred + w*y_knn` where `w` increases with distance (or decreases with similarity).
-This is often stronger than shrinking to global mean because it uses “local analogs” instead of a constant.
+- Single distance features should include kinetics/conditions:
+  - `[Residence Time, Temperature, invT, logRT, invT*logRT]` + solvent_embed
+  - Standardize and use Euclidean distance.
 
-### 3) Nonlinear Mixture Features (Redlich–Kister style) + AD module
-Only after we have one AD submission result, consider adding a controlled nonlinear mixture featurization delta:
-- Add cross/interactions like `pct*(1-pct)`, `(A_desc - B_desc)^2`, and low-rank bilinear interactions on Spange/ACS PCA.
-- Keep it as a single isolated change so we can attribute any LB shift.
+- Full distance features: start with the **blend embedding** (it correlated best) + add mixture nonlinearity scalars:
+  - `D = [blend_embed, pct, pct*(1-pct), ||A-B||]` where `||A-B||` is L2 norm in solvent_embed space.
+  - This is cheap and captures “how different are the components”.
+
+### 3) Only shrink mixtures first (surgical)
+If time is tight: apply AD shrinkage **only for data='full'**, and for single return base prediction unchanged (alpha=0). This matches evidence and avoids hurting single CV.
+
+### 4) One LB submission as an intercept test (after CV sanity)
+After implementing v2:
+- If overall CV is within ~0.0005 of baseline template-safe (~0.0086) OR only slightly worse but predictions are meaningfully changed on high-distance points, **submit exactly one** v2 model to probe if intercept reduces.
 
 ## What NOT to Try
-- No more pure tabular/ensemble weight tweaks, extra seeds, or hyperparameter sweeps of the base GP/MLP/LGBM (forbidden by gap-to-target and it won’t change intercept).
-- Do not reintroduce non-template split generators or write submission to wrong path.
-- Do not claim “impossible” based on the linear fit; instead, use it as motivation to **change the relationship**.
+- More pure MLP/LGBM/XGB/CatBoost tuning or bigger ensembles (forbidden; stays on same CV→LB line).
+- Multi-seed averaging, large sweeps, weight fine-tuning.
+- Any AD method that shrinks toward **global mean** without hinge (already likely to hurt ID CV).
 
-## Validation Notes (MANDATORY)
-- Use the template’s exact split generators (already in the scaffold).
-- **Verify model class consistency**: the model used in CV template cells must match the submission cells exactly (same class name).
-- For AD calibration: all calibration must be performed strictly within training folds (train_inner/cal_inner split by groups). Fix all random seeds.
-- Log CV overall + single/full separately.
-
-## Submission Plan
-- Submit the first AD-shrinkage model after local CV is computed and sanity-checked.
-- If LB improves vs 0.08774, iterate with kNN-blending variant (second submission).
+## Validation Notes
+- Must use template-defined split generators.
+- Add debug prints (during development only, not in final submission cells) to confirm:
+  - `alpha` is ~0 for low d’, non-zero only in tail.
+  - kNN fallback values are reasonable (in [0,1]).
+- Keep the last 3 template cells unchanged except the `model = ...` line.
