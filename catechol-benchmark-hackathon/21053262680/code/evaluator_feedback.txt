@@ -1,8 +1,10 @@
 ## What I Understood
 
-The junior researcher completed experiment exp_084 (082_chemprop_features), testing whether ChemProp pre-trained molecular features (RDKit 2D 217 dims + Morgan fingerprints 2048 dims with PCA to 20 dims) could replace the domain-specific Spange/DRFP features. The hypothesis was that pre-trained molecular representations might capture structural information better and potentially change the CV-LB relationship. The experiment used the CatBoost+XGBoost ensemble (best performing tabular model).
+The junior researcher completed experiment exp_085 (083_pseudo_labeling), testing whether pseudo-labeling/self-training approaches could help adapt the model to the test distribution. The hypothesis was that since the CV-LB gap is due to distribution shift (test solvents are different from training), pseudo-labeling might help the model adapt. Two approaches were tested:
+1. Self-training with holdout ratio 0.2 and 2 iterations
+2. Conservative predictions (blending toward training mean)
 
-**Key Finding**: ChemProp features performed **46.33% WORSE** than the baseline (CV=0.011841 vs 0.008092). This confirms that domain-specific features (Spange/DRFP) work better than generic molecular fingerprints for this small chemistry dataset.
+Both approaches made things WORSE, confirming that the test distribution is fundamentally different from training and these adaptation techniques don't help.
 
 ## Technical Execution Assessment
 
@@ -12,30 +14,27 @@ The junior researcher completed experiment exp_084 (082_chemprop_features), test
 - GroupKFold structure properly maintained with solvent-based grouping
 
 **Leakage Risk**: None detected ✓
-- ChemProp features computed per-solvent, not per-sample
+- Self-training uses held-out portion of training data, not test data
+- Conservative predictions blend toward training mean, no test information used
 - Scalers fitted on training data only
-- No target information used in feature engineering
 
 **Score Integrity**: VERIFIED ✓
-- Single Solvent MSE: 0.015480 (verified in notebook output)
-- Full Data MSE: 0.010885 (verified in notebook output)
-- Overall MSE: 0.011841 (correctly weighted by sample counts)
-- metrics.json confirms: {"cv_score": 0.011841, "single_mse": 0.015480, "full_mse": 0.010885}
+- metrics.json confirms: {"cv_score": 0.008853, "single_mse": 0.010230, "full_mse": 0.008117}
+- Self-training made CV 9.4% worse (0.008853 vs 0.008092 baseline)
+- Conservative predictions showed clear degradation pattern with increasing blend factor
 
 **Code Quality**: GOOD ✓
-- **Model class consistency**: Submission cells correctly use `ChemPropCatXGBEnsemble` - matches CV computation ✓
-- ChemProp feature extraction properly handles mixture solvents (averaging features)
-- Morgan fingerprints filtered to non-zero variance columns (110 dims)
-- RDKit features properly handle NaN/Inf values
 - Reproducibility: Seeds set for numpy and torch
+- Clear experimental design with multiple blend factors tested
+- Negative results are informative and well-documented
 
-**Verdict: TRUSTWORTHY** - The CV score is accurate and the implementation is correct. The negative result (ChemProp features worse than Spange/DRFP) is a genuine finding.
+**Verdict: TRUSTWORTHY** - The CV scores are accurate and the implementation is correct. The negative result (pseudo-labeling/conservative predictions made things worse) is a genuine finding.
 
 ## Strategic Assessment
 
 ### CV-LB Relationship Analysis (CRITICAL)
 
-Based on 12 valid submissions (excluding exp_073 outlier):
+Based on 12 valid submissions (excluding exp_073 outlier with LB=0.14507):
 ```
 Linear fit: LB = 4.29 * CV + 0.0528
 R-squared: 0.9523
@@ -48,24 +47,14 @@ Target LB: 0.0347
 - To reach target LB=0.0347, required CV = (0.0347 - 0.0528) / 4.29 = **-0.0042** (NEGATIVE!)
 - **The target is mathematically unreachable by improving CV alone with current approaches**
 
-### Why ChemProp Features Failed
+### Why Pseudo-labeling Failed
 
-The negative result is informative:
-1. **Generic fingerprints add noise**: RDKit 2D (217 dims) and Morgan fingerprints (2048 dims) capture general molecular structure, but not the specific solvent properties relevant to this reaction
-2. **Domain-specific features are better**: Spange descriptors (13 dims) capture physicochemical properties (polarity, hydrogen bonding, etc.) that directly affect reaction kinetics
-3. **Small dataset problem**: With only 24 solvents, the model can't learn which fingerprint bits are relevant
-4. **PCA loses information**: Reducing Morgan fingerprints from 2048 to 20 dims via PCA may discard important structural information
+The negative result is highly informative:
+1. **Self-training assumes model predictions are correct** - but they're NOT when extrapolating to unseen solvents
+2. **Conservative predictions assume test is "harder" version of training** - but test solvents are fundamentally DIFFERENT, not just harder
+3. **The distribution shift is structural** - it's not about noise or difficulty, it's about different chemical properties
 
 ### Approach Fit Assessment
-
-The ChemProp features experiment was a reasonable hypothesis to test - pre-trained representations have worked well in other chemistry domains. However, the failure confirms that:
-- **This problem requires domain-specific features**, not generic molecular representations
-- **The CV-LB gap is NOT caused by feature representation** - it's structural distribution shift
-- **Changing features doesn't change the CV-LB relationship** - all approaches fall on the same line
-
-### Effort Allocation Assessment
-
-**Current bottleneck**: The CV-LB intercept (0.0528) > target (0.0347)
 
 After 85 experiments, the team has exhaustively tested:
 - ✅ MLP variants (50+ experiments)
@@ -75,138 +64,152 @@ After 85 experiments, the team has exhaustively tested:
 - ✅ ChemBERTa embeddings (exp_078) - CV=0.014697, worse
 - ✅ ChemProp features (exp_084) - CV=0.011841, worse
 - ✅ Yield normalization (exp_083) - no effect
-- ✅ Pseudo-labeling (exp_083 folder) - made things worse
+- ✅ Pseudo-labeling (exp_085) - made things worse
+- ✅ Conservative predictions (exp_085) - made things worse
 
 **All approaches fall on the same CV-LB line (R²=0.95).** This is the fundamental problem.
 
+### Effort Allocation Assessment
+
+**Current bottleneck**: The CV-LB intercept (0.0528) > target (0.0347)
+
+The team has been optimizing CV, but the intercept means CV improvements don't translate to LB improvements at the rate needed. The slope (4.29) means every 0.001 CV improvement only gives 0.0043 LB improvement. To go from best LB (0.0877) to target (0.0347), we need:
+- LB improvement needed: 0.0877 - 0.0347 = 0.053
+- CV improvement needed: 0.053 / 4.29 = 0.0124
+- Current best CV: 0.008092
+- Required CV: 0.008092 - 0.0124 = **-0.0042** (IMPOSSIBLE)
+
 ### Blind Spots - CRITICAL
 
-1. **GroupKFold(5) Validation Strategy NOT Submitted**
-   - The "mixall" kernel uses GroupKFold(5) instead of Leave-One-Out
-   - Claims "good CV-LB" correlation
-   - exp_079 achieved CV=0.011030 with this approach but was NOT submitted
-   - **This is the most promising untested hypothesis**
-   - Different validation strategy might have a different CV-LB relationship
+1. **9 Submissions Without LB Scores Recorded**
+   - exp_049, exp_050, exp_052, exp_053, exp_054, exp_055, exp_057, exp_063, exp_079
+   - These submissions were made but LB scores weren't recorded
+   - **We don't know if any of these broke the CV-LB line!**
+   - URGENT: Check Kaggle leaderboard for these submission scores
 
-2. **The "ens-model" Kernel Replica NOT Submitted**
-   - exp_080 replicated the ens-model kernel (CV=0.009217)
-   - This kernel uses different feature combinations and task-specific weights
-   - **Should be submitted to see if it falls on the same CV-LB line**
+2. **GroupKFold(5) Submission (exp_079) - LB Unknown**
+   - The "mixall" kernel claims "good CV-LB" correlation with GroupKFold(5)
+   - exp_079 was submitted but LB score not recorded
+   - **This could have a different CV-LB relationship!**
 
-3. **Domain Adaptation Techniques Not Tried**
+3. **ens-model Replica (exp_049) - LB Unknown**
+   - exp_049 achieved CV=0.008092 (best CV)
+   - Was submitted but LB score not recorded
+   - **Need to verify if it falls on the same CV-LB line**
+
+4. **Domain Adaptation Techniques Not Tried**
    - Adversarial validation to identify distribution shift features
    - Importance weighting based on similarity to test distribution
    - Domain-adversarial training to learn invariant representations
-
-4. **Test-Time Adaptation Not Tried**
-   - The research findings mention "test-time refinement" as effective for OOD chemistry
-   - Adjusting predictions based on uncertainty or extrapolation detection
 
 ### Trajectory Assessment
 
 The trajectory is concerning:
 - 85 experiments completed
 - Best LB: 0.0877 (152.8% above target)
-- All approaches fall on the same CV-LB line (R²=0.95)
+- All approaches with known LB fall on the same CV-LB line (R²=0.95)
 - The intercept (0.0528) > target (0.0347)
 
-**The team is stuck in a local optimum.** Improving CV further will NOT reach the target because of the structural intercept. The team needs to find approaches that CHANGE the CV-LB relationship, not improve CV.
+**The team is stuck in a local optimum.** However, there are 9 submissions without recorded LB scores. One of these might have broken the CV-LB line.
 
 ## What's Working
 
 1. **Tabular models are well-optimized**: Best CV=0.008092 with CatBoost+XGBoost ensemble
 2. **Feature engineering is solid**: Arrhenius kinetics, Spange descriptors, DRFP, ACS PCA
 3. **Validation methodology is correct**: Leave-One-Out and Leave-One-Ramp-Out
-4. **Model class consistency**: Submission cells match CV computation ✓
-5. **Hypothesis testing is rigorous**: The ChemProp experiment was well-designed and conclusive
-6. **Negative results are informative**: Ruling out ChemProp features saves future effort
+4. **Hypothesis testing is rigorous**: The pseudo-labeling experiment was well-designed and conclusive
+5. **Negative results are informative**: Ruling out pseudo-labeling saves future effort
+6. **Systematic exploration**: 85 experiments covering many approaches
 
 ## Key Concerns
 
-### CRITICAL: CV-LB Intercept Problem
+### CRITICAL: Missing LB Scores for 9 Submissions
+
+**Observation**: 9 submissions (exp_049, exp_050, exp_052, exp_053, exp_054, exp_055, exp_057, exp_063, exp_079) don't have LB scores recorded.
+
+**Why it matters**: 
+- We can't verify if any of these broke the CV-LB line
+- exp_079 (GroupKFold) and exp_049 (ens-model) are particularly important
+- The "mixall" kernel claims "good CV-LB" correlation - we need to verify this
+
+**Suggestion**: 
+- **IMMEDIATELY** check Kaggle leaderboard for these 9 submission scores
+- Record them in the state
+- Recompute the CV-LB relationship with all data points
+
+### HIGH: CV-LB Intercept Problem
 
 **Observation**: All 12 valid submissions fall on LB = 4.29 * CV + 0.0528 with R²=0.9523. The intercept (0.0528) is higher than the target (0.0347).
 
-**Why it matters**: No amount of CV improvement can reach the target. The required CV is negative, which is impossible. This is a STRUCTURAL problem, not a modeling problem.
+**Why it matters**: No amount of CV improvement can reach the target with current approaches. The required CV is negative, which is impossible.
 
 **Suggestion**: 
-1. **IMMEDIATELY submit GroupKFold(5) experiment** (exp_079, CV=0.011030) to test if it has a different CV-LB relationship
-2. **Submit ens-model replica** (exp_080, CV=0.009217) to see if it falls on the same line
-3. **Focus on approaches that CHANGE the CV-LB relationship**, not improve CV
-
-### HIGH: Pre-trained Representations Consistently Fail
-
-**Observation**: 
-- ChemProp features (exp_084): CV=0.011841 (46% worse than baseline)
-- ChemBERTa (exp_078): CV=0.014697 (82% worse than baseline)
-- GNN from scratch (exp_081, exp_082): CV=0.024-0.026 (195% worse than baseline)
-
-**Why it matters**: The team has invested significant effort in pre-trained/learned representations, but they all perform worse than hand-crafted domain-specific features. This suggests:
-- The problem is NOT about better molecular representations
-- The problem IS about distribution shift between training and test solvents
-- Domain-specific features (Spange/DRFP) already capture the relevant chemistry
-
-**Suggestion**: 
-- STOP trying new molecular representations
-- Focus on distribution shift handling instead
-- Consider that the benchmark paper's success (MSE 0.0039) may have come from different data splits or pre-training on related data
+1. Focus on approaches that CHANGE the CV-LB relationship, not improve CV
+2. Try domain adaptation techniques (adversarial validation, importance weighting)
+3. Consider that the benchmark's success (MSE 0.0039) may have come from different data splits or pre-training
 
 ### MEDIUM: Only 4 Submissions Remaining
 
 **Observation**: Limited ability to test hypotheses on the leaderboard.
 
 **Suggestion**: Use submissions strategically:
-1. **FIRST**: Submit GroupKFold(5) (exp_079) - tests different validation strategy
-2. **SECOND**: Submit ens-model replica (exp_080) - tests if public kernel falls on same line
-3. **SAVE 2 submissions** for breakthrough approaches
+1. **FIRST**: Check LB scores for existing submissions before making new ones
+2. **SECOND**: Only submit if approach has theoretical reason to change CV-LB relationship
+3. **SAVE submissions** for breakthrough approaches
 
-### LOW: Pseudo-labeling Made Things Worse
+### LOW: Pre-trained Representations Consistently Fail
 
-**Observation**: The pseudo-labeling experiment (083_pseudo_labeling folder) showed that blending pseudo-labels HURT performance:
-- Blend factor 0.00: MSE = 0.010230 (best)
-- Blend factor 0.05: MSE = 0.010404
-- Blend factor 0.10: MSE = 0.010791
-- Blend factor 0.15: MSE = 0.011391
-- Blend factor 0.20: MSE = 0.012205
+**Observation**: 
+- ChemProp features (exp_084): CV=0.011841 (46% worse than baseline)
+- ChemBERTa (exp_078): CV=0.014697 (82% worse than baseline)
+- GNN from scratch (exp_081, exp_082): CV=0.024-0.026 (195% worse than baseline)
 
-**Why it matters**: This confirms that the test distribution is fundamentally different from training. Pseudo-labeling assumes the model's confident predictions are correct, but they're not when extrapolating to unseen solvents.
+**Why it matters**: The team has invested significant effort in pre-trained/learned representations, but they all perform worse than hand-crafted domain-specific features.
 
-**Suggestion**: Don't pursue pseudo-labeling or self-training approaches.
+**Suggestion**: 
+- STOP trying new molecular representations
+- Focus on distribution shift handling instead
 
 ## Top Priority for Next Experiment
 
-### URGENT: Submit GroupKFold(5) to Test CV-LB Relationship
+### URGENT: Retrieve Missing LB Scores
 
-The "mixall" kernel claims "good CV-LB" correlation and uses GroupKFold(5) instead of Leave-One-Out. This is a fundamentally different validation strategy that might have a different CV-LB relationship.
+Before doing ANY new experiment, the team MUST:
 
-**Why this matters**:
-- GroupKFold(5) has MORE training data per fold (80% vs ~96% for LOO, but fewer folds)
-- Different validation strategy might correlate differently with LB
-- If GroupKFold(5) has a LOWER intercept, it means the validation strategy affects generalization
-- If it falls on the same line, we've ruled out validation strategy as the issue
+1. **Check Kaggle leaderboard** for the 9 submissions without recorded LB scores
+2. **Record all LB scores** in the state
+3. **Recompute CV-LB relationship** with all data points
 
-**Implementation**: exp_079 already computed CV=0.011030 with GroupKFold(5). Just submit it.
+This is critical because:
+- exp_079 (GroupKFold) might have a different CV-LB relationship
+- exp_049 (ens-model) might have broken the line
+- We're making decisions based on incomplete data
 
-**Expected outcomes**:
-- If LB < 0.095: Different CV-LB relationship → pursue GroupKFold-based approaches
-- If LB ≈ 0.100: Same line → validation strategy is not the issue
+### If All Submissions Fall on Same Line: Try Adversarial Validation
 
-### Alternative: Domain Adaptation Techniques
+If the missing LB scores confirm all approaches fall on the same CV-LB line, the next experiment should be:
 
-If GroupKFold(5) doesn't help, consider:
+**Adversarial Validation for Distribution Shift Detection**
 
-1. **Adversarial Validation**: Train a classifier to distinguish training vs test solvents. Use the most discriminative features to understand the distribution shift.
+1. Train a classifier to distinguish training vs test solvents using solvent descriptors
+2. Identify which features are most discriminative (causing the shift)
+3. Use this information to:
+   - Remove/downweight features that cause shift
+   - Create "shift-aware" features
+   - Weight training samples by similarity to test distribution
 
-2. **Importance Weighting**: Weight training samples by similarity to test distribution (using solvent descriptors).
-
-3. **Conservative Predictions**: For solvents that are "far" from training distribution (high extrapolation score), blend predictions toward the training mean.
+**Why this might work**:
+- It directly addresses the distribution shift problem
+- It doesn't assume test is "harder" version of training (which failed)
+- It could identify which solvent properties are different in test set
 
 ### DO NOT DO:
 - ❌ More MLP/LGBM/XGB tuning (exhausted)
 - ❌ More GNN from scratch (doesn't work)
 - ❌ More pre-trained molecular representations (ChemProp, ChemBERTa failed)
-- ❌ Pseudo-labeling (made things worse)
-- ❌ Similarity-based prediction modification (exp_073 made LB MUCH worse)
+- ❌ Pseudo-labeling or self-training (made things worse)
+- ❌ Conservative predictions (made things worse)
+- ❌ Any new submission without first checking missing LB scores
 
 ---
 
@@ -215,25 +218,25 @@ If GroupKFold(5) doesn't help, consider:
 | Dimension | Assessment |
 |-----------|------------|
 | Technical Execution | ✅ TRUSTWORTHY - Implementation is correct |
-| Strategic Direction | ⚠️ NEEDS PIVOT - ChemProp features failed, confirming domain-specific features are better |
-| Key Finding | Pre-trained molecular representations don't help; CV-LB gap is structural |
-| Critical Problem | CV-LB intercept (0.0528) > target (0.0347) |
-| Top Priority | **Submit GroupKFold(5) (exp_079) to test if different validation strategy changes CV-LB relationship** |
+| Strategic Direction | ⚠️ NEEDS PIVOT - Pseudo-labeling failed, confirming distribution shift is structural |
+| Key Finding | Self-training and conservative predictions both made things worse |
+| Critical Problem | 9 submissions missing LB scores - we're making decisions with incomplete data |
+| Top Priority | **RETRIEVE MISSING LB SCORES before any new experiment** |
 
 ## Confidence Levels
 
-- **High (95%)**: ChemProp features perform worse than Spange/DRFP for this problem
-- **High (95%)**: The CV-LB relationship is LB = 4.29 * CV + 0.0528
+- **High (95%)**: Pseudo-labeling and conservative predictions don't help for this problem
+- **High (95%)**: The CV-LB relationship is LB = 4.29 * CV + 0.0528 (for known submissions)
 - **High (90%)**: The intercept (0.0528) > target (0.0347) means current approaches can't reach target
-- **Medium (60%)**: GroupKFold(5) might have a different CV-LB relationship
-- **Low (30%)**: Domain adaptation techniques could reduce the intercept
+- **Medium (60%)**: One of the 9 missing LB scores might show a different CV-LB relationship
+- **Medium (50%)**: Adversarial validation could identify actionable distribution shift features
 
 ## THE TARGET IS REACHABLE
 
 The benchmark paper achieved MSE 0.0039. The current best LB is 0.0877. The gap is large but NOT insurmountable. The team needs to:
 
-1. **STOP** optimizing within the current CV-LB line
-2. **TEST** GroupKFold(5) to see if it changes the relationship
+1. **FIRST**: Retrieve missing LB scores to understand the full picture
+2. **STOP** optimizing within the current CV-LB line
 3. **FIND** approaches that reduce the intercept, not just improve CV
 4. **CONSIDER** that the benchmark's success came from different data splits, pre-training, or techniques not yet tried
 
@@ -245,17 +248,14 @@ The target IS reachable - we just need to find the approach that changes the CV-
 
 Given only 4 submissions remaining, here's the recommended order:
 
-1. **Submission 1**: GroupKFold(5) (exp_079, CV=0.011030)
-   - Tests if different validation strategy changes CV-LB relationship
-   - Quick to submit (already computed)
+1. **FIRST**: Retrieve LB scores for 9 existing submissions (NO new submission needed)
 
-2. **Submission 2**: ens-model replica (exp_080, CV=0.009217)
-   - Tests if public kernel approach falls on same line
-   - Different feature combination and task-specific weights
+2. **Submission 1**: Only if missing LB scores reveal a promising direction
+   - If GroupKFold (exp_079) has different CV-LB relationship → pursue that direction
+   - If ens-model (exp_049) broke the line → analyze what's different
 
-3. **Submission 3**: SAVE for breakthrough approach
-   - Only use if GroupKFold(5) or ens-model shows promise
-   - Consider domain adaptation if previous submissions suggest a path
+3. **Submission 2-4**: SAVE for breakthrough approaches
+   - Only use if you have theoretical reason to believe approach changes CV-LB relationship
+   - Consider adversarial validation, domain adaptation, or techniques from benchmark paper
 
-4. **Submission 4**: SAVE for final attempt
-   - Use for the most promising approach based on learnings from submissions 1-3
+**DO NOT** submit just to "try something" - each submission is precious with only 4 remaining.
