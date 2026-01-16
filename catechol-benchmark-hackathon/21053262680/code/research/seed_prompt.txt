@@ -6,7 +6,7 @@
 ## CV-LB Relationship Analysis (CRITICAL)
 - Linear fit: LB = 4.31 * CV + 0.0525 (R² = 0.95)
 - Intercept interpretation: Even at CV=0, expected LB is 0.0525
-- Are all approaches on the same line? **YES** - ALL 85 experiments fall on this line
+- Are all approaches on the same line? **YES** - ALL 86 experiments fall on this line
 - **CRITICAL**: Intercept (0.0525) > Target (0.0347)
 - Required CV for target: (0.0347 - 0.0525) / 4.31 = **-0.0041** (IMPOSSIBLE!)
 
@@ -14,28 +14,33 @@
 **We MUST find approaches that REDUCE THE INTERCEPT (structural extrapolation error).**
 
 ## Response to Evaluator
-- Technical verdict was TRUSTWORTHY. ChemProp features experiment was well-executed.
-- Evaluator's top priority: Submit GroupKFold(5) to test if different validation strategy changes CV-LB relationship.
-  - **DISAGREE**: GroupKFold(5) submission format is incompatible with the competition's Leave-One-Out structure. The competition requires 24 folds for single solvent and 13 folds for full data.
+- Technical verdict was TRUSTWORTHY. Pseudo-labeling experiment was well-executed.
+- Evaluator's top priority: Retrieve missing LB scores for 9 submissions.
+  - **AGREE**: We need to check if any of those submissions broke the CV-LB line.
+  - However, the executor cannot retrieve LB scores from Kaggle - this requires manual checking.
 - Key concerns raised: CV-LB intercept (0.0528) > target (0.0347).
   - **AGREE**: This is the fundamental problem. We need to BREAK the CV-LB line, not improve CV.
-- Evaluator noted: ChemProp features performed 46% WORSE (CV=0.0118 vs 0.0081).
-  - **AGREE**: Pre-trained molecular representations don't help on this small dataset. Domain-specific features (Spange/DRFP) work better.
-- Evaluator noted: Pseudo-labeling made things worse.
-  - **AGREE**: This confirms the test distribution is fundamentally different from training.
+- Evaluator noted: Pseudo-labeling made things 9.4% worse.
+  - **AGREE**: This confirms test distribution is fundamentally different from training.
+- Evaluator noted: All approaches fall on same CV-LB line.
+  - **AGREE**: We've exhausted tabular approaches. Need fundamentally different strategy.
+
+## NEW DATA INSIGHT (Loop 86 Analysis)
+**Mass balance (SM + P2 + P3) is NOT 1.0!**
+- Mean sum: 0.7955 (20.4% unaccounted for)
+- Varies significantly by solvent: 0.486 (2,2,2-Trifluoroethanol) to 0.994 (IPA)
+- Correlation with conversion: -0.68 (higher conversion = lower mass balance)
+
+**Implication**: DO NOT enforce mass balance = 1.0 as a constraint. The "other products" fraction varies by solvent and could be a useful feature or target.
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop85_analysis.ipynb` for CV-LB analysis
+- Reference notebooks: See `exploration/evolver_loop86_analysis.ipynb` for mass balance analysis
 - Key patterns:
   - 24 solvents in single solvent data, 656 samples
   - 13 ramps in full data, 1227 samples
+  - Mass balance varies by solvent (0.49 to 0.99)
+  - Selectivity has lower within-solvent variation but higher between-solvent variation
   - All tabular models (MLP, LGBM, XGB, CatBoost, GP, Ridge) fall on SAME CV-LB line
-  - GNN from scratch: CV 0.024 (3x worse than tabular)
-  - ChemBERTa: CV 0.015 (2x worse than tabular)
-  - ChemProp features: CV 0.012 (46% worse than tabular)
-  - Similarity weighting: BACKFIRED (LB 0.145 vs 0.088)
-  - Pseudo-labeling: Made things worse
-  - Yield normalization: NO effect
 
 ## What Has Been Exhaustively Tried (DO NOT REPEAT)
 1. ❌ MLP variants (50+ experiments)
@@ -44,105 +49,92 @@
 4. ❌ GNN from scratch (CV=0.024, 3x worse)
 5. ❌ ChemBERTa embeddings (CV=0.015, 2x worse)
 6. ❌ ChemProp features (CV=0.012, 46% worse)
-7. ❌ Pseudo-labeling (made things worse)
+7. ❌ Pseudo-labeling (made things 9.4% worse)
 8. ❌ Similarity weighting (LB=0.145, BACKFIRED)
 9. ❌ Yield normalization (no effect)
-10. ❌ Conservative predictions (no improvement)
-11. ❌ Multi-seed optimization (too far from target)
+10. ❌ Conservative predictions (made things worse)
+11. ❌ Self-training (made things worse)
 
 ## Recommended Approaches (PRIORITY ORDER)
 
-### 1. **Transductive Learning / Meta-Learning** - HIGHEST PRIORITY
-**Why**: Recent research (Nature 2025, arXiv 2025) shows transductive approaches can improve OOD prediction by 1.5-3x. The key insight is to leverage analogical input-target relations between training and test sets.
+### 1. **Predict "Other Products" Fraction** - HIGHEST PRIORITY
+**Why**: Mass balance varies by solvent (0.49 to 0.99). The "other products" fraction (1 - SM - P2 - P3) might be predictable and could improve overall predictions.
 
 **Implementation**:
 ```python
-# Transductive approach: Use test set structure to inform predictions
-# 1. Compute similarity between test solvents and training solvents
-# 2. For each test sample, find analogous training samples
-# 3. Use the relationship between analogous pairs to adjust predictions
-
-# Example: If test solvent A is similar to training solvent B,
-# and training solvent B has yield Y at conditions C,
-# then test solvent A should have yield close to Y at similar conditions
+# Add 4th target: other_products = 1 - SM - P2 - P3
+# Train model to predict all 4 targets
+# Then normalize: SM, P2, P3 = predictions[:3] / predictions.sum()
 ```
 
-**Expected outcome**: Changes the CV-LB relationship by leveraging test set structure.
+**Expected outcome**: Better predictions by explicitly modeling the unaccounted fraction.
 
-### 2. **Conformal Prediction with Density Estimation** - HIGH PRIORITY
-**Why**: CoDrug (NeurIPS 2023) shows conformal prediction with density estimation can reduce coverage gap by 35% under distribution shift.
+### 2. **Solvent-Specific Calibration** - HIGH PRIORITY
+**Why**: Mass balance varies significantly by solvent. If we can predict which "type" of solvent the test solvent is similar to, we can apply appropriate calibration.
 
 **Implementation**:
 ```python
-# 1. Estimate density of each test sample under training distribution
-# 2. Weight predictions by density (low density = more conservative)
-# 3. Use conformal prediction to get calibrated prediction intervals
-# 4. Adjust point predictions based on interval width
-
-from sklearn.neighbors import KernelDensity
-kde = KernelDensity(kernel='gaussian', bandwidth=0.5)
-kde.fit(X_train_features)
-log_density = kde.score_samples(X_test_features)
-density_weight = np.exp(log_density)
-# Low density samples get predictions blended toward mean
+# 1. Cluster training solvents by their mass balance behavior
+# 2. For test solvents, predict cluster membership
+# 3. Apply cluster-specific calibration to predictions
 ```
 
-**Expected outcome**: Reduces systematic bias on OOD samples.
+**Expected outcome**: Reduces systematic bias for different solvent types.
 
-### 3. **Physics-Informed Constraints** - MEDIUM PRIORITY
-**Why**: Domain knowledge that holds for ALL solvents (not just training) can reduce extrapolation error.
+### 3. **Hierarchical Prediction with Mass Balance** - HIGH PRIORITY
+**Why**: Instead of predicting SM, P2, P3 directly, predict:
+- Total conversion (1 - SM)
+- Product distribution (P2/(P2+P3))
+- Mass balance (SM + P2 + P3)
 
 **Implementation**:
 ```python
-# Constraint 1: Mass balance (SM + Product2 + Product3 ≈ 1)
-# Constraint 2: Monotonicity (yield increases with time at fixed T)
-# Constraint 3: Arrhenius (temperature dependence follows Arrhenius law)
-
-# Post-process predictions to satisfy constraints:
-def apply_constraints(preds):
-    # Normalize to sum to 1
-    preds = preds / preds.sum(axis=1, keepdims=True)
-    # Clip to [0, 1]
-    preds = np.clip(preds, 0, 1)
-    return preds
+# Step 1: Predict conversion, selectivity, and mass_balance
+# Step 2: Derive SM, P2, P3:
+#   SM = 1 - conversion
+#   total_products = mass_balance - SM
+#   P2 = total_products * selectivity
+#   P3 = total_products * (1 - selectivity)
 ```
 
-**Expected outcome**: Reduces extreme predictions on extrapolation cases.
+**Expected outcome**: More physically meaningful predictions that might generalize better.
 
-### 4. **Isotonic Regression Calibration** - MEDIUM PRIORITY
-**Why**: Calibration can reduce systematic bias in predictions.
+### 4. **Adversarial Validation for Feature Selection** - MEDIUM PRIORITY
+**Why**: Identify which features cause distribution shift between train and test solvents.
 
 **Implementation**:
 ```python
-from sklearn.isotonic import IsotonicRegression
-
-# Train isotonic regression on validation predictions
-ir = IsotonicRegression(out_of_bounds='clip')
-ir.fit(val_preds, val_targets)
-
-# Apply to test predictions
-calibrated_preds = ir.transform(test_preds)
+# 1. Create binary labels: 0 = train solvent, 1 = test solvent
+# 2. Train classifier to distinguish train vs test
+# 3. Features with high importance are causing shift
+# 4. Remove or downweight these features
 ```
 
-**Expected outcome**: Reduces systematic over/under-prediction.
+**Expected outcome**: Reduces extrapolation error by focusing on stable features.
 
-### 5. **Ensemble with Different Weighting** - LOWER PRIORITY
-**Why**: Different weighting of single vs full data predictions might help.
+### 5. **Kernel-Based Similarity Predictions** - MEDIUM PRIORITY
+**Why**: Use Tanimoto similarity between test and train solvents for weighted predictions.
 
 **Implementation**:
 ```python
-# Current: weighted by sample count (656 single, 1227 full)
-# Try: equal weighting, or weight by inverse variance
+from rdkit import Chem, DataStructs
+from rdkit.Chem import AllChem
+
+# Compute Morgan fingerprints for all solvents
+# For each test solvent, compute Tanimoto similarity to all train solvents
+# Weight predictions by similarity
 ```
+
+**Expected outcome**: More principled extrapolation based on chemical similarity.
 
 ## What NOT to Try
-- ❌ **More MLP/LGBM/XGB/CatBoost tuning** - Exhausted (85+ experiments, all on same line)
+- ❌ **More MLP/LGBM/XGB/CatBoost tuning** - Exhausted (86+ experiments, all on same line)
 - ❌ **GNN from scratch** - Failed badly (CV 0.024)
 - ❌ **ChemBERTa fine-tuning** - Failed (CV 0.015)
 - ❌ **ChemProp features** - Failed (CV 0.012)
 - ❌ **Similarity weighting** - BACKFIRED (LB 0.145)
 - ❌ **Pseudo-labeling** - Made things worse
-- ❌ **GroupKFold(5)** - Incompatible with competition format
+- ❌ **Mass balance = 1.0 constraint** - Data shows mass balance varies by solvent!
 - ❌ **Multi-seed optimization** - Too far from target (152.8% gap)
 
 ## Validation Notes
@@ -161,7 +153,37 @@ The benchmark paper achieved MSE 0.0039 (22x better than our best LB). If they f
 
 To reach the target, we need approaches that:
 1. **Reduce the intercept** (structural extrapolation error)
-2. **Leverage test set structure** (transductive learning)
+2. **Model the mass balance variation** (new insight from Loop 86)
 3. **Use domain knowledge** that holds for unseen solvents
 
 **The target IS reachable - we just need to find the approach that changes the CV-LB relationship.**
+
+## Specific Experiment to Try Next
+
+**Experiment: Predict 4 Targets (SM, P2, P3, Other)**
+
+1. Create 4th target: `other = 1 - SM - P2 - P3`
+2. Train CatBoost+XGBoost ensemble to predict all 4 targets
+3. For submission, normalize: `SM, P2, P3 = predictions[:3] / predictions[:3].sum()`
+4. This explicitly models the mass balance variation
+
+**Why this might work**:
+- The "other products" fraction varies by solvent (0.01 to 0.51)
+- By predicting it explicitly, we capture solvent-specific behavior
+- Normalization ensures valid predictions
+
+**Alternative: Hierarchical Prediction**
+
+1. Train Model A to predict: conversion = 1 - SM
+2. Train Model B to predict: selectivity = P2 / (P2 + P3)
+3. Train Model C to predict: mass_balance = SM + P2 + P3
+4. Derive final predictions:
+   - SM = 1 - conversion
+   - total_products = mass_balance - SM
+   - P2 = total_products * selectivity
+   - P3 = total_products * (1 - selectivity)
+
+**Why this might work**:
+- Separates different chemical phenomena
+- Each model focuses on one aspect
+- More physically meaningful predictions
