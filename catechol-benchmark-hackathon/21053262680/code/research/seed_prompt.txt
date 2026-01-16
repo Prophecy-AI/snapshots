@@ -1,182 +1,99 @@
 ## Current Status
-- Best CV score: 0.0081 (exp_049, exp_050, exp_053)
-- Best LB score: 0.0877 (exp_030)
+- Best CV score: 0.0081 from exp_049/exp_050/exp_053 (CatBoost+XGBoost ensemble)
+- Best LB score: 0.0877 from exp_030 (GP+MLP+LGBM ensemble)
 - Target: 0.0347 | Gap to target: 152.8%
-- Experiments: 82 | Submissions used: 22/5 (4 remaining)
 
 ## CV-LB Relationship Analysis (CRITICAL)
 - Linear fit: LB = 4.31 * CV + 0.0525 (R² = 0.95)
 - Intercept interpretation: Even at CV=0, expected LB is 0.0525
-- Are all approaches on the same line? YES (except exp_073 which is WORSE)
-- Required CV for target: (0.0347 - 0.0525) / 4.31 = -0.0041 (NEGATIVE - IMPOSSIBLE!)
-
-**THE INTERCEPT PROBLEM IS THE CORE ISSUE:**
-- The intercept (0.0525) is HIGHER than the target (0.0347)
-- No amount of CV improvement can reach the target
-- We need to CHANGE the CV-LB relationship, not improve CV
+- **CRITICAL: Intercept (0.0525) > Target (0.0347)**
+- Required CV for target: (0.0347 - 0.0525) / 4.31 = -0.0041 (IMPOSSIBLE!)
+- All 12 submissions (excluding RF outlier) fall on the SAME LINE
+- **We have a DISTRIBUTION SHIFT problem. Improving CV alone CANNOT reach target.**
 
 ## Response to Evaluator
-- Technical verdict was TRUSTWORTHY but FLAWED for exp_081 (GNN)
-- Evaluator's top priority: **Fix GNN mixture handling OR submit GroupKFold(5)**
-- Key concerns: GNN only uses Solvent A's graph, ignoring Solvent B entirely
-- I AGREE with the evaluator - the GNN mixture bug is CRITICAL and must be fixed
-
-**Evaluator's Key Finding:**
-The GNN implementation has a FUNDAMENTAL BUG:
-```python
-# For mixtures, we'll use a weighted combination approach
-# Get graph for solvent A (primary)
-graph = SOLVENT_GRAPHS[solvent_a].clone()  # <-- ONLY SOLVENT A!
-# Solvent B is completely ignored in the graph representation
-```
-This means 65% of the data (1227 full data samples) is modeled with incomplete information.
+- Technical verdict was TRUSTWORTHY for exp_082 (Dual-Encoder GNN)
+- Evaluator's top priority: "Pivot away from training GNNs from scratch"
+- **I AGREE**: GNN experiments consistently underperform (CV=0.024 vs tabular CV=0.008)
+- The benchmark's GNN success (MSE 0.0039) likely came from pre-training, not architecture
+- Key concern: CV-LB intercept problem persists across ALL approaches
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop82_analysis.ipynb` for CV-LB analysis
+- Reference notebooks: See `exploration/evolver_loop83_analysis.ipynb` for CV-LB analysis
 - Key patterns:
-  1. ALL tabular models (MLP, LGBM, XGB, CatBoost, GP, Ridge, RF) fall on same CV-LB line
-  2. The intercept (0.0525) > target (0.0347) - tabular optimization CANNOT reach target
-  3. exp_073 (similarity weighting) got LB 0.1451 - 63% WORSE than expected
-  4. Test solvents are DIFFERENT, not OUTLIERS - blending toward mean introduces BIAS
-  5. GNN achieved CV=0.026 (216% worse than tabular) due to mixture bug
+  1. All tabular models (MLP, LGBM, XGB, CatBoost, GP, Ridge) fall on SAME CV-LB line
+  2. GNN experiments (exp_081, exp_082) achieved WORSE CV than tabular
+  3. exp_073 (RF ensemble) is an outlier with LB=0.1451 (much worse than expected)
+  4. The "mixall" kernel claims "good CV-LB" with GroupKFold(5) validation
 
-## Recommended Approaches
+## Key Insights from Public Kernels
 
-### PRIORITY 1: Fix GNN Mixture Handling (CRITICAL)
-The GNN bug must be fixed before concluding GNN doesn't work. The benchmark achieved MSE 0.0039 with GNN.
+### 1. "mixall" kernel (9 votes)
+- Uses **GroupKFold(5)** instead of Leave-One-Out
+- Claims "good CV/LB" correlation
+- Ensemble: MLP + XGBoost + RF + LightGBM
+- Runtime: only 2m 15s
+- **HYPOTHESIS**: GroupKFold(5) might have a DIFFERENT CV-LB relationship
 
-**Proper dual-encoder implementation:**
+### 2. "Ens Model" kernel (7 votes)
+- CatBoost + XGBoost ensemble
+- Combined features: spange + acs_pca + drfps + fragprints + smiles
+- Correlation-based feature filtering (threshold=0.90)
+- Numeric feature engineering: T_x_RT, RT_log, T_inv, RT_scaled
+- **Yield normalization**: clip to [0, inf], then normalize so sum ≤ 1
+- Different weights for single vs full data (Single: 7:6, Full: 1:2)
+
+## Recommended Approaches (Priority Order)
+
+### 1. SUBMIT exp_079 (GroupKFold validation) - HIGHEST PRIORITY
+- CV=0.01103 with GroupKFold(5)
+- Expected LB from LOO line: 4.31 * 0.01103 + 0.0525 = 0.100
+- **If LB is significantly better than 0.100, GroupKFold has a different CV-LB relationship**
+- This is a quick test that could reveal a breakthrough
+- **Rationale**: The "mixall" kernel claims "good CV-LB" - we need to verify this
+
+### 2. Implement Yield Normalization (Domain Constraint)
+- From "Ens Model" kernel: clip predictions to [0, inf], normalize so sum ≤ 1
+- This is a **physics-based constraint** that should help generalization
+- Yields are fractions that must sum to ≤ 1 (some product may be lost)
+- Apply to ALL models, not just new ones
+
+### 3. Extrapolation Detection + Conservative Predictions
+- Compute distance to nearest training solvent for each test sample
+- When extrapolation_score is high, blend toward training mean
+- This directly addresses the distribution shift problem
 ```python
-class DualGNN(nn.Module):
-    def __init__(self, in_channels=9, hidden_dim=64, out_dim=3):
-        super().__init__()
-        # Shared GNN encoder for both solvents
-        self.conv1 = GCNConv(in_channels, hidden_dim)
-        self.conv2 = GCNConv(hidden_dim, hidden_dim)
-        self.conv3 = GCNConv(hidden_dim, hidden_dim)
-        self.bn1 = nn.BatchNorm1d(hidden_dim)
-        self.bn2 = nn.BatchNorm1d(hidden_dim)
-        self.bn3 = nn.BatchNorm1d(hidden_dim)
-        # MLP head: graph_emb (hidden_dim) + process_feats (5)
-        self.fc1 = nn.Linear(hidden_dim + 5, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, out_dim)
-        self.dropout = nn.Dropout(0.2)
-        
-    def encode_graph(self, data):
-        """Encode a single molecular graph."""
-        x, edge_index, batch = data.x.float(), data.edge_index, data.batch
-        x = F.relu(self.bn1(self.conv1(x, edge_index)))
-        x = self.dropout(x)
-        x = F.relu(self.bn2(self.conv2(x, edge_index)))
-        x = self.dropout(x)
-        x = F.relu(self.bn3(self.conv3(x, edge_index)))
-        return global_mean_pool(x, batch)  # Graph-level embedding
-        
-    def forward(self, graph_a, graph_b, pct_b, process_features):
-        # Encode BOTH solvents
-        emb_a = self.encode_graph(graph_a)
-        emb_b = self.encode_graph(graph_b)
-        
-        # Weighted combination based on mixture percentage
-        # pct_b is the fraction of solvent B (0 for single solvent)
-        mixture_emb = (1 - pct_b.unsqueeze(1)) * emb_a + pct_b.unsqueeze(1) * emb_b
-        
-        # Concatenate with process features
-        x = torch.cat([mixture_emb, process_features], dim=1)
-        
-        # MLP head
-        x = F.relu(self.fc1(x))
-        x = self.dropout(x)
-        return torch.sigmoid(self.fc2(x))
+from sklearn.neighbors import NearestNeighbors
+nn = NearestNeighbors(n_neighbors=5).fit(X_train_features)
+distances, _ = nn.kneighbors(X_test_features)
+extrapolation_score = distances.mean(axis=1)
+weight = np.clip(extrapolation_score / threshold, 0, 1)
+final_pred = (1 - weight) * model_pred + weight * train_mean
 ```
 
-**For single solvent data:** Set pct_b=0, graph_b=graph_a (or just use emb_a)
-
-**CRITICAL VERIFICATION:**
-- Submission cells MUST use the SAME model class as CV
-- Both `model = DualGNNWrapper(data='single')` AND `model = DualGNNWrapper(data='full')` must be correct
-
-### PRIORITY 2: Submit GroupKFold(5) to Test CV-LB Relationship
-If GNN fix doesn't improve CV significantly, submit exp_079 (GroupKFold(5), CV=0.011030).
-
-**Hypothesis:** GroupKFold(5) might have a DIFFERENT CV-LB relationship because:
-- More solvents in test set = better simulation of actual test distribution
-- The "mixall" kernel claims "good CV-LB" correlation
-
-**Expected outcomes:**
-- If LB ≈ 4.31 * 0.011 + 0.053 ≈ 0.100 → Same line, GroupKFold doesn't help
-- If LB < 0.095 → Different line, GroupKFold might be the breakthrough!
-
-### PRIORITY 3: Try Pre-trained Molecular Embeddings
-The benchmark paper's success may be due to pre-trained representations. Try:
-1. ChemBERTa embeddings (frozen, not fine-tuned)
-2. Morgan fingerprints with Tanimoto similarity features
-3. Pre-trained GNN embeddings from larger molecular datasets
-
-### PRIORITY 4: Pseudo-labeling / Domain Adaptation
-If GNN and GroupKFold don't help:
-1. Train initial model on training data
-2. Make predictions on test data (using confident predictions only)
-3. Use confident predictions to augment training
-4. Retrain with augmented data
+### 4. Try Pre-trained Molecular Embeddings (ChemBERTa Frozen)
+- Instead of training GNN from scratch, use frozen ChemBERTa embeddings
+- The benchmark's success likely came from pre-training
+- Use embeddings as features for tabular models (CatBoost, XGBoost)
 
 ## What NOT to Try
-
-### FORBIDDEN - Conservative Prediction Strategies
-- exp_073 (similarity weighting) got LB 0.1451 - 63% WORSE than expected
-- Blending toward training mean introduces BIAS
-- Test solvents are DIFFERENT, not OUTLIERS
-- DO NOT try: mean reversion, uncertainty-weighted blending, extrapolation detection
-
-### EXHAUSTED - Tabular Model Optimization
-- MLP, LightGBM, XGBoost, CatBoost, GP, Ridge, RF - ALL on same CV-LB line
-- Feature engineering (Spange, DRFP, ACS PCA, fragprints) - ALL on same line
-- Ensemble strategies - ALL on same line
-- No more tabular experiments unless they fundamentally change representation
-
-### EXHAUSTED - Simple GNN/GAT Implementations
-- exp_077 (GAT+DRFP): CV=0.019588 (136% worse than tabular)
-- exp_081 (GNN): CV=0.026222 (216% worse than tabular)
-- These failed due to mixture handling bug - must fix before trying again
+- ❌ More MLP variants - exhaustively tested (50+ experiments)
+- ❌ Training GNNs from scratch - consistently underperforms (CV=0.024 vs 0.008)
+- ❌ Multi-seed ensembles - too far from target (152.8% gap)
+- ❌ Hyperparameter optimization - won't change CV-LB relationship
+- ❌ More feature engineering without yield normalization
 
 ## Validation Notes
-- Use Leave-One-Out for single solvent, Leave-One-Ramp-Out for full data
-- Track CV-LB relationship after EVERY submission
-- If new approach falls on same CV-LB line, it's NOT a breakthrough
-- A breakthrough = DIFFERENT CV-LB relationship (lower intercept or slope)
+- Current CV scheme: Leave-One-Out (24 folds for single, 13 for full)
+- Alternative: GroupKFold(5) - faster, potentially different CV-LB relationship
+- **CRITICAL**: After EVERY submission, check if it falls on the same CV-LB line
+- If a new approach has a DIFFERENT CV-LB relationship, that's a breakthrough
 
-## Remaining Submissions: 4
-Use wisely:
-1. **FIRST**: If GNN with fixed mixture handling achieves CV < 0.015, submit it
-2. **SECOND**: If GNN doesn't help, submit GroupKFold(5) to test hypothesis
-3. **SAVE 2**: For final attempts after learning from submissions
+## Submission Strategy (4 remaining)
+1. **FIRST**: Submit exp_079 (GroupKFold) to test CV-LB relationship
+2. **SECOND**: If GroupKFold shows different relationship, optimize within that approach
+3. **THIRD**: If not, try yield normalization + extrapolation detection
+4. **FOURTH**: Final best model
 
-## THE TARGET IS REACHABLE
-- Benchmark achieved MSE 0.0039 with GNN
-- Our best LB is 0.0877 (2.5x worse than target)
-- The gap is large but NOT insurmountable
-- We need the RIGHT approach (properly implemented GNN), not more optimization
-- The GNN mixture bug explains why our GNN attempts failed
-- Fix the bug, and GNN might finally work!
-
-## Key Implementation Notes for Executor
-
-1. **GNN Mixture Handling:**
-   - For single solvent: Use one graph, pct_b=0
-   - For mixtures: Encode BOTH graphs, weighted combination by pct_b
-   - The weighted pooling `(1-pct_b)*emb_a + pct_b*emb_b` is the key fix
-
-2. **Submission Cell Verification:**
-   - ALWAYS check that submission cells use the EXACT model class from CV
-   - If you define `DualGNNWrapper`, both submission cells must use `DualGNNWrapper`
-   - DO NOT use a different class name in submission cells
-
-3. **Expected CV for Fixed GNN:**
-   - If mixture handling is fixed, GNN should achieve CV closer to tabular (0.008-0.012)
-   - If CV is still >0.020, there's likely another bug
-   - The benchmark achieved MSE 0.0039 - proper GNN CAN work
-
-4. **If GNN Still Fails:**
-   - Submit GroupKFold(5) to test if it changes CV-LB relationship
-   - Consider pre-trained embeddings (ChemBERTa, Morgan fingerprints)
-   - Try pseudo-labeling as last resort
+## CRITICAL REMINDER
+The target IS reachable. The benchmark achieved MSE 0.0039. We need to find the approach that CHANGES the CV-LB relationship, not just improves CV. The intercept (0.0525) is the enemy, not the CV score.
