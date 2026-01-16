@@ -1,70 +1,93 @@
 ## Current Status
 - Best CV score: 0.0081 from exp_049/050/053 (but these had submission errors)
 - Best verified LB score: 0.0877 from exp_030 and exp_067
-- Target: 0.0347 | Gap to target: 0.0530
+- Target: 0.0347 | Gap to target: 0.0530 (153% above target)
+- Remaining submissions: 4
 
 ## CV-LB Relationship Analysis (CRITICAL)
 - Linear fit: LB = 4.36 * CV + 0.0520 (R² = 0.9558)
 - Intercept interpretation: Even at CV=0, expected LB is 0.0520
 - Are all approaches on the same line? YES
 - **CRITICAL**: Intercept (0.0520) > Target (0.0347)
-- Required CV for target: (0.0347 - 0.0520) / 4.36 = -0.004 (IMPOSSIBLE)
+- Required CV for target: (0.0347 - 0.0520) / 4.36 = -0.0040 (IMPOSSIBLE)
 
 **This means standard CV optimization CANNOT reach the target. We MUST change the CV-LB relationship.**
 
 ## Response to Evaluator
-- Technical verdict was TRUSTWORTHY. The exp_071 implementation was sound but the approach was flawed.
-- Evaluator's top priority: Fix the blend target (nearest neighbor instead of global mean). AGREE.
-- Key concerns raised: Blending toward global mean is WRONG for outlier solvents. HFIP's fold had MSE=0.200280 because predictions were pulled toward the mean, but HFIP's actual behavior is very different.
-- The evaluator correctly identified that the strategic direction (reducing CV-LB intercept) is correct, but the implementation needs to be fixed.
+- Technical verdict was TRUSTWORTHY. The exp_074 implementation was sound.
+- Evaluator's top priority: Debug the full data CV regression. AGREE - this is critical.
+- Key concerns raised:
+  1. Full data CV went from 0.008488 (exp_030) to 0.043100 (exp_074) - 5x worse
+  2. Blending was DISABLED for full data, so this is NOT due to blending
+  3. The base model itself is performing worse on full data
+  
+**Root cause analysis**: Looking at the per-fold MSE:
+- Fold 1 (HFIP + 2-MeTHF): MSE = 0.207857 (very high)
+- Fold 2 (Cyclohexane + IPA): MSE = 0.095482 (high)
+These folds contain outlier solvents (HFIP, Cyclohexane) that the model struggles with.
+
+**The issue**: In exp_074, the model architecture or training procedure changed in a way that hurts full data performance. The NN blending approach only affects single solvents, but the full data model is also worse.
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop74_analysis.ipynb` for CV-LB analysis
+- Reference notebooks: See `exploration/evolver_loop75_analysis.ipynb` for CV-LB analysis
 - Key patterns:
   1. All model types (MLP, LGBM, XGB, GP) fall on the same CV-LB line
   2. The intercept (0.0520) represents EXTRAPOLATION ERROR to unseen solvents
-  3. Outlier solvents (HFIP, Cyclohexane, Water) have DIFFERENT behavior, not "average" behavior
-  4. The extrapolation detection in exp_071 HURT performance by blending toward global mean
+  3. Outlier solvents (HFIP, Cyclohexane, Water) have DIFFERENT behavior
+  4. Public kernels use different approaches:
+     - "best-work-here": Normalizes predictions to probabilities (row sums = 1)
+     - "mixall": Uses GroupKFold(5) instead of Leave-One-Out CV
 
 ## Recommended Approaches
 
-### PRIORITY 1: Nearest Neighbor Blending (Instead of Global Mean)
-The evaluator's top recommendation. For outlier solvents, blend toward NEAREST training solvent's predictions instead of global mean. This preserves chemical similarity.
+### PRIORITY 1: Revert to exp_030 Base Model + Apply NN Blending
+The exp_074 full data CV regression suggests the base model changed. We should:
+1. Start with exp_030's exact model (GP+MLP+LGBM ensemble)
+2. Apply NN blending ONLY to single solvents
+3. Keep full data model unchanged from exp_030
 
-Implementation:
+This should give us:
+- Single solvent CV: ~0.0086 (with NN blending)
+- Full data CV: ~0.0085 (unchanged from exp_030)
+- Overall CV: ~0.0085
+
+### PRIORITY 2: Probability Normalization (from "best-work-here" kernel)
+The "best-work-here" kernel normalizes predictions to probabilities:
 ```python
-def get_nearest_training_mean(self, test_solvent, training_solvents, solvent_predictions):
-    """Get mean prediction for k nearest training solvents."""
-    test_features = SPANGE_DF.loc[test_solvent].values
-    distances = []
-    for train_solvent in training_solvents:
-        train_features = SPANGE_DF.loc[train_solvent].values
-        dist = np.linalg.norm(test_features - train_features)
-        distances.append((train_solvent, dist))
-    
-    distances.sort(key=lambda x: x[1])
-    nearest = distances[:3]  # k=3 nearest neighbors
-    
-    # Return mean of nearest solvents' predictions
-    nearest_preds = [solvent_predictions[s] for s, _ in nearest]
-    return np.mean(nearest_preds, axis=0)
+# Normalize to probabilities
+test_ens = np.clip(test_ens, 1e-9, None)
+test_ens = test_ens / test_ens.sum(axis=1, keepdims=True)
 ```
 
-### PRIORITY 2: Disable Extrapolation Detection for Full Data
-The full data CV went from 0.008488 to 0.040984 (383% worse) with extrapolation detection.
-Only apply extrapolation detection to single solvents, not mixtures.
+This ensures predictions sum to 1, which might help with the CV-LB relationship.
+Try adding this to our best model (exp_030).
 
-### PRIORITY 3: Use Higher Blend Threshold
-blend_threshold=1.0 was too aggressive. Try blend_threshold=2.0 or higher so only the most extreme outliers are affected with smaller blend weights.
+### PRIORITY 3: Uncertainty-Weighted Predictions
+Use GP variance to weight predictions toward conservative values when uncertainty is high:
+```python
+# Get GP predictions with uncertainty
+gp_pred, gp_std = gp.predict(X_test, return_std=True)
 
-### PRIORITY 4: Revert to exp_030 as Baseline
-If nearest neighbor blending doesn't work, revert to exp_030 (GP+MLP+LGBM ensemble, CV=0.0083, LB=0.0877) as our best verified model.
+# Blend toward mean when uncertainty is high
+uncertainty_weight = np.clip(gp_std / gp_std.max(), 0, 1)
+conservative_pred = (1 - uncertainty_weight) * raw_pred + uncertainty_weight * train_mean
+```
+
+### PRIORITY 4: Chemical Class-Specific Models
+Train separate models for different solvent families:
+- Alcohols (Methanol, Ethanol, IPA, TFE, HFIP)
+- Ethers (THF, 2-MeTHF, Diethyl Ether, MTBE)
+- Polar aprotic (Acetonitrile, DMA, DMSO)
+- Non-polar (Cyclohexane, Toluene)
+
+This might help with extrapolation to unseen solvents within the same family.
 
 ## What NOT to Try
 - Blending toward global mean (proven to hurt performance in exp_071)
 - Deep residual networks (exp_004 failed badly)
 - DRFP-only features with PCA (exp_002 was much worse)
 - Aggressive extrapolation detection with low threshold
+- Changing the full data model architecture (exp_074 showed this hurts performance)
 
 ## Validation Notes
 - CV scheme: Leave-one-solvent-out for single solvents (24 folds), leave-one-ramp-out for full data (13 folds)
@@ -76,10 +99,36 @@ The target (0.0347) is BELOW the intercept (0.0520). This means:
 1. Standard ML optimization CANNOT reach the target
 2. We need approaches that CHANGE THE CV-LB RELATIONSHIP
 3. The GNN benchmark achieved MSE 0.0039 - the target IS reachable
-4. Nearest neighbor blending might change the relationship by making predictions more chemically sensible for outlier solvents
+4. We need to find what makes the test set different from training
 
 ## Submission Strategy
 With only 4 remaining submissions:
-1. Try nearest neighbor blending approach first
-2. If CV improves, submit to check if it changes the CV-LB relationship
-3. If not, revert to exp_030 (best verified model)
+1. **FIRST**: Fix the full data CV regression by reverting to exp_030 base model
+2. **THEN**: Apply NN blending to single solvents only
+3. **IF CV improves**: Submit to test if it changes the CV-LB relationship
+4. **IF NOT**: Try probability normalization or uncertainty weighting
+
+## Specific Implementation for Next Experiment
+
+Create experiment 073_fixed_base that:
+1. Uses exp_030's exact GP+MLP+LGBM ensemble architecture
+2. Applies NN blending ONLY to single solvents (not full data)
+3. Uses blend_threshold=1.5, k_neighbors=3
+4. Keeps full data model EXACTLY as exp_030
+
+Expected results:
+- Single solvent CV: ~0.0086 (with NN blending)
+- Full data CV: ~0.0085 (unchanged from exp_030)
+- Overall CV: ~0.0085
+
+If this works, submit to see if the LB follows the same CV-LB line or if the intercept has changed.
+
+## THE TARGET IS REACHABLE
+
+The GNN benchmark achieved MSE 0.0039 on this exact dataset. The target (0.0347) is 8.9x worse than the GNN result, proving it's very achievable. The key is to find an approach that changes the CV-LB relationship, not just improves CV.
+
+**NEXT STEPS:**
+1. **Fix**: Revert to exp_030 base model for full data
+2. **Apply**: NN blending only to single solvents
+3. **Submit**: Test if this changes the CV-LB relationship
+4. **Iterate**: Based on LB feedback, adjust the approach
