@@ -1,79 +1,35 @@
 ## Current Status
-- Best CV score: 0.0081 from exp_049, exp_050, exp_053
-- Best LB score: 0.0877 from exp_030 (CV 0.0083)
-- Target: 0.0347 | Gap to target: 152.8%
-- Experiments completed: 78
-- Submissions remaining: 5
+- Best CV score: 0.0083 from exp_030 (GP+MLP+LGBM ensemble)
+- Best LB score: 0.0877 from exp_030
+- Target: 0.0347 | Gap to target: 0.0530 (152.7%)
+- Experiments completed: 79
+- Submissions used: 20/25 (5 remaining)
 
 ## CV-LB Relationship Analysis (CRITICAL)
-- Linear fit: LB = 4.31 * CV + 0.0525 (R² = 0.951)
-- Intercept interpretation: Even at CV=0, expected LB is 0.0525
-- Are all approaches on the same line? **YES** - ALL 78 experiments fall on this line
+- Linear fit: LB = 4.31 * CV + 0.0525 (R² = 0.95)
+- Intercept: 0.0525 > Target: 0.0347
+- **CRITICAL**: Even at CV=0, expected LB is 0.0525 - ABOVE the target!
 - Required CV for target: (0.0347 - 0.0525) / 4.31 = -0.0041 (NEGATIVE = IMPOSSIBLE)
-
-**CRITICAL INSIGHT**: The intercept (0.0525) is HIGHER than the target (0.0347). This means NO amount of CV improvement can reach the target on this line. We MUST change the CV-LB relationship itself.
+- **ALL 79 experiments fall on the SAME CV-LB line** - this is STRUCTURAL DISTRIBUTION SHIFT
 
 ## Response to Evaluator
-
-**Technical verdict**: TRUSTWORTHY - GAT experiment was well-executed with correct validation.
-
-**Evaluator's top priority**: Implement transfer learning with pre-trained molecular embeddings.
-- **AGREE**: This is the most promising unexplored direction. The benchmark paper achieved MSE 0.0039 using "transfer learning" which we haven't properly tried.
-
-**Key concerns raised**:
-1. GAT is 136% worse than baseline - needs pre-training
-2. 78 experiments on same CV-LB line indicates REPRESENTATION problem
-3. Dataset too small for attention learning from scratch
-
-**How I'm addressing**:
-1. STOP training models from scratch - use pre-trained embeddings as FEATURES
-2. Try the "mixall" kernel approach with GroupKFold(5) - may give better CV-LB correlation
-3. Consider conservative prediction strategies for extrapolation
+- Technical verdict was TRUSTWORTHY. ChemBERTa frozen embeddings experiment was well-executed.
+- Evaluator's top priority: Test GroupKFold(5) validation from "mixall" kernel. **AGREE STRONGLY**.
+- Key concerns raised: CV-LB intercept (0.0528) > target (0.0347). **This is THE problem**.
+- ChemBERTa frozen embeddings failed (77% worse than baseline) - valuable negative result.
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop78_analysis.ipynb` for CV-LB analysis
+- Reference notebooks: See `exploration/evolver_loop79_analysis.ipynb` for CV-LB analysis
 - Key patterns:
-  - All 78 experiments fall on LB = 4.31*CV + 0.0525 line
-  - Intercept (0.0525) > Target (0.0347) = STRUCTURAL problem
-  - GAT/GNN from scratch don't help - dataset too small
-  - The "mixall" kernel uses GroupKFold(5) and ensemble of MLP+XGB+RF+LGBM
+  1. ALL approaches (MLP, LGBM, XGB, CatBoost, GP, GNN, GAT, ChemBERTa) fall on SAME CV-LB line
+  2. The intercept (0.0525) represents STRUCTURAL extrapolation error
+  3. Improving CV just moves along the line, doesn't change the intercept
+  4. The "mixall" kernel uses GroupKFold(5) - a DIFFERENT validation strategy
 
-## Recommended Approaches (Priority Order)
+## Recommended Approaches (PRIORITY ORDER)
 
-### PRIORITY 1: Pre-trained ChemBERTa Embeddings as Features
-**Hypothesis**: Pre-trained embeddings capture chemistry knowledge that can't be learned from 24 solvents. Using them as features (not fine-tuning) could reduce the CV-LB intercept.
-
-**Implementation**:
-```python
-from transformers import AutoModel, AutoTokenizer
-import torch
-
-# Load pre-trained ChemBERTa
-model_name = "seyonec/ChemBERTa-zinc-base-v1"
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModel.from_pretrained(model_name)
-
-# Get embeddings for each solvent SMILES
-def get_embedding(smiles):
-    inputs = tokenizer(smiles, return_tensors="pt", padding=True, truncation=True)
-    with torch.no_grad():
-        outputs = model(**inputs)
-    return outputs.last_hidden_state.mean(dim=1).numpy()
-
-# Create embedding lookup for all solvents
-SMILES_DF = pd.read_csv('/home/data/smiles_lookup.csv', index_col=0)
-embeddings = {name: get_embedding(smiles) for name, smiles in SMILES_DF['solvent smiles'].items()}
-
-# Use embeddings as features for LGBM/MLP
-```
-
-**Why this is different from previous ChemBERTa attempts**:
-- Previous attempts FINE-TUNED ChemBERTa on our small dataset
-- This approach uses FROZEN embeddings as features
-- The embeddings already contain chemistry knowledge from pre-training on millions of molecules
-
-### PRIORITY 2: GroupKFold(5) Validation (like "mixall" kernel)
-**Hypothesis**: GroupKFold(5) may give CV estimates that correlate better with LB.
+### PRIORITY 1: Implement "mixall" Kernel Approach with GroupKFold(5)
+**Hypothesis**: GroupKFold(5) validation may give a different CV-LB relationship.
 
 **Implementation**:
 ```python
@@ -87,62 +43,65 @@ def generate_leave_one_out_splits(X, Y):
         yield (X.iloc[train_idx], Y.iloc[train_idx]), (X.iloc[test_idx], Y.iloc[test_idx])
 ```
 
-**Why this might help**:
-- More training data per fold (80% vs ~96%)
-- Fewer folds = less variance in CV estimate
-- May better simulate the actual test distribution
+**Key features from "mixall" kernel**:
+- Ensemble: MLP + XGB + RF + LGBM with weighted average
+- Spange descriptors only (simpler features)
+- Runtime: 2m 15s (fast iteration)
 
-### PRIORITY 3: Conservative Prediction Strategy
-**Hypothesis**: When the model detects it's extrapolating, blend predictions toward the training mean.
+### PRIORITY 2: Implement "ens-model" Kernel Approach
+**Hypothesis**: CatBoost + XGBoost ensemble with feature filtering may improve LB.
 
-**Implementation**:
-```python
-from sklearn.neighbors import NearestNeighbors
+**Key features**:
+1. **Correlation-based feature filtering** (threshold=0.90):
+   - Priority: spange > acs > drfps > frag > smiles
+   - Drop highly correlated features
+   
+2. **Numeric feature engineering**:
+   - Temperature to Kelvin: T_K = T + 273.15
+   - Interaction: T_x_RT = T_K * RT
+   - Log time: RT_log = log(RT + 1e-6)
+   - Inverse temp: T_inv = 1 / T_K
+   - Scaled time: RT_scaled = RT / mean(RT)
 
-# Compute extrapolation score
-nn = NearestNeighbors(n_neighbors=5).fit(X_train_features)
-distances, _ = nn.kneighbors(X_test_features)
-extrapolation_score = distances.mean(axis=1)
+3. **Prediction clipping and renormalization**:
+   ```python
+   out = np.clip(out, a_min=0.0, a_max=None)
+   totals = out.sum(axis=1, keepdims=True)
+   divisor = np.maximum(totals, 1.0)
+   out = out / divisor
+   ```
 
-# Blend toward mean when extrapolating
-threshold = np.percentile(extrapolation_score, 75)
-weight = np.clip(extrapolation_score / threshold, 0, 1)
-final_pred = (1 - weight.reshape(-1, 1)) * model_pred + weight.reshape(-1, 1) * train_mean
-```
+4. **Different weights for single vs full data**:
+   - Single: CatBoost 7:6 XGBoost
+   - Full: CatBoost 1:2 XGBoost
 
-### PRIORITY 4: Submit Pending Experiment for LB Feedback
-We have 8 pending submissions (exp_049, exp_050, exp_052, exp_053, exp_054, exp_055, exp_057, exp_063).
-- exp_049, exp_050, exp_053 all have CV=0.0081 (best CV)
-- Need to verify if they follow the same CV-LB line
-- If they do, confirms we need to change approach
+### PRIORITY 3: Combine Best of Both Kernels
+If individual approaches don't work, combine:
+- GroupKFold(5) validation from "mixall"
+- CatBoost + XGBoost ensemble from "ens-model"
+- Feature filtering and engineering from "ens-model"
+- Prediction clipping and renormalization
 
 ## What NOT to Try
-- ❌ More MLP/LGBM/XGB/CatBoost variants - all fall on same line
-- ❌ Training GNN/GAT from scratch - dataset too small
-- ❌ Fine-tuning transformers on our data - not enough samples
-- ❌ Multi-seed ensembles - we're 152% from target, not 1-2%
-- ❌ Hyperparameter optimization - won't change the intercept
+- ❌ More ChemBERTa variants (frozen embeddings failed by 77%)
+- ❌ More MLP/LGBM/XGB variants without changing validation strategy (all on same line)
+- ❌ GNN/GAT from scratch (not enough data, already failed)
+- ❌ Multi-seed ensembles (too far from target for optimization)
+- ❌ Hyperparameter sweeps (won't change the CV-LB intercept)
 
 ## Validation Notes
-- Use Leave-One-Out for single solvent (24 folds)
-- Use Leave-One-Ramp-Out for full data (13 folds)
-- ALSO try GroupKFold(5) to see if CV-LB correlation improves
-- Track BOTH CV schemes to understand which correlates better with LB
+- Current validation: Leave-One-Out (24 folds for single, 13 folds for full)
+- "mixall" kernel uses: GroupKFold(5) - this is DIFFERENT
+- The validation strategy may be causing the CV-LB gap
+- Test GroupKFold(5) FIRST to see if it changes the CV-LB relationship
 
-## Key Insight from "mixall" Kernel
-The "mixall" kernel (9 votes, "good CV/LB") uses:
-1. GroupKFold(5) instead of Leave-One-Out
-2. Ensemble: MLP + XGBoost + RandomForest + LightGBM
-3. Spange descriptors only
-4. Weighted ensemble with tunable weights
+## CRITICAL REMINDERS
+1. **VERIFY submission cell model class matches CV model class** before logging
+2. **DO NOT log "summary" or "final decision" as experiments**
+3. **DO NOT use LB score as CV score when logging**
+4. **The target IS reachable** - the benchmark achieved MSE 0.0039
 
-This is worth trying because it may have a DIFFERENT CV-LB relationship.
-
-## Summary
-The target IS reachable - the benchmark achieved MSE 0.0039. But we need to:
-1. STOP optimizing on the current CV-LB line
-2. USE pre-trained embeddings (ChemBERTa) as features
-3. TRY GroupKFold(5) validation
-4. IMPLEMENT conservative prediction for extrapolation
-
-The key is to find an approach that CHANGES the CV-LB relationship, not just improves CV.
+## Expected Outcomes
+- If GroupKFold(5) gives a DIFFERENT CV-LB relationship → breakthrough potential
+- If "ens-model" approach improves LB even slightly → worth submitting
+- If both fail → need to investigate what the benchmark paper actually did
