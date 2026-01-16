@@ -43,32 +43,70 @@
 
 **Implementation**:
 ```python
-class PerTargetHeterogeneousModel:
-    def __init__(self, data='single'):
+from sklearn.ensemble import HistGradientBoostingRegressor, ExtraTreesRegressor
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.multioutput import MultiOutputRegressor
+
+class BetterCatecholModel:
+    def __init__(self, feature_table="spange_descriptors", base_type="hgb"):
+        self.base_type = base_type
+        self.lookup = pd.read_csv(f'/home/data/{feature_table}_lookup.csv', index_col=0)
+        self.model = None
+
+    def _build_X(self, X):
+        rt = X["Residence Time"].values.reshape(-1, 1)
+        temp = X["Temperature"].values.reshape(-1, 1)
+        if "SOLVENT NAME" in X.columns:
+            S = np.vstack([self.lookup.loc[s].values for s in X["SOLVENT NAME"]])
+            return np.hstack([rt, temp, S])
+        frac_b = X["SolventB%"].values.reshape(-1, 1) / 100.0
+        A = np.vstack([self.lookup.loc[s].values for s in X["SOLVENT A NAME"]])
+        B = np.vstack([self.lookup.loc[s].values for s in X["SOLVENT B NAME"]])
+        mix = (1 - frac_b) * A + frac_b * B
+        return np.hstack([rt, temp, frac_b, mix])
+
+    def train_model(self, X, Y):
+        Xf = self._build_X(X)
+        y = Y.values
+        if self.base_type == "hgb":
+            base = HistGradientBoostingRegressor(max_depth=7, max_iter=700, learning_rate=0.04)
+        else:
+            base = ExtraTreesRegressor(n_estimators=900, min_samples_leaf=2, random_state=42, n_jobs=-1)
+        self.model = Pipeline([("scaler", StandardScaler()), ("reg", MultiOutputRegressor(base))])
+        self.model.fit(Xf, y)
+
+class PerTargetEnsembleModel:
+    def __init__(self):
         self.targets = ["Product 2", "Product 3", "SM"]
         self.models = {}
         for t in self.targets:
             if t == "SM":
-                # Gradient boosting for SM
                 self.models[t] = [
-                    HGBModel(feature_table="acs_pca_descriptors"),
-                    HGBModel(feature_table="spange_descriptors"),
+                    BetterCatecholModel("acs_pca_descriptors", "hgb"),
+                    BetterCatecholModel("spange_descriptors", "hgb"),
                 ]
             else:
-                # ExtraTrees for Products
                 self.models[t] = [
-                    ETRModel(feature_table="acs_pca_descriptors"),
-                    ETRModel(feature_table="spange_descriptors"),
+                    BetterCatecholModel("acs_pca_descriptors", "etr"),
+                    BetterCatecholModel("spange_descriptors", "etr"),
                 ]
-    
+
+    def train_model(self, X, Y):
+        for t in self.targets:
+            y_single = Y[[t]]
+            for m in self.models[t]:
+                m.train_model(X, y_single)
+
     def predict(self, X):
         preds = []
         for t in self.targets:
-            p1 = self.models[t][0].predict(X)
-            p2 = self.models[t][1].predict(X)
-            pred_t = 0.65 * p1 + 0.35 * p2  # Weighted ensemble
-            preds.append(pred_t)
-        return np.clip(np.hstack(preds), 0, 1)
+            p1 = self.models[t][0].model.predict(self.models[t][0]._build_X(X))
+            p2 = self.models[t][1].model.predict(self.models[t][1]._build_X(X))
+            pred_t = 0.65 * p1 + 0.35 * p2
+            preds.append(pred_t.reshape(-1, 1))
+        pred = np.clip(np.hstack(preds), 0, 1)
+        return torch.tensor(pred, dtype=torch.double)
 ```
 
 ### PRIORITY 2: Combine Best Approaches with Per-Target Logic
@@ -82,11 +120,6 @@ If per-target heterogeneous ensemble shows promise, combine with our best techni
 - Calculate similarity of test solvent to training solvents
 - When test solvent is dissimilar (extrapolating), blend toward population mean
 - This could reduce the intercept
-
-### PRIORITY 4: Conservative Predictions for Outlier Solvents
-- Identify solvents that are "outliers" (Water, extreme polarity)
-- Use simpler models or blend toward mean for these solvents
-- This could reduce extrapolation error
 
 ## What NOT to Try
 1. **Neural network architectures** (GNN, GAT, ChemBERTa) - 5 consecutive failures, all 100%+ worse than best
