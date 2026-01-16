@@ -1,86 +1,92 @@
 ## What I Understood
-You ran **exp_074 / “AD_shrinkage_v2_template_safe”**: a **template-compliant** version of your strong **GP+MLP+LGBM ensemble (exp_030 family)**, now with a more careful **applicability-domain (AD) shrinkage** mechanism. The hypothesis is that the public LB gap is dominated by **OOD solvents/ramps**, so an **OOD-triggered blend toward a safer fallback** (here: kNN-mean-y) can reduce the **CV→LB intercept** while keeping in-domain behavior close to the base model.
+You ran **exp_075 / “AD_shrinkage_v3_flip_invariant”** (logged as `exp_074` in `session_state.json`): a **template-compliant** GP+MLP+LGBM ensemble with an **Applicability Domain (AD) shrinkage** layer. Your hypothesis is that the persistent CV→LB gap is dominated by **OOD solvents / representation shift**, so you added a **distance-triggered blend** toward a safer **kNN-mean-y fallback**. The key change from AD-v2 is making the **full-task distance + fallback flip-invariant** by canonicalizing (A,B,pct) to lexicographic A≤B with pct:=1−pct when swapped.
 
 ## Technical Execution Assessment
 
-**Validation**: Sound (for what the competition requires)
-- You are using the **exact template split generators** (leave-one-solvent-out for single; leave-one-(A,B)-pair-out for “full”) and the **template’s prediction loops** in the last three cells.
-- The model used in CV loops matches the model instantiated in the submission cells: `GPMLPLGBM_ADShrinkageV2()` for single and `GPMLPLGBM_ADShrinkageV2(data='full')` for full. ✅ (This avoids the historical “model class mismatch” failure mode.)
+**Validation**: Sound
+- You kept the **template split generators** (`generate_leave_one_out_splits` for single and `generate_leave_one_ramp_out_splits` for full) and the **exact last-3-cells structure**. ✅
+- The model class used in the submission cells is consistent and explicit:
+  - `model = GPMLPLGBM_ADShrinkageV3()`
+  - `model = GPMLPLGBM_ADShrinkageV3(data='full')`
+  This avoids the historically common **CV model vs submission model mismatch**. ✅
 
-**Leakage Risk**: Low (with one nuance)
-- Supervised calibration (learning alpha(d)) uses only a fold-internal split (`GroupShuffleSplit` on solvent or canonical solvent-pair). That’s appropriate.
-- Unsupervised distance components (scaler+kNN) are refit on the full fold training set after calibration, which is leakage-safe.
-- Nuance (low/medium confidence): for full data, your inner split groups on **canonical pair only**. If there is meaningful structure at the **experiment/ramp** level that should not be mixed even within training, calibration could be slightly optimistic. However, the *outer* evaluator also splits by pair, so this is not an obvious violation—just something to keep in mind when interpreting alpha(d).
+**Leakage Risk**: Low
+- AD calibration uses an **inner GroupShuffleSplit** by solvent (single) or canonical solvent-pair (full), so the alpha(distance) mapping is learned only from fold-internal training data.
+- Distance scalers / NN indexes are fit on training-only data per fold.
+- Feature lookup tables (Spange/DRFP/ACS PCA) are precomputed solvent descriptors; they’re not target-derived, so using them globally is OK.
 
-**Score Integrity**: Mostly trustworthy
-- Session history shows **exp_074 CV ≈ 0.008726** (improving over AD-v1 at 0.00911, but still slightly worse than the template-safe A0 control at 0.008621).
-- Because the score is computed using the same split/predict loop structure as the submission, it’s a meaningful estimate of what this exact notebook will do under evaluation.
+**Score Integrity**: Trustworthy
+- Reported CV is consistent with the session log:
+  - single ≈ **0.0083455**
+  - full ≈ **0.0088484**
+  - overall ≈ **0.0086732**
+- CV was computed via the same loops used to generate the submission file, which is the right way to ensure the score reflects what will be submitted.
 
-**Code Quality**: Good overall; a couple high-impact edge cases to check
-1) **Distance features for full are NOT flip-invariant** (high confidence)
-   - Base predictions are flip-invariant (you average flipped inputs), but `_dist_features_full(..., flip=False)` depends on the A/B order.
-   - This means the **kNN distance + kNN fallback** can behave differently for the same physical mixture expressed as A/B swapped.
-   - You already fixed canonicalization for grouping, but distance itself should also be canonicalized.
+**Code Quality**: Generally good; 2 high-impact checks
+1) **Flip invariance fix is correctly implemented** (high confidence)
+   - `canonicalize_full_rows()` is used inside `_dist_features_full()` and inside `_groups()` for full. This closes the exact loophole from AD-v2.
 
-2) **kNN fallback uses raw training rows, not flip-augmented rows** (low confidence concern)
-   - This is not leakage and it’s consistent, but it may underutilize symmetry. If A/B swapped rows exist, the neighbor set might be fragmented.
+2) **Ordered-pair split generator vs canonical groups** (medium confidence “watch item”, not an error)
+   - The template’s *outer* full split generator is based on the **ordered** (A,B) pairs present in the data. Your AD calibration uses **canonical** pairs for grouping.
+   - In the provided training data there are **no unordered pairs appearing in both orientations**, so this is fine today. But if hidden evaluation includes swapped ordering conventions, your *model* is now robust (good), while the *evaluation split generator* might still treat swapped orientation as a different ramp. This is a competition-level quirk rather than a bug in your notebook, but it’s worth remembering when interpreting CV/LB behavior.
 
-Verdict: **TRUSTWORTHY (with one important design concern)**
-- I’m confident the notebook is template-compliant and the CV is “real”.
-- I’m also confident the biggest remaining technical opportunity is making **distance + fallback flip-invariant** for the full task.
+Verdict: **TRUSTWORTHY**
 
 ## Strategic Assessment
 
-**Approach Fit**
-- This is the right strategic direction given the established **LB ≈ 4.3×CV + ~0.052 intercept** pattern across many submissions. AD shrinkage (especially hinged, neighbor-based) is exactly the kind of mechanism that can reduce the **intercept** rather than just moving along the line.
+**Approach Fit**: Strong
+- Given the established **structural CV→LB mismatch** (many model families collapsing onto the same LB≈a·CV+b line), working on **intercept reduction** via an AD/uncertainty-aware correction layer is exactly the right direction.
+- The flip-invariance issue was one of the few “mechanistic” reasons the AD layer could fail under a representation shift (ordering convention), so fixing it is high leverage.
 
-**Effort Allocation**
-- Good: you are not spending submissions on marginal MLP/LGBM tuning.
-- With **4 submissions remaining today**, the best use is: **1–2 LB probes** of carefully chosen AD variants that are maximally likely to break the CV→LB relationship.
+**Effort Allocation**: Good, now needs LB confirmation
+- You’re not burning cycles on marginal tabular tuning; you’re addressing the likely cause of the LB intercept.
+- The key remaining bottleneck is **evidence**: does AD-v3 actually move the LB off the historical line? That requires a submission.
 
 **Assumptions**
-- kNN distance in your descriptor space correlates with OOD hardness (seems true for full mixtures per your earlier analysis).
-- kNN-mean-y is a better conservative fallback than global mean (generally true in chemistry; also less bias).
+- Distance in your chosen descriptor space correlates with OOD difficulty (very plausible for unseen solvents/pairs).
+- kNN-mean-y is a good conservative fallback (often true in chemistry tasks; should be less biased than global-mean reversion).
 
-**Blind Spots / High-leverage next variants**
-1) **Flip-invariant distance + neighbor fallback (full task)**
-   - This is the most direct “bug/feature” gap I see: base model is symmetric, but the AD mechanism isn’t.
-   - If the test set contains a different A/B ordering convention than train (or simply more A/B swaps), this can directly drive LB error.
+**Blind Spots / Next high-leverage ideas**
+1) **Make the AD gate sensitive to “condition OOD” as well as “solvent OOD” (controlled variant)**
+   - Current full distance features are solvent-structure-centric: `[blend_embed, pct, pct*(1-pct), ||A-B||]`.
+   - If hidden ramps include unusual **Temperature/Residence Time** regimes, the gate may not trigger when it should.
+   - A clean next step is to append the same kinetic vector used elsewhere (`[RT, Temp, invT, logRT, invT*logRT]`) to the full distance vector.
 
-2) **Distance feature choice for full: consider adding kinetics back in (controlled test)**
-   - Your `_dist_features_full` currently excludes kinetics by design. If the hard OOD cases are also at unusual **T/RT regimes**, the AD gate will miss them.
-   - A disciplined variant would append `[RT, Temp, invT, logRT, invT*logRT]` to the full distance vector, but keep the *base model* unchanged.
+2) **Use model-disagreement as an uncertainty feature**
+   - You already have three base predictors (GP/MLP/LGBM). Their **per-row disagreement** (e.g., std across base predictions per target) is a strong OOD indicator.
+   - This can be added to the AD gate as extra dimensions, or used to modulate alpha directly.
 
 **Trajectory**
-- AD-v2 recovered much of the CV hit from AD-v1 (0.00911 → 0.00873). That’s a meaningful improvement in “cost of robustness”.
-- The remaining question is whether this changes LB (intercept reduction). That requires an LB submission.
+- v3 improved CV vs v2 (0.008726 → 0.008673) while fixing a major robustness flaw. That’s the right kind of incremental improvement.
+- Next decision point should be driven by **LB movement**, not CV deltas.
 
 **CV-LB Relationship** (after 3+ submissions)
-- From your recorded history: **LB ≈ 4.34 × CV + 0.0523 (R² ≈ 0.957)**.
-- The only way to beat the target is to **break this line** (reduce intercept and/or slope). AD-v2 is a credible attempt to do exactly that.
+- Only one “confirmed LB” is recorded in your state right now (exp_068: CV 0.008303 → LB 0.08774), but your broader history indicates a tight CV-LB line.
+- AD-v3 is explicitly intended to **change the line** (reduce intercept). This must be judged by a submission.
 
 ## What’s Working
-- **Template safety**: last-three-cells structure is correct; model class matches in CV/submission.
-- **Better AD design** than v1: hinged activation, refit NN on full fold, and kNN-mean-y fallback are all strong choices.
-- **Selective application**: disabling shrinkage on single by default is a pragmatic way to avoid harming the part where distance didn’t correlate with error.
+- Template compliance and model-class consistency in submission cells.
+- The AD approach targets the right failure mode (OOD/generalization) rather than optimizing within the same tabular regime.
+- Flip-invariant canonicalization is implemented cleanly and applied in the correct places.
 
 ## Key Concerns
 
-1) **Observation**: AD distance/fallback for full mixtures is order-dependent (not flip-invariant).
-- **Why it matters**: Your base predictor is symmetric, but the correction layer isn’t; that can introduce systematic errors under distribution shift in how mixtures are represented (A/B ordering conventions), exactly the kind of shift that inflates the LB intercept.
-- **Suggestion**: Canonicalize full-distance features the same way you canonicalize groups:
-  - If `A > B`, swap A/B and set `pct = 1-pct` before computing distance features.
-  - Then kNN distance + kNN fallback become invariant to representation.
+1) **Observation**: The only reliable measure of success for AD-v3 is whether it changes LB relative to the historical CV→LB line.
+- **Why it matters**: CV is not the bottleneck; intercept reduction is.
+- **Suggestion**: Use **1 submission** on this exact notebook now, record LB, and immediately update the CV-LB fit including this new point.
 
-2) **Observation**: CV is slightly worse than the template-safe control, so AD is still “paying rent”.
-- **Why it matters**: You want robustness without losing the base model’s strong in-domain fit.
-- **Suggestion**: Tighten AD activation further for full if needed (e.g., `tau_q=0.80` or smaller `alpha_max` like 0.4) *after* flip-invariance is fixed, so you’re not compensating for an avoidable artifact.
+2) **Observation**: Full-task AD distance features ignore kinetics/operating conditions.
+- **Why it matters**: OOD in hidden may be partly driven by unusual T/RT regimes; then the AD gate won’t activate even when extrapolating.
+- **Suggestion**: Next controlled variant: `D_full = [current_features, kinetic_vec]` (keep everything else fixed) and submit if v3 doesn’t move LB.
 
-3) **Observation**: No LB confirmation yet for AD-v2.
-- **Why it matters**: The whole point is intercept reduction; CV alone can’t verify it.
-- **Suggestion**: Use **one** of the remaining submissions to probe this exact AD-v2 (or the flip-invariant tweak) and immediately update the CV-LB plot. Even a small deviation from the line is actionable.
+3) **Observation**: AD calibration is flexible (isotonic per target), which can overfit the calibration split.
+- **Why it matters**: Overfit alpha(d) can preserve CV while failing to generalize to truly unseen solvents.
+- **Suggestion** (if LB doesn’t improve): simplify/regularize the gate:
+  - lower `alpha_max` (e.g., 0.6 → 0.4)
+  - increase `tau_q` (e.g., 0.70 → 0.80) so shrinkage activates only for more extreme OOD
+  - or replace isotonic with a monotone parametric form (hinge-linear) to reduce degrees of freedom.
 
 ## Top Priority for Next Experiment
-Make the **full-task AD mechanism flip-invariant** (canonicalize A/B + pct inside `_dist_features_full` and/or before calling it), then submit that variant once to measure whether it **breaks the CV→LB line** (intercept reduction). 
+**Submit AD-shrinkage v3 (flip-invariant) once** to measure whether it **breaks the CV→LB relationship** (intercept reduction). If LB doesn’t improve, the single highest-leverage follow-up is a **v4 gate** that adds **kinetics/conditions** (RT/Temp-derived features) into the full distance vector, while keeping the base predictor unchanged.
 
-Confidence level: **High** that the notebook is template-compliant and results are executable as evaluated; **High** that flip-invariance in the AD layer is currently a key technical/strategic opportunity; **Medium** that adding kinetics to full-distance will help (worth a controlled test if flip-invariance alone doesn’t move LB).
+Confidence level: **High** on technical correctness/template compliance and on the flip-invariance fix; **Medium** that v3 alone will materially reduce the LB intercept (needs empirical confirmation).
