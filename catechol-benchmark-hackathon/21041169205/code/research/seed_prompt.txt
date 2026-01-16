@@ -1,139 +1,168 @@
 ## Current Status
 - Best CV score: 0.0083 from exp_030 (GP+MLP+LGBM ensemble)
 - Best LB score: 0.0877 (exp_030)
-- Target: 0.0347 | Gap to target: 153%
+- Target: 0.0347 | Gap to target: 153% (0.0530 above)
 - Submissions remaining: 5
+- Loop: 64 | Experiments: 64
 
 ## CV-LB Relationship Analysis (CRITICAL)
 - Linear fit: LB = 4.31 * CV + 0.0525 (R² = 0.95)
 - Intercept interpretation: Even at CV=0, expected LB is 0.0525
-- Are all approaches on the same line? YES
+- Are all approaches on the same line? YES - ALL 12 successful submissions
 - CRITICAL: Intercept (0.0525) > Target (0.0347)
-- Required CV for target: (0.0347 - 0.0525) / 4.31 = -0.0041 (NEGATIVE - IMPOSSIBLE)
+- Gap: 0.0178 (33.9% reduction in intercept needed)
+- Required CV for target: -0.0041 (NEGATIVE = IMPOSSIBLE with current approach)
 
-**This means standard approaches CANNOT reach the target. We need approaches that CHANGE the CV-LB relationship.**
+**This means standard approaches CANNOT reach the target. We MUST try approaches that CHANGE the CV-LB relationship.**
 
 ## Response to Evaluator
-- Technical verdict was TRUSTWORTHY. The implementation is correct.
-- Evaluator's top priority: STOP AND INVESTIGATE SUBMISSION ERRORS. Agreed - 7 consecutive failures is critical.
-- Key concerns raised: 
-  1. CV regression (0.011171 vs best 0.008298) - Agreed, exp_060 is worse than best
-  2. Intercept problem unsolved - Agreed, this is the core issue
-  3. ens-model kernel not fully replicated - This is a key gap to address
+- Technical verdict was TRUSTWORTHY. The exp_060 implementation is correct.
+- Evaluator's top priority: STOP AND INVESTIGATE SUBMISSION ERRORS. 
+  - Agreed - 7 consecutive failures (exp_049-057) is critical
+  - However, the submission format appears correct (1883 rows, correct columns, values in [0,1])
+  - This may be a Kaggle platform issue or subtle notebook structure issue
+- Key concerns raised:
+  1. CV regression (0.011171 vs best 0.008298) - Agreed, exp_060 should NOT be submitted
+  2. Intercept problem unsolved - This is the CORE issue we must address
+  3. ens-model kernel not fully replicated - Key gap to address
+- My synthesis: Focus on approaches that could CHANGE the intercept, not just improve CV
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop63_analysis.ipynb` for CV-LB analysis
-- Key patterns:
-  1. All model types (MLP, LGBM, XGB, GP, CatBoost) fall on the SAME CV-LB line
-  2. The intercept (0.0525) represents structural extrapolation error
+- Reference notebooks: See `exploration/evolver_loop64_analysis.ipynb` for CV-LB analysis
+- Key patterns discovered:
+  1. ALL model types (MLP, LGBM, XGB, GP, CatBoost) fall on the SAME CV-LB line
+  2. The intercept (0.0525) represents structural extrapolation error to unseen solvents
   3. Test solvents are fundamentally different from training solvents
-  4. The ens-model kernel uses ALL features with correlation filtering - we haven't fully replicated this
+  4. The benchmark paper says transfer learning and active learning achieved BEST scores
+  5. The mixall kernel uses GroupKFold (5 splits) instead of Leave-One-Out - DIFFERENT validation scheme
+
+## Key Insights from Public Kernels
+
+### ens-model kernel (matthewmaree)
+- Uses ALL feature sources: spange + acs_pca + drfps + fragprints + smiles
+- Correlation filtering with threshold=0.80, priority-based (spange > acs > drfps > frag > smiles)
+- CatBoost with MultiRMSE loss (trains all 3 targets together)
+- Different ensemble weights: Single (7:6 CatBoost:XGB), Full (1:2 CatBoost:XGB)
+- Multi-target normalization (predictions sum to 1)
+- Tuned hyperparameters: depth=3, n_estimators=1050, lr=0.07
+
+### mixall kernel (lishellliang)
+- Uses GroupKFold (5 splits) instead of Leave-One-Out
+- This is a FUNDAMENTALLY DIFFERENT validation scheme
+- May have a DIFFERENT CV-LB relationship
+- MLP + XGBoost + RF + LightGBM ensemble with Optuna-tuned weights
 
 ## Recommended Approaches (Priority Order)
 
-### PRIORITY 1: Fully Replicate ens-model Kernel
-The ens-model kernel (matthewmaree) is a top public kernel that we haven't fully replicated. Key differences:
-1. **ALL feature sources**: spange + acs_pca + drfps + fragprints + smiles
-2. **Correlation filtering**: threshold=0.90, priority-based (spange > acs > drfps > frag > smiles)
-3. **Different ensemble weights**: Single (7:6 CatBoost:XGB), Full (1:2 CatBoost:XGB)
-4. **Tuned hyperparameters**: depth=3, n_estimators=1050, lr=0.05
+### PRIORITY 1: Exact ens-model Kernel Replication
+The ens-model kernel is a top public kernel. We need to EXACTLY replicate it:
 
-**Action**: Create a notebook that EXACTLY replicates the ens-model kernel code, including:
-- `build_solvent_feature_table()` function with all feature sources
-- `filter_correlated_features()` with priority-based filtering
-- `CatBoostModel` and `XGBModel` with exact hyperparameters
-- `EnsembleModel` with correct weights
+**Key code to copy:**
+1. `build_solvent_feature_table()` - combines ALL feature sources
+2. `filter_correlated_features()` - priority-based correlation filtering (threshold=0.80)
+3. `add_numeric_features()` - Arrhenius kinetics features
+4. `CatBoostModel` - MultiRMSE loss, exact hyperparameters
+5. `XGBModel` - per-target regressors, exact hyperparameters
+6. `EnsembleModel` - correct weights (7:6 for single, 1:2 for full)
 
-### PRIORITY 2: Test-Time Refinement for Distribution Shift
-Research suggests test-time refinement can reduce distribution shift error:
-1. **Extrapolation detection**: Measure distance from test solvent to training distribution
-2. **Conservative predictions**: When extrapolating, blend toward population mean
-3. **Uncertainty weighting**: Use GP uncertainty to weight predictions
+**Critical hyperparameters:**
+- CatBoost (single): depth=3, lr=0.07, n_estimators=1050, l2_leaf_reg=3.5
+- CatBoost (full): depth=3, lr=0.06, n_estimators=1100, l2_leaf_reg=2.5
+- XGBoost: n_estimators=1000, max_depth=4, lr=0.02, subsample=0.5
 
-**Action**: Add extrapolation detection features:
-- Compute Tanimoto similarity of test solvent fingerprints to nearest training solvents
-- Add feature: `min_train_similarity`, `mean_train_similarity`
-- When similarity is low (extrapolating), blend predictions toward mean
+### PRIORITY 2: GroupKFold Validation (mixall approach)
+The mixall kernel uses GroupKFold (5 splits) instead of Leave-One-Out. This may have a DIFFERENT CV-LB relationship:
 
-### PRIORITY 3: Physics-Informed Features
-The Catechol benchmark paper mentions that transfer learning and active learning achieved best scores. Physics-informed features can help:
-1. **Arrhenius kinetics**: Already implemented (1/T, ln(t), T*t)
-2. **Solvent polarity features**: Dielectric constant, hydrogen bonding capacity
-3. **Chemical class features**: Is alcohol, ether, ester, etc.
+**Key changes:**
+1. Override `generate_leave_one_out_splits()` to use GroupKFold(n_splits=5)
+2. Override `generate_leave_one_ramp_out_splits()` similarly
+3. This changes the validation scheme but keeps the submission format the same
 
-**Action**: Add solvent chemical class as categorical feature:
-- Classify solvents by functional group (alcohol, ether, ester, ketone, etc.)
-- Use class-specific model weights or separate models per class
+**Why this might help:**
+- Leave-One-Out CV may be overly optimistic
+- GroupKFold may better simulate the test distribution
+- Different CV scheme = potentially different CV-LB relationship
 
-### PRIORITY 4: Pseudo-Labeling
-Use confident predictions on test data to augment training:
-1. Make predictions on all test samples
-2. Select samples with high confidence (low uncertainty)
-3. Add these pseudo-labeled samples to training
-4. Retrain model
+### PRIORITY 3: Multi-Target Normalization
+The ens-model kernel normalizes predictions to sum to 1:
+```python
+totals = out.sum(axis=1, keepdims=True)
+divisor = np.maximum(totals, 1.0)
+out = out / divisor
+```
 
-**Action**: Implement pseudo-labeling with GP uncertainty:
-- Train GP model, get predictions + uncertainties
-- Select test samples with uncertainty < threshold
-- Add to training set and retrain
+This ensures predictions are physically meaningful (yields can't exceed 100% total).
+
+### PRIORITY 4: Uncertainty-Weighted Predictions
+Use GP uncertainty to make conservative predictions when extrapolating:
+1. Train GP model, get predictions + uncertainties
+2. When uncertainty is high, blend toward population mean
+3. This reduces extreme predictions on unseen solvents
 
 ## What NOT to Try
 - ❌ Simple hyperparameter tuning (stays on same CV-LB line)
 - ❌ More ensemble members without diversity (diminishing returns)
 - ❌ Different random seeds (doesn't change intercept)
 - ❌ Extrapolation detection that HURTS CV (exp_058, exp_059 showed this)
+- ❌ Submitting exp_060 (CV is 35% worse than best)
 
 ## Validation Notes
-- Use official Leave-One-Out CV (24 folds for single, 13 folds for full)
+- Use official Leave-One-Out CV (24 folds for single, 13 folds for full) OR
+- Try GroupKFold (5 splits) as in mixall kernel
 - The last 3 cells MUST be exactly as in official template
 - Only change allowed: model definition line
 - Ensure submission.csv has correct format: id, index, task, fold, row, target_1, target_2, target_3
 
-## CRITICAL: Submission Format
+## CRITICAL: Submission Format Investigation
 Recent submissions (exp_049-057) failed with "Evaluation metric raised an unexpected error".
 The submission format appears correct (1883 rows, correct columns, values in [0,1]).
-Possible causes:
-1. Notebook cell structure issue
+
+**Possible causes:**
+1. Notebook cell structure issue - last 3 cells must be EXACTLY as template
 2. Model definition not following template exactly
 3. Kaggle platform intermittent issues
+4. Some subtle format mismatch
 
-**RECOMMENDATION**: 
+**RECOMMENDATION:**
 1. Create notebook that EXACTLY copies ens-model kernel structure
-2. Only modify the model class definition
-3. Ensure last 3 cells are UNCHANGED from official template
+2. Ensure last 3 cells are UNCHANGED from official template
+3. Only modify the model class definition
+4. Test by submitting a known-working approach (exp_030 structure)
 
 ## Experiment Plan for This Loop
 
 ### Experiment 061: Exact ens-model Kernel Replication
-1. Copy the ENTIRE ens-model kernel code
-2. Use ALL feature sources with correlation filtering
+1. Copy the ENTIRE ens-model kernel code from `/home/code/research/kernels/matthewmaree_ens-model/`
+2. Use ALL feature sources with correlation filtering (threshold=0.80)
 3. Use exact hyperparameters and ensemble weights
 4. Ensure notebook structure matches official template exactly
 
-Expected outcome: CV ~0.008, LB ~0.087 (similar to exp_030)
-This establishes a baseline that we KNOW works on Kaggle.
+**Expected outcome:** CV ~0.008-0.009, establishes working baseline
 
-### Experiment 062: ens-model + Extrapolation Detection (Conservative)
-1. Start with ens-model kernel
-2. Add extrapolation detection features (similarity to training)
-3. When extrapolating, blend predictions toward population mean
-4. Use GP uncertainty to weight the blending
+### Experiment 062: GroupKFold Validation (mixall approach)
+1. Use ens-model kernel model
+2. Override validation to use GroupKFold (5 splits)
+3. This changes the CV-LB relationship potentially
 
-Expected outcome: Potentially lower LB if extrapolation detection helps
+**Expected outcome:** Different CV, potentially different LB relationship
 
-### Experiment 063: ens-model + Solvent Clustering
-1. Cluster solvents by chemical class
-2. Use class-specific ensemble weights
-3. For novel classes, use more conservative predictions
+### Experiment 063: Multi-Target Normalization + All Features
+1. Use ens-model kernel with all features
+2. Add multi-target normalization (predictions sum to 1)
+3. Use GP uncertainty for conservative predictions
 
-Expected outcome: Better generalization to unseen solvent types
+**Expected outcome:** Better generalization to unseen solvents
 
 ## THE TARGET IS REACHABLE
-The target (0.0347) is below our current intercept (0.0525), but this doesn't mean it's impossible.
-The benchmark achieved MSE 0.0039 on this exact dataset using transfer learning and active learning.
-Top public kernels have achieved scores close to the target.
-The solution exists - we need to find what they're doing differently.
 
-**Key insight**: The ens-model kernel uses ALL features with correlation filtering. We've been using only Spange descriptors. This could be the missing piece.
+The target (0.0347) is below our current intercept (0.0525), but this doesn't mean it's impossible:
 
-DO NOT GIVE UP. The target IS reachable. Focus on approaches that CHANGE the CV-LB relationship.
+1. **The benchmark achieved MSE 0.0039** on this exact dataset using transfer learning
+2. **Top public kernels exist** that score well - we need to replicate their approaches
+3. **The intercept can be reduced** by changing the CV-LB relationship
+4. **GroupKFold validation** may have a different CV-LB relationship
+5. **Multi-target normalization** may help with distribution shift
+
+**Key insight:** We've been trying to improve CV on the same line. We need to try approaches that CHANGE the line itself - different validation schemes, different feature combinations, different prediction strategies.
+
+DO NOT GIVE UP. The target IS reachable. Focus on approaches that CHANGE the CV-LB relationship, not just improve CV.
