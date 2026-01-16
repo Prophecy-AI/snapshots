@@ -1,107 +1,126 @@
 ## Current Status
-- Best CV score: 0.0081 from exp_049, exp_050, exp_053
-- Best LB score: 0.0877 from exp_030 (GP + MLP + LGBM ensemble)
+- Best CV score: 0.0081 from exp_049/exp_050/exp_053 (multiple experiments)
+- Best LB score: 0.0877 from exp_030
 - Target: 0.0347 | Gap to target: 0.0530 (152.8%)
-- Submissions used: 22/5 (4 remaining)
-- Experiments run: 89
 
 ## CV-LB Relationship Analysis (CRITICAL)
 - Linear fit: LB = 4.31 * CV + 0.0525 (R² = 0.95)
 - Intercept interpretation: Even at CV=0, expected LB is 0.0525
-- Are all approaches on the same line? **YES** (except exp_073 which was WORSE)
-- **CRITICAL**: Intercept (0.0525) > Target (0.0347)
-- Required CV for target: (0.0347 - 0.0525) / 4.31 = **-0.0041 (IMPOSSIBLE)**
-
-**This means NO amount of CV improvement on the current line can reach the target.**
+- Are all approaches on the same line? YES (except exp_073 which was an outlier)
+- **CRITICAL**: Intercept (0.0525) > Target (0.0347) means target is UNREACHABLE on this line
+- Required CV for target: (0.0347 - 0.0525) / 4.31 = -0.0041 (IMPOSSIBLE)
 
 ## Response to Evaluator
-
-**Technical verdict was TRUSTWORTHY.** The Hybrid GNN implementation was correct with proper validation.
-
-**Evaluator's top priority: STOP GNN experiments.** I AGREE. Five consecutive GNN experiments have all performed 2-3x worse than tabular baselines:
-- exp_077 (GAT + DRFP): +136% worse
-- exp_081 (GCN + MLP): +216% worse
-- exp_082 (Dual-encoder GNN): +195% worse
-- exp_088 (Hybrid GAT + DRFP + Spange): +120% worse
-
-**Key concerns raised:**
-1. GNN approaches consistently fail on this small dataset - AGREED, stopping GNN experiments
-2. Pre-training may be required for benchmark-level performance - AGREED, but we don't have resources for this
-3. exp_088 should NOT be submitted - AGREED, CV is 120% worse than baseline
+- Technical verdict was TRUSTWORTHY. The stacking implementation was correct.
+- Evaluator's top priority: Try GroupKFold validation scheme from "mixall" kernel. **AGREE** - this is an unexplored approach that might change the CV-LB relationship.
+- Key concerns raised: (1) Stacking performed 6.4% worse than baseline, (2) Small dataset insufficient for meta-learner. **Addressed** - we will NOT submit exp_089 and will pivot to different approaches.
+- Evaluator correctly identified that the "mixall" kernel uses GroupKFold which we haven't tried.
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop89_analysis.ipynb` for CV-LB analysis
+- Reference notebooks: See `exploration/evolver_loop90_analysis.ipynb` for CV-LB analysis
 - Key patterns:
-  - ALL tabular approaches (MLP, LGBM, XGB, CatBoost, GP, Ridge) fall on the SAME CV-LB line
-  - GNN from scratch (5 experiments) all 2-3x worse than tabular
-  - Similarity weighting (exp_073) made LB 63% WORSE (0.0877 → 0.1451)
-  - ChemBERTa and ChemProp features did not help
+  1. All tabular approaches (MLP, LGBM, XGB, CatBoost, GP, Ridge) fall on the SAME CV-LB line
+  2. The intercept (0.0525) represents structural extrapolation error that cannot be reduced by model tuning
+  3. GNN and ChemBERTa approaches failed completely (5+ experiments each)
+  4. Stacking with meta-learner performed WORSE than simple weighted averaging
 
-## Recommended Approaches
+## Key Insights from Public Kernels
 
-**CRITICAL INSIGHT**: The CV-LB intercept (0.0525) is HIGHER than the target (0.0347). This means we need to CHANGE THE RELATIONSHIP, not just improve CV.
+### "mixall" kernel (9 votes) - UNEXPLORED APPROACH
+- Uses **GroupKFold(n_splits=5)** instead of Leave-One-Out
+- Claims "good CV/LB" relationship
+- Ensemble: MLP + XGBoost + RF + LightGBM
+- Runtime: only 2m 15s (vs our 30+ minutes)
 
-### Priority 1: Replicate "ens-model" Kernel EXACTLY
-The "ens-model" kernel by matthewmaree uses a specific approach we haven't tried exactly:
-- CatBoost + XGBoost ensemble (we tried this but maybe not with exact features)
-- Combined features: spange + acs_pca + drfps + fragprints + smiles (ALL features)
-- Correlation-based feature filtering (threshold 0.90)
-- Different weights for single vs full data:
-  - Single: CatBoost 7, XGB 6 (normalized)
-  - Full: CatBoost 1, XGB 2 (normalized)
+### "Ens Model" kernel (9 votes) - PARTIALLY EXPLORED
+- CatBoost + XGBoost ensemble with different weights for single vs full data
+- Combines ALL feature sources: spange, acs_pca, drfps, fragprints
+- **Correlation-based feature filtering** (threshold=0.90) - NOT TRIED
+- Engineered features: T_x_RT, RT_log, T_inv, RT_scaled
+- **Clips predictions to [0, 1] and renormalizes** - NOT TRIED
 
-**Implementation:**
+## Recommended Approaches (PRIORITY ORDER)
+
+### PRIORITY 1: Implement "Ens Model" Approach with Renormalization
+**Rationale**: This kernel has 9 votes and uses techniques we haven't tried:
+- Correlation-based feature filtering (we use variance filtering)
+- Yield renormalization (clip to [0,1], then normalize so sum ≤ 1)
+- Different ensemble weights for single vs full data
+
+**Implementation**:
 ```python
-# Build combined feature table from ALL sources
-sources = ["spange_descriptors", "acs_pca_descriptors", "drfps_catechol", "fragprints", "smiles"]
-# Apply correlation filtering at threshold 0.90
-# Use CatBoost + XGBoost ensemble with different weights per data type
+# Correlation-based feature filtering
+def filter_correlated_features(df, threshold=0.90):
+    corr = df.corr().abs()
+    upper = corr.where(np.triu(np.ones(corr.shape), k=1).astype(bool))
+    to_drop = [col for col in upper.columns if any(upper[col] > threshold)]
+    return df.drop(columns=to_drop)
+
+# Yield renormalization
+def renormalize_predictions(preds):
+    preds = np.clip(preds, 0, 1)
+    totals = preds.sum(axis=1, keepdims=True)
+    preds = preds / np.maximum(totals, 1.0)
+    return preds
 ```
 
-### Priority 2: Stacking with Meta-Learner
-Instead of simple weighted averaging, try proper stacking:
-- Train diverse base models (GP, MLP, LGBM, CatBoost, XGBoost)
-- Use out-of-fold predictions as features for a meta-learner
-- Meta-learner can be Ridge or simple linear model
+### PRIORITY 2: Try GroupKFold Validation Scheme
+**Rationale**: The "mixall" kernel claims "good CV/LB" relationship with GroupKFold(5). This is a fundamentally different validation approach that might:
+- Have different CV-LB intercept
+- Be faster to iterate (5 folds vs 24/13)
+- Better match the LB evaluation
 
-### Priority 3: Pseudo-Labeling with Confidence Filtering
-- Use best model to predict on test data
-- Add high-confidence predictions to training data
-- Retrain model on augmented data
-- This can help with distribution shift
+**Implementation**:
+```python
+from sklearn.model_selection import GroupKFold
 
-### Priority 4: Test-Time Adaptation
-From Kaggle winners' techniques:
-- Adjust predictions based on test data statistics
-- Use adversarial validation to identify distribution shift features
-- Weight training samples by similarity to test distribution
+def generate_leave_one_out_splits(X, Y):
+    groups = X["SOLVENT NAME"]
+    gkf = GroupKFold(n_splits=5)
+    for train_idx, test_idx in gkf.split(X, Y, groups):
+        yield (X.iloc[train_idx], Y.iloc[train_idx]), (X.iloc[test_idx], Y.iloc[test_idx])
+```
+
+### PRIORITY 3: Combine ALL Feature Sources with Correlation Filtering
+**Rationale**: The "Ens Model" kernel combines spange + acs_pca + drfps + fragprints with correlation filtering. We've only used subsets.
+
+**Implementation**:
+- Load ALL feature sources
+- Apply correlation filtering (threshold=0.90)
+- Prioritize keeping: spange > acs_pca > drfps > fragprints
+
+### PRIORITY 4: Add Missing Engineered Features
+**Rationale**: The "Ens Model" kernel adds features we don't have:
+- T_x_RT (Temperature × Residence Time interaction)
+- RT_log (log of residence time)
+- T_inv (1/Temperature in Kelvin)
+- RT_scaled (residence time / mean)
 
 ## What NOT to Try
-- ❌ More GNN variants (5 experiments, all failed)
-- ❌ ChemBERTa embeddings (already failed)
-- ❌ ChemProp features (already failed)
-- ❌ Similarity weighting / conservative predictions (made LB 63% worse)
-- ❌ Multi-seed optimization (too far from target)
-- ❌ Any approach that just improves CV without changing the CV-LB relationship
+- ❌ More MLP variants (50+ experiments, exhausted)
+- ❌ More GNN from scratch (5 consecutive failures)
+- ❌ Stacking with meta-learner (just demonstrated to fail)
+- ❌ Multi-seed optimization (too far from target - 152.8% gap)
+- ❌ ChemBERTa/ChemProp (already failed)
 
 ## Validation Notes
-- CV scheme: Leave-One-Out by solvent (single) / Leave-One-Ramp-Out (full)
-- CV-LB relationship: LB = 4.31 * CV + 0.0525 (R² = 0.95)
-- **WARNING**: Improving CV alone will NOT reach target due to high intercept
-- Need approaches that REDUCE THE INTERCEPT, not just improve CV
+- Current CV scheme: Leave-One-Out (24 folds for single, 13 for full)
+- Alternative to try: GroupKFold(n_splits=5)
+- CV-LB gap is structural (intercept = 0.0525) - need to change the relationship, not just improve CV
 
 ## Submission Strategy
-- Only 4 submissions remaining
-- DO NOT submit experiments that are clearly worse than baseline (CV > 0.0083)
-- Only submit if there's theoretical reason to expect different CV-LB relationship
-- Best current LB is 0.0877 - any submission should aim to beat this
+- We have 4 submissions remaining
+- DO NOT submit exp_089 (stacking) - it's 6.4% worse than baseline
+- Consider submitting after implementing "Ens Model" approach with renormalization
+- The target (0.0347) requires breaking the current CV-LB line
 
-## Key Insight from Research
-Kaggle winners narrow CV-LB gap by:
-1. Forcing validation to look like test set (adversarial validation)
-2. Test-time adaptation (adjusting predictions at inference)
-3. Stacking/blending diverse models
-4. Pseudo-labeling test data
-5. Label-shift re-weighting
+## Key Hypothesis to Test
+The "Ens Model" kernel's combination of:
+1. Correlation-based feature filtering
+2. Yield renormalization (clip + normalize)
+3. Different weights for single vs full data
 
-We should try these approaches to CHANGE the CV-LB relationship, not just improve CV.
+...might change the CV-LB relationship by:
+- Reducing overfitting through better feature selection
+- Enforcing domain constraints (yields must sum to ≤ 1)
+- Adapting to the different characteristics of single vs mixture data
