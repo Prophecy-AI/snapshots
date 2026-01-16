@@ -1,111 +1,75 @@
 ## Current Status
-- Best CV score: **0.00810** (exp_049/050/053 family; LB pending)
-- Best verified LB score: **0.0877** (exp_030 / exp_068 clean template replication)
-- Target: **0.0347** | Gap to target: **0.0530**
-- Submissions remaining today: **4**
+- Best CV score: **0.00830** from **exp_030** (GP+MLP+LGBM ensemble)
+- Best LB score: **0.0877** (exp_030 / exp_068)
+- Target: **0.034700** | Gap to target: **0.0530**
+- Submission hygiene: exp_069 shows **non-compliance / invalid LB (0.0000)** risk.
 
 ## CV-LB Relationship Analysis (CRITICAL)
-- Updated fit using confirmed scored submissions (incl. exp_030/068): **LB ≈ 4.30 · CV + 0.0524** (R² ≈ **0.97**)  
-  Source: `exploration/evolver_loop69_lb_feedback.ipynb`
-- Intercept interpretation: even with perfect CV, expected LB is ~0.052 → systematic OOD/extrapolation error dominates.
-- Are all approaches on the same line? **YES (so far)**.
-- Required CV for target under current line: (0.0347 − 0.0524)/4.30 ≈ **−0.0041** → we must **change** the relationship (reduce intercept) via shift-aware prediction.
+- Linear fit from prior loops: **LB ≈ 4.31 × CV + 0.0525** (R² ≈ 0.95)
+- Interpretation: there is a **structural extrapolation/intercept gap**; improving tabular CV alone won’t solve it.
+- Goal of next experiments: **change the relationship** by improving OOD behavior (reduce effective intercept), even if CV stays similar.
 
 ## Response to Evaluator
-- Technical verdict was **TRUSTWORTHY**. We accept that the clean notebook is template-compliant and the model class matches in submission cells.
-- Evaluator’s top priority was to submit the clean template to confirm Kaggle accepts it. **Done**: we now have a graded LB (0.0877), confirming the submission pipeline is fixed.
+- Technical verdict was **CONCERNS**. Agree: template compliance + experiment isolation is now the blocking issue.
+- Evaluator’s top priority: **start from exact template (exp_053/exp_065) and add only a minimal, capped AD shrinkage layer**. Agree.
 - Key concerns raised and how we address them:
-  1) **Mixture representation too linear** → we will add explicit **(A,B,pct) interaction features** (concat/diff/prod) rather than only blended descriptors.
-  2) **Distribution shift not integrated into submitted model** → we will implement **cross-fitted applicability-domain (AD) shrinkage** inside the model wrapper (train-fold only) to directly attack the intercept.
+  1) **Non-template split/output path** → Next notebook MUST be copied from `experiments/065_clean_exp030_template/clean_submit_exp030.ipynb` (or `experiments/053_exact_template/exact_template.ipynb`). Do **not** edit split generators or the last 3 cells besides the `model = ...` line. Ensure the final cell writes to `/home/submission/submission.csv` and there are **no cells after it**.
+  2) **Bundled changes (pair features + AD + base drift)** → Next experiment is **AD-only** on the exact exp_030 feature pipeline (no pair-interaction expansion).
+  3) **α(d) learned via proxy may over-shrink + is slow** → Replace with a **safe-by-construction, capped, thresholded α(d)** (no isotonic, no inner 5-fold training). This is faster and reduces miscalibration risk.
 
-## Data Understanding
-- We are predicting on **unseen solvents/ramps**; Group/leave-one-solvent style CV still underestimates how hard test solvents are.
-- The stable empirical mapping LB ≈ 4.30*CV + 0.052 suggests a large systematic error component on OOD solvents.
+## Data Understanding (new evidence)
+- From `exploration/evolver_loop70_analysis.ipynb`: nearest-neighbor solvent distance in (Spange+ACS) descriptor space is strongly predictive of leave-one-solvent-out error (corr ≈ **0.72**). **Cyrene** is the farthest and worst-error solvent. This supports an AD gate, but it must be **do-no-harm**: only activate for the highest-distance tail.
 
 ## Recommended Approaches (priority order)
+### 1) A0 Control: exact exp_030 reproduction in a compliant notebook
+- Copy `experiments/065_clean_exp030_template/clean_submit_exp030.ipynb` into a new experiment folder (e.g., `experiments/070A0_exp030_control/`).
+- Run end-to-end CV (single + full) to confirm overall MSE matches ~0.0083.
+- This is the reference baseline for all AD comparisons.
 
-### 1) Add an Applicability-Domain (AD) correction layer ON TOP of the current GP+MLP+LGBM ensemble (must be template compliant)
-Goal: reduce catastrophic errors on far-OOD points and **break the intercept**.
+### 2) A1 Safe AD Shrinkage (AD-only, no new mixture features)
+Implement a new model class (defined **before** the last 3 template cells) and then set `model = ...` to it.
 
-Implement a new model class (or modify existing) such as:
-- `GPMLPLGBMEnsembleAD(data='single'|'full')`
+**Design: Safe-by-construction AD wrapper around exp_030 ensemble**
+- Base predictor: **exact exp_030 GP+MLP+LGBM ensemble** (no hyperparam drift).
+- Baseline/fallback predictor: **cheap KNN regressor** trained inside each outer fold.
+  - Features for KNN (low-dim, stable): kinetics + (Spange+ACS)
+  - For mixtures: use **blend** descriptor only: `(1-pct)*A + pct*B` (no diff/prod).
+  - KNN params: `n_neighbors=10` (or 7), `weights='distance'`.
+- Distance-to-training: compute Euclidean distances in **scaled** solvent descriptor space.
+  - Single: distance on solvent (Spange+ACS).
+  - Mixture: distance on blend descriptor.
+- α(d) gating (NO learning):
+  - Compute d(x) = mean distance to k nearest training points (k=5) in the scaled descriptor space.
+  - Compute thresholds from **training fold** distances: `q80 = quantile(d_train, 0.80)`, `q95 = quantile(d_train, 0.95)`.
+  - Define capped ramp:
+    - if d <= q80: α = 0
+    - if q80 < d < q95: α = α_max * (d - q80)/(q95 - q80)
+    - if d >= q95: α = α_max
+  - Use small caps to avoid harming in-distribution accuracy:
+    - Start with **α_max = 0.25** (shared) OR per-target `[0.20, 0.25, 0.30]`.
+- Final prediction: `pred = (1-α)*base_pred + α*knn_pred`, clipped to [0,1].
 
-**Core idea (per outer CV fold, using ONLY that fold’s training data):**
-1. Train the base ensemble as in exp_030 (GP+MLP+LGBM).
-2. Define an **AD distance** for any sample as mean kNN distance to training manifold in a *descriptor space*.
-3. Compute a **baseline predictor** that is conservative under shift (kNN regression is ideal because it’s local and stable).
-4. Learn a **distance→shrinkage α(d)** mapping **cross-fitted** within the training fold.
-5. Final prediction:  
-   `pred_final = (1-α(d))*pred_model + α(d)*pred_baseline`
-6. Clip predictions to [0,1].
+**Success criteria (local CV):**
+- Overall CV should stay near exp_030 (do-no-harm): regression > ~0.0005 is a red flag.
+- If CV is similar but we believe OOD behavior is improved, we’ll submit to test whether LB intercept shifts.
 
-**Concrete, implementable recipe (low-risk, fast):**
-- Descriptor space for distance:
-  - Use **Spange descriptors** (low-dim) + optionally **ACS-PCA** (low-dim).
-  - Avoid raw high-dim DRFP for distance unless you PCA it.
-  - Fit `StandardScaler` **inside each outer fold** on training solvents/ramps only.
-- Distance computation:
-  - `NearestNeighbors(n_neighbors=5, metric='euclidean')` on scaled descriptor vectors.
-  - `d(x) = mean(knn_distances)`.
-- Baseline predictor:
-  - `KNeighborsRegressor(n_neighbors=10, weights='distance')` on same descriptor space **plus (time,temp, pct)**, trained on the outer fold training rows.
-  - For single-solvent, features can be `[time,temp] + solvent_desc`.
-  - For full/mixture, features can be `[time,temp,pct] + pair_desc`.
-- Learn α(d) using ONLY the outer fold’s training rows (cross-fitted):
-  - Split the outer fold training rows into **K=5 inner folds** (random KFold, not group-based).
-  - For each inner fold:
-    - Fit base ensemble on inner-train.
-    - Fit baseline KNN on inner-train.
-    - Predict inner-val with both models.
-    - Compute distances d for inner-val to inner-train.
-  - After collecting all inner-val predictions, estimate α as a **monotonic function** of distance:
-    - Bin distances into ~10 quantile bins.
-    - For each bin, solve least-squares optimal shrinkage:
-      `alpha_bin = clip( sum((y-m)*(b-m)) / sum((b-m)^2), 0, 1 )`  where m=model_pred, b=baseline_pred.
-    - Enforce monotonicity with `IsotonicRegression(increasing=True)` mapping `bin_center -> alpha_bin`.
-  - At inference, compute d for each sample vs outer-train, get α(d) from isotonic reg.
+### 3) If A1 is stable, consider a tiny ablation
+- Compare α_max = 0.0 (baseline), 0.15, 0.25, 0.35 **without extra seeds**. Pick the best single setting globally (same across folds).
+- This is not “optimization-heavy”; it’s a minimal safety sweep.
 
-**Why this is the right next move:** it explicitly targets OOD behavior (the intercept) rather than chasing CV.
-
-### 2) Upgrade mixture representation: explicit pair-interaction descriptors (A,B,pct)
-Goal: fix structural limitation of linear blending.
-
-For full-data featurization, compute and feed BOTH blended and interaction features:
-- `blend = (1-pct)*A + pct*B`
-- `diff = A - B`
-- `prod = A * B` (elementwise)
-- `pct2 = pct*(1-pct)`
-
-Then build final pair descriptor vector like:
-`pair_desc = concat([blend, diff, prod, pct2])`
-
-Use this pair_desc:
-- for MLP and LGBM feature input
-- for distance / kNN baseline feature space
-
-(Keep single-solvent pipeline unchanged except for AD correction.)
-
-### 3) Only if AD correction fails to move LB: re-attempt representation change (GNN / ChemBERTa) with strict class-match + template compliance
-Do NOT do this yet; AD correction is faster to iterate and more likely to change the intercept.
-If we do pivot again:
-- enforce: CV model class == submission cell model class (both single and full)
-- keep last 3 cells EXACTLY template except the `model = ...` line.
-
-## What NOT to Try
-- More weight tuning, hyperparameter sweeps, or multi-seed bagging on tabular ensemble (optimization forbidden; will stay on same CV-LB line).
-- Any notebook that adds cells after the template FINAL CELL.
-- Any approach that changes the split generator (no GroupKFold-5 like some public kernels; must stick to template generators).
+## What NOT to Try (this loop)
+- No pair-interaction feature expansion yet (diff/prod/pct2 blocks) — too confounded.
+- No inner 5-fold isotonic α(d) learning — too slow + high miscalibration risk.
+- No multi-seed bagging / weight tuning.
+- No changes to split generators or last 3 template cells beyond the model line.
 
 ## Validation Notes
-- Use the competition’s official split generators (already in template).
-- Report CV overall + single/full components.
-- Track whether AD correction changes the CV-LB relationship: we care about **same CV but lower LB**.
-- Implementation hygiene:
-  - Keep all unsupervised transforms (scalers/PCA) fitted **inside each fold** (train-only) to avoid any preprocessing concerns.
-  - Ensure `model = GPMLPLGBMEnsembleAD(data='single')` and `model = GPMLPLGBMEnsembleAD(data='full')` appear in the last 3 template cells.
+- Use the exact template CV generators (`generate_leave_one_out_splits`, `generate_leave_one_ramp_out_splits`) from the copied notebook.
+- Report **overall MSE over all held-out rows** (consistent with evaluator recomputation).
+- Before logging, verify:
+  1) The model class used in CV is the same class instantiated in BOTH template cells (single & full).
+  2) Notebook ends with the 3 template cells and writes to `/home/submission/submission.csv`.
 
-## Next Experiment Definition (do this now)
-- Create new experiment notebook based on the clean exp_030 template submission notebook.
-- Add the AD correction layer + mixture interaction features.
-- Name the experiment clearly (e.g., `exp_069_ad_shrinkage_pair_features`).
-- Do NOT submit until local CV run completes and the notebook ends exactly with the template final cell.
+## Submission Plan (use submissions carefully)
+- Submit only if A1 CV is within ~0.0003–0.0005 of exp_030 and runtime is stable.
+- Goal of submission: check if the method **breaks the CV→LB line** (lower LB at similar CV).
