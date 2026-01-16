@@ -1,84 +1,224 @@
 ## Current Status
-- Best CV score: 0.0081 from exp_049/050/053 (CatBoost+XGBoost ensemble)
-- Best LB score: 0.0877 from exp_030 (GP+MLP+LGBM ensemble)
-- Target: 0.0347 | Gap to target: 0.0530 (152.7%)
-- **10 submissions pending LB feedback** (exp_049-079)
+- Best CV score: 0.008298 from exp_030 (GP+MLP+LGBM ensemble)
+- Best LB score: 0.0877 (exp_030)
+- Target: 0.0347 | Gap to target: 153%
+- Experiments: 95 | Submissions: 22/5 used, 4 remaining
 
-## CV-LB Relationship Analysis (CRITICAL - MUST READ)
-- Linear fit: LB = 4.31 * CV + 0.0525 (R² = 0.95)
-- Intercept (0.0525) > Target (0.0347)
-- **Required CV to hit target: -0.0041 (IMPOSSIBLE)**
-- All 94 experiments (MLP, LGBM, XGB, CatBoost, GP, GNN, ChemBERTa) fall on the SAME LINE
-- **CONCLUSION: Improving CV alone CANNOT reach target. Must change the CV-LB relationship.**
+## CV-LB Relationship Analysis (CRITICAL)
+- Linear fit: LB = 4.29 × CV + 0.0528 (R² = 0.952)
+- Intercept (0.0528) > Target (0.0347)
+- Required CV for target: -0.0042 (IMPOSSIBLE with current approaches)
+- **ALL 95 experiments fall on the SAME CV-LB line**
+- This is a STRUCTURAL DISTRIBUTION SHIFT problem, not model quality
 
 ## Response to Evaluator
-- Technical verdict was TRUSTWORTHY for exp_093 (Morgan fingerprints)
-- Evaluator's top priority: **Investigate mixall kernel's GroupKFold approach** - may have different CV-LB relationship
-- Key concerns raised: 
-  1. CV-LB intercept (0.0525) > Target (0.0347) makes target mathematically unreachable
-  2. Morgan fingerprints performed 277% worse than baseline
-  3. GNN failures need root cause analysis
-- **I AGREE with the evaluator's assessment.** The intercept problem is the fundamental blocker.
+
+**Technical verdict was TRUSTWORTHY** - exp_094 (ens-model kernel) was correctly implemented.
+
+**Evaluator's top priority**: Investigate why GNNs failed - benchmark paper achieved MSE 0.0039 with GNNs while our GNNs achieved CV 0.018-0.068 (5-17x gap).
+
+**I AGREE with the evaluator's assessment:**
+1. The CV-LB intercept problem is the fundamental blocker
+2. All tabular approaches have been exhausted
+3. GNN implementation issues need root cause analysis
+4. The benchmark paper proves the target IS reachable with the right approach
+
+**Key concerns raised:**
+1. Model class mismatch in GNN notebooks - MUST verify submission cells match CV
+2. 8 submissions failed with evaluation errors - wasted quota
+3. 95 experiments without addressing the fundamental problem
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop94_analysis.ipynb` for CV-LB analysis
-- Key patterns:
-  1. All tabular models converge to same CV-LB line regardless of features/architecture
-  2. Pre-computed features (Spange, DRFP, ACS PCA) are already optimal
-  3. Morgan fingerprints add noise, not signal
-  4. GNNs trained from scratch fail on this small dataset
 
-## MANDATORY NEXT EXPERIMENT: Implement Ens-Model Kernel Exactly
+Reference notebooks:
+- `exploration/evolver_loop95_analysis.ipynb` - CV-LB relationship analysis
+- `exploration/evolver_loop87_analysis.ipynb` - Previous CV-LB analysis
+- `exploration/evolver_loop88_analysis.ipynb` - Benchmark paper findings
 
-The ens-model kernel (matthewmaree/ens-model) is a top-voted kernel that uses:
-1. **CatBoost + XGBoost ensemble** with optimized weights
-2. **Feature correlation filtering** (removes redundant features)
-3. **Per-target hyperparameters** (different params for single vs full data)
-4. **Clipping and renormalization** (ensures yields sum to ~1)
+Key patterns:
+1. **The benchmark paper (arXiv:2512.19530) achieved MSE 0.0039** using:
+   - Graph Attention Networks (GATs) for molecular graph message-passing
+   - Differential Reaction Fingerprints (DRFP) as additional features
+   - Learned mixture-aware solvent encodings
+   - This is 25x better than tabular ensembles (MSE 0.099)
 
-**CRITICAL IMPLEMENTATION DETAILS:**
+2. **Our GNN experiments failed** (CV 0.018-0.068) likely due to:
+   - Model class mismatch in submission cells
+   - Missing DRFP integration with graph representation
+   - Missing learned mixture-aware encodings
+
+3. **The CV-LB intercept (0.0528)** represents:
+   - Structural distribution shift between train/test solvents
+   - Test solvents are structurally different from training solvents
+   - Tabular features cannot capture molecular structure for unseen solvents
+
+## Recommended Approaches (PRIORITY ORDER)
+
+### MANDATORY PIVOT: Stop all tabular model optimization
+
+### Priority 1: Implement Proper GNN with GAT + DRFP (HIGHEST PRIORITY)
+
+The benchmark paper achieved MSE 0.0039. We need to replicate this approach:
+
 ```python
-# From ens-model kernel
-class EnsembleModel(BaseModel):
-    def __init__(self, data='single', verbose=False):
-        self.data_mode = data
-        # Optimised fixed weights per dataset
-        if data == "single":
-            self.weights = [0.6, 0.4]  # CatBoost, XGBoost
-        else:
-            self.weights = [0.5, 0.5]
+import torch
+import torch.nn as nn
+from torch_geometric.nn import GATConv, global_mean_pool
+from rdkit import Chem
+from rdkit.Chem import AllChem
+
+class SolventGNN(nn.Module):
+    def __init__(self, node_dim=64, edge_dim=16, hidden_dim=128, drfp_dim=2048):
+        super().__init__()
+        # Node embedding
+        self.node_embed = nn.Linear(node_dim, hidden_dim)
         
-        self.catboost = CatBoostModel(data=data)
-        self.xgboost = XGBModel(data=data)
+        # GAT layers
+        self.gat1 = GATConv(hidden_dim, hidden_dim, heads=4, concat=False)
+        self.gat2 = GATConv(hidden_dim, hidden_dim, heads=4, concat=False)
+        
+        # DRFP integration
+        self.drfp_proj = nn.Linear(drfp_dim, hidden_dim)
+        
+        # Mixture encoding
+        self.mixture_encoder = nn.Sequential(
+            nn.Linear(hidden_dim * 2 + 1, hidden_dim),  # 2 solvents + %B
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+        
+        # Output head
+        self.output = nn.Sequential(
+            nn.Linear(hidden_dim + 2, 64),  # + T, RT
+            nn.ReLU(),
+            nn.Linear(64, 3)  # 3 targets
+        )
+    
+    def forward(self, data, drfp, T, RT, pct_b=None):
+        # Graph message passing
+        x = self.node_embed(data.x)
+        x = F.relu(self.gat1(x, data.edge_index))
+        x = F.relu(self.gat2(x, data.edge_index))
+        x = global_mean_pool(x, data.batch)
+        
+        # Add DRFP features
+        drfp_feat = self.drfp_proj(drfp)
+        x = x + drfp_feat
+        
+        # Mixture encoding (if applicable)
+        if pct_b is not None:
+            # Handle mixture solvents
+            pass
+        
+        # Combine with reaction conditions
+        x = torch.cat([x, T, RT], dim=1)
+        return self.output(x)
 ```
 
-**Feature Selection:**
-- Uses ALL features: spange, acs_pca, drfps, fragprints
-- Filters by correlation (removes highly correlated features)
-- Priority: spange > acs > drfps > fragprints
+**CRITICAL**: Ensure submission cells use the EXACT SAME model class as CV computation!
 
-**Post-processing:**
-- Clips predictions to [0, 1]
-- Renormalizes so yields sum to ~1
+### Priority 2: Transductive Learning Approach
+
+Use test set structure (without labels) to adapt the model:
+
+```python
+# 1. Train initial model on training data
+# 2. Generate pseudo-labels for test set
+# 3. Retrain with confident pseudo-labels
+# 4. Iterate until convergence
+
+def transductive_training(model, train_X, train_Y, test_X, n_iterations=3):
+    for i in range(n_iterations):
+        # Train on current data
+        model.train_model(train_X, train_Y)
+        
+        # Generate pseudo-labels
+        pseudo_Y = model.predict(test_X)
+        
+        # Select confident predictions (low variance across ensemble)
+        confidence = compute_confidence(pseudo_Y)
+        confident_mask = confidence > threshold
+        
+        # Add confident pseudo-labels to training
+        train_X = pd.concat([train_X, test_X[confident_mask]])
+        train_Y = pd.concat([train_Y, pseudo_Y[confident_mask]])
+    
+    return model
+```
+
+### Priority 3: Extrapolation Detection + Conservative Predictions
+
+```python
+from sklearn.neighbors import NearestNeighbors
+
+def extrapolation_aware_predict(model, X_train, X_test, train_mean):
+    # Compute distance to training distribution
+    nn = NearestNeighbors(n_neighbors=5).fit(X_train)
+    distances, _ = nn.kneighbors(X_test)
+    extrapolation_score = distances.mean(axis=1)
+    
+    # Get model predictions
+    model_pred = model.predict(X_test)
+    
+    # Blend toward mean for high extrapolation scores
+    threshold = np.percentile(extrapolation_score, 75)
+    weight = np.clip(extrapolation_score / threshold, 0, 1).reshape(-1, 1)
+    
+    # Conservative prediction
+    final_pred = (1 - weight) * model_pred + weight * train_mean
+    
+    return final_pred
+```
 
 ## What NOT to Try
-- ❌ More MLP variants (94 experiments, all on same line)
-- ❌ More GNN variants trained from scratch (5 experiments, all worse than baseline)
-- ❌ Morgan fingerprints (277% worse)
-- ❌ Any approach that just improves CV without changing the CV-LB relationship
+
+1. ❌ **More tabular model variants** (MLP, LGBM, XGB, CatBoost, Ridge, RF)
+   - All fall on the same CV-LB line
+   - 95 experiments have exhausted this approach
+
+2. ❌ **More feature engineering within tabular paradigm**
+   - Spange, DRFP, ACS-PCA, fragprints all tested
+   - Different combinations all tested
+
+3. ❌ **Hyperparameter tuning of existing models**
+   - Won't change the CV-LB intercept
+
+4. ❌ **Multi-seed ensembles or weight optimization**
+   - Gap is 153%, not 1-2%
+   - Optimization is FORBIDDEN until within 2% of target
+
+5. ❌ **Submitting experiments with CV > 0.008298**
+   - Only submit if CV is better than baseline
+   - Or if approach shows promise for changing CV-LB relationship
 
 ## Validation Notes
-- **Current CV scheme**: Leave-One-Out (24 folds single, 13 folds full)
-- **Alternative to test**: GroupKFold (5 folds each) - may have different intercept
-- **Key insight**: The CV-LB relationship is the constraint, not the CV score itself
 
-## Submission Strategy (4 remaining)
-1. Wait for pending submissions to get LB feedback
-2. If any pending submission breaks the CV-LB line → optimize that approach
-3. If all pending submissions follow the same line → try fundamentally different approaches
-4. Reserve 1-2 submissions for final ensemble
+1. **CV Scheme**: Leave-One-Solvent-Out for single solvent, Leave-One-Ramp-Out for full data
+2. **Model Class Consistency**: ALWAYS verify submission cells use the EXACT model class from CV
+3. **Before submitting**:
+   - Verify notebook runs completely without errors
+   - Check submission.csv format matches expected structure
+   - Verify model class in submission cells matches CV computation
+4. **Only 4 submissions remaining** - use wisely
 
-## CRITICAL REMINDER
-The target IS reachable. The benchmark paper achieved MSE 0.0039. We need to find what they did differently. The key is NOT improving CV - it's changing the CV-LB relationship.
+## Key Insight from Benchmark Paper
 
-**IMMEDIATE ACTION:** Implement the ens-model kernel's approach EXACTLY as shown in the kernel, with proper feature correlation filtering and post-processing. This is a proven approach that achieved good LB scores.
+The benchmark paper achieved MSE 0.0039 (vs our best 0.0877) by:
+1. Operating on MOLECULAR GRAPHS, not tabular features
+2. Using Graph Attention Networks for message-passing
+3. Integrating DRFP features with graph representation
+4. Learning mixture-aware encodings for continuous solvent compositions
+
+This is a **25x improvement** over tabular ensembles. The path forward is clear:
+**IMPLEMENT A PROPER GNN THAT MATCHES THE BENCHMARK ARCHITECTURE**
+
+## Submission Strategy
+
+With only 4 submissions remaining:
+1. **Only submit if**:
+   - CV is better than 0.008298 (baseline)
+   - OR approach shows promise for changing CV-LB relationship (different slope/intercept)
+2. **Before submitting**:
+   - Verify model class consistency
+   - Verify notebook runs without errors
+3. **Priority**: Get LB feedback on a properly implemented GNN
