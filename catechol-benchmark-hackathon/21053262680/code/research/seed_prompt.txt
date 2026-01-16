@@ -1,164 +1,124 @@
 ## Current Status
-- Best CV score: 0.0083 from exp_030 (GP+MLP+LGBM ensemble)
+- Best CV score: 0.0081 (exp_049, exp_050, exp_053)
 - Best LB score: 0.0877 (exp_030)
 - Target: 0.0347 | Gap to target: 152.8%
 
 ## CV-LB Relationship Analysis (CRITICAL)
 - Linear fit: LB = 4.31 * CV + 0.0525 (R² = 0.95)
 - Intercept interpretation: Even at CV=0, expected LB is 0.0525
-- Are all approaches on the same line? **YES - ALL 12 submissions fall on this line**
-- **CRITICAL: Intercept (0.0525) > Target (0.0347)**
-- Required CV for target: (0.0347 - 0.0525) / 4.31 = -0.0041 (IMPOSSIBLE!)
+- Are all approaches on the same line? YES (except exp_073 which is WORSE)
+- Required CV for target: (0.0347 - 0.0525) / 4.31 = -0.0041 (NEGATIVE - IMPOSSIBLE!)
+
+**CRITICAL FINDING FROM LOOP 81:**
+- exp_073 (similarity weighting) got LB 0.1451 - 63% WORSE than expected!
+- Distribution shift handling via conservative predictions HURTS performance
+- Test solvents are DIFFERENT, not OUTLIERS - blending toward mean introduces BIAS
+- DO NOT try more conservative prediction strategies
 
 ## Response to Evaluator
-- Technical verdict was TRUSTWORTHY. The ens-model replica was correctly implemented.
-- Evaluator's top priority: Implement a PROPER GNN or submit GroupKFold(5) to test CV-LB relationship.
-- Key concerns raised: (1) All tabular approaches fall on same CV-LB line, (2) GNN/ChemBERTa attempts performed WORSE than tabular.
-- **I AGREE with the evaluator's assessment.** The intercept problem is STRUCTURAL and cannot be fixed by model tuning.
+- Technical verdict was TRUSTWORTHY for exp_080 (ens-model replica)
+- Evaluator's top priority: Implement a PROPER GNN or submit GroupKFold(5)
+- Key concerns: All tabular approaches fall on same CV-LB line (R²=0.95)
+- I AGREE with the evaluator - we need to BREAK the CV-LB line, not optimize along it
 
 ## Data Understanding
-- Reference notebooks: See `exploration/evolver_loop81_analysis.ipynb` for CV-LB analysis
+- Reference notebooks: See `exploration/evolver_loop81_lb_feedback.ipynb` for CV-LB analysis
 - Key patterns:
-  - All 81 experiments fall on the same CV-LB line (R²=0.95)
-  - GNN attempts (CV=0.0256, 0.0196) performed 3-6x WORSE than tabular (CV=0.0083)
-  - ChemBERTa attempt (CV=0.0147) also worse than tabular
-  - The benchmark paper achieved MSE 0.0039 with GNN - our implementations have issues
+  1. ALL tabular models (MLP, LGBM, XGB, CatBoost, GP, Ridge, RF) fall on same CV-LB line
+  2. The intercept (0.0525) > target (0.0347) - tabular optimization CANNOT reach target
+  3. Similarity weighting HURT performance (LB 0.1451 vs expected 0.089)
+  4. Test solvents are DIFFERENT, not OUTLIERS
 
-## MANDATORY PIVOT: EXTRAPOLATION DETECTION
+## Recommended Approaches
 
-Since all tabular approaches fall on the same CV-LB line with intercept > target, we MUST implement approaches that REDUCE THE INTERCEPT, not just improve CV.
+### PRIORITY 1: Implement a PROPER Graph Neural Network
+The benchmark paper achieved MSE 0.0039 with GNN. Our GNN attempts (exp_072, exp_077) achieved CV 0.025+ (3x worse than tabular). This suggests implementation issues.
 
-### Priority 1: Extrapolation Detection + Conservative Predictions
-
-**Hypothesis**: The high intercept (0.0525) represents extrapolation error when predicting for unseen solvents. By detecting when we're extrapolating and blending toward conservative predictions, we can reduce this error.
-
-**Implementation**:
+**Key implementation using PyTorch Geometric:**
 ```python
-from sklearn.neighbors import NearestNeighbors
-import numpy as np
+from torch_geometric.utils import from_smiles
+from torch_geometric.nn import GCNConv, global_mean_pool
+from torch_geometric.data import Data, Batch
 
-class ExtrapolationAwareModel:
-    def __init__(self, base_model, n_neighbors=5, blend_threshold=0.5):
-        self.base_model = base_model
-        self.n_neighbors = n_neighbors
-        self.blend_threshold = blend_threshold
-        self.nn = None
-        self.train_mean = None
+class MolGNN(torch.nn.Module):
+    def __init__(self, hidden_dim=64, out_dim=3):
+        super().__init__()
+        # from_smiles gives 9 atom features
+        self.conv1 = GCNConv(9, hidden_dim)
+        self.conv2 = GCNConv(hidden_dim, hidden_dim)
+        self.conv3 = GCNConv(hidden_dim, hidden_dim)
+        # +5 for process features (T, RT, 1/T, ln(RT), interaction)
+        self.fc = torch.nn.Linear(hidden_dim + 5, out_dim)
         
-    def train_model(self, train_X, train_Y):
-        # Train base model
-        self.base_model.train_model(train_X, train_Y)
-        
-        # Fit nearest neighbors on training features
-        X_features = self.featurize(train_X)
-        self.nn = NearestNeighbors(n_neighbors=self.n_neighbors)
-        self.nn.fit(X_features)
-        
-        # Store training mean for blending
-        self.train_mean = train_Y.mean().values
-        
-    def predict(self, test_X):
-        # Get base model predictions
-        base_pred = self.base_model.predict(test_X)
-        
-        # Compute extrapolation score (distance to training distribution)
-        X_features = self.featurize(test_X)
-        distances, _ = self.nn.kneighbors(X_features)
-        extrapolation_score = distances.mean(axis=1)
-        
-        # Normalize extrapolation score
-        extrapolation_score = extrapolation_score / extrapolation_score.max()
-        
-        # Blend toward mean when extrapolating
-        blend_weight = np.clip(extrapolation_score / self.blend_threshold, 0, 1)
-        blend_weight = blend_weight.reshape(-1, 1)
-        
-        final_pred = (1 - blend_weight) * base_pred + blend_weight * self.train_mean
-        
-        return final_pred
+    def forward(self, data, process_features):
+        x, edge_index, batch = data.x, data.edge_index, data.batch
+        x = F.relu(self.conv1(x, edge_index))
+        x = F.relu(self.conv2(x, edge_index))
+        x = F.relu(self.conv3(x, edge_index))
+        x = global_mean_pool(x, batch)  # Graph-level readout
+        x = torch.cat([x, process_features], dim=1)
+        return torch.sigmoid(self.fc(x))
 ```
 
-**Why this might work**:
-- The intercept represents error when predicting for solvents far from training distribution
-- By detecting extrapolation and blending toward mean, we reduce extreme predictions
-- This could REDUCE THE INTERCEPT without changing the slope
+**CRITICAL: Verify submission cells use the SAME model class as CV!**
 
-### Priority 2: Similarity-Weighted Predictions
-
-**Hypothesis**: Predictions should be weighted by similarity to training solvents.
-
-**Implementation**:
+### PRIORITY 2: Try Graph Attention Networks (GAT)
+The benchmark paper used GAT + DRFP. GAT may capture more nuanced molecular relationships:
 ```python
-class SimilarityWeightedModel:
-    def __init__(self, base_model, similarity_threshold=0.3):
-        self.base_model = base_model
-        self.similarity_threshold = similarity_threshold
-        
-    def train_model(self, train_X, train_Y):
-        self.base_model.train_model(train_X, train_Y)
-        # Store training solvent features for similarity computation
-        self.train_features = self.featurize(train_X)
-        self.train_Y = train_Y.values
-        
-    def predict(self, test_X):
-        base_pred = self.base_model.predict(test_X)
-        test_features = self.featurize(test_X)
-        
-        # Compute similarity to each training sample
-        # Use cosine similarity or Tanimoto similarity for fingerprints
-        from sklearn.metrics.pairwise import cosine_similarity
-        similarities = cosine_similarity(test_features, self.train_features)
-        
-        # For each test sample, compute weighted average of training targets
-        # weighted by similarity
-        max_sim = similarities.max(axis=1)
-        
-        # If max similarity is low, blend toward training mean
-        blend_weight = np.clip((self.similarity_threshold - max_sim) / self.similarity_threshold, 0, 1)
-        blend_weight = blend_weight.reshape(-1, 1)
-        
-        train_mean = self.train_Y.mean(axis=0)
-        final_pred = (1 - blend_weight) * base_pred + blend_weight * train_mean
-        
-        return final_pred
+from torch_geometric.nn import GATConv
+
+class MolGAT(torch.nn.Module):
+    def __init__(self, hidden_dim=64, heads=4, out_dim=3):
+        super().__init__()
+        self.conv1 = GATConv(9, hidden_dim, heads=heads)
+        self.conv2 = GATConv(hidden_dim * heads, hidden_dim, heads=1)
+        self.fc = torch.nn.Linear(hidden_dim + 5, out_dim)
 ```
 
-### Priority 3: Submit Best Pending Experiment
+### PRIORITY 3: Pseudo-labeling / Domain Adaptation
+Since test solvents are DIFFERENT (not outliers), we could:
+1. Train initial model on training data
+2. Make predictions on test data
+3. Use confident predictions (low variance across ensemble) to augment training
+4. Retrain with augmented data
 
-**Action**: Submit exp_049 or exp_053 (CV=0.0081) to verify CV-LB relationship.
-- Expected LB: 4.31 * 0.0081 + 0.0525 = 0.0874
-- If LB ≈ 0.0874, confirms we're on the same line
-- If LB < 0.085, there might be hope with this approach
+### PRIORITY 4: Submit exp_049 or exp_053 to verify CV-LB line
+These have best CV (0.0081) and should give LB ~0.0875 if they follow the line.
+This would confirm whether our CV-LB relationship is stable.
 
 ## What NOT to Try
-- ❌ More MLP/LightGBM/XGBoost/CatBoost variants - all fall on same CV-LB line
-- ❌ More feature engineering for tabular models - doesn't change the intercept
-- ❌ Multi-seed ensembles - we're 152% from target, not 1-2%
-- ❌ Hyperparameter tuning - doesn't change the CV-LB relationship
+
+### FORBIDDEN - Distribution Shift Handling via Conservative Predictions
+- exp_073 (similarity weighting) got LB 0.1451 - 63% WORSE than expected
+- Blending toward training mean introduces BIAS
+- Test solvents are DIFFERENT, not OUTLIERS
+- DO NOT try: mean reversion, uncertainty-weighted blending, extrapolation detection
+
+### EXHAUSTED - Tabular Model Optimization
+- MLP, LightGBM, XGBoost, CatBoost, GP, Ridge, RF - ALL on same CV-LB line
+- Feature engineering (Spange, DRFP, ACS PCA, fragprints) - ALL on same line
+- Ensemble strategies - ALL on same line
+- No more tabular experiments unless they fundamentally change representation
+
+### EXHAUSTED - Ens-model Kernel Approaches
+- exp_080 replicated ens-model kernel exactly - CV 0.009217 (11% worse than best)
+- Sophisticated feature engineering doesn't help
 
 ## Validation Notes
-- Use Leave-One-Out validation (24 folds for single, 13 folds for full)
-- GroupKFold(5) is INCOMPATIBLE with competition evaluation
-- Track BOTH CV score AND expected LB based on the line
-- **SUCCESS CRITERION**: LB improves even if CV stays same or gets slightly worse (reduced intercept)
+- Use Leave-One-Out for single solvent, Leave-One-Ramp-Out for full data
+- Track CV-LB relationship after EVERY submission
+- If new approach falls on same CV-LB line, it's NOT a breakthrough
+- A breakthrough = DIFFERENT CV-LB relationship (lower intercept or slope)
 
-## Key Insight from Research
-From the web search on extrapolation detection:
-1. **Quantify extrapolation risk**: Compute distance to training cloud in descriptor space
-2. **Apply extrapolation gating**: If distance exceeds threshold, blend toward conservative prediction
-3. **Use QM-enhanced models**: Quantum-mechanical descriptors help extrapolation (we don't have these)
-4. **GNN aggregation matters**: Sum/Norm aggregation better for additive properties, Mean/Attention for non-additive
+## Remaining Submissions: 4
+Use wisely:
+1. Submit exp_049 or exp_053 (best CV) to verify CV-LB line
+2. If GNN is implemented properly, submit that
+3. Save 1-2 for final attempts
 
-## Experiment Structure
-```
-experiments/081_extrapolation_detection/
-├── extrapolation_detection.ipynb
-└── (submission generated)
-```
-
-The notebook MUST:
-1. Implement extrapolation detection using nearest neighbors
-2. Blend predictions toward mean when extrapolation detected
-3. Use the best base model (GP+MLP+LGBM ensemble from exp_030)
-4. Verify submission cells use the SAME model class as CV
-5. Track both CV and expected LB based on the line
+## THE TARGET IS REACHABLE
+- Benchmark achieved MSE 0.0039 with GNN
+- Our best LB is 0.0877 (2.5x worse than target)
+- The gap is large but NOT insurmountable
+- We need the RIGHT approach (GNN), not more optimization
+- The solution exists - we just haven't implemented it correctly yet
