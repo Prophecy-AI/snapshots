@@ -1,8 +1,7 @@
 # 2nd Place - Summary of Approach
 
-**Rank:** 2
 **Author:** Devon Stanfield
-**Collaborators:** Devon Stanfield
+**Rank:** 2
 **Votes:** 125
 
 ---
