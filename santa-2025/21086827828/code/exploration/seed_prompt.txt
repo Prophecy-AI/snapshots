@@ -5,6 +5,7 @@ This is a 2D irregular polygon packing optimization problem. The goal is to pack
 
 **Metric:** Sum of (s²/n) for each n-tree configuration, where s = side length of bounding square, n = number of trees.
 **Target Score:** Beat 68.931058 (lower is better)
+**Best Known Scores:** ~67 is achievable with good optimization (from discussions)
 
 ## Tree Geometry
 Each tree is a 15-vertex polygon with:
@@ -61,6 +62,7 @@ Each tree is a 15-vertex polygon with:
 - Values prefixed with 's' to preserve precision: `s0.123456`
 - ID format: `{n:03d}_{tree_index}` (e.g., "001_0", "002_1")
 - Columns: id, x, y, deg
+- Total rows: 20100 (sum of 1+2+...+200)
 
 ### Scoring Function
 ```python
@@ -117,7 +119,7 @@ def get_score(trees, n):
 3. Replace invalid configurations with known-good baseline
 4. Score locally before submitting
 
-## Key Insights from Kernels
+## Key Insights from Kernels and Discussions
 
 1. **Lattice patterns emerge**: Trees tend to form crystalline arrangements with alternating orientations (blue/pink phases at ~90° apart)
 
@@ -129,9 +131,81 @@ def get_score(trees, n):
 
 5. **Precision matters**: Use high-precision Decimal arithmetic to avoid floating-point errors
 
+6. **Symmetric vs Asymmetric**: Symmetric solutions appear optimal for some n values, but asymmetric solutions may win for larger n (from discussions)
+
+7. **Simulated Annealing Energy Function**: Design of the SA energy function is important - consider using bounding box side length directly
+
+## Algorithm Design Recommendations
+
+### For Simulated Annealing
+- Energy function: Use side_length (not side_length²/n) for individual configurations
+- Temperature schedule: Start high, decrease exponentially
+- Move operators: Combine translation, rotation, and swap moves
+- Accept criterion: exp(-delta_E / T) for worse solutions
+
+### For Local Search
+- Step sizes: Start with 0.01-0.05, decrease to 0.0001 for fine-tuning
+- Rotation steps: 5°, 2°, 0.8°, 0.3°, 0.1° (progressively finer)
+- Directions: 8-directional (N, S, E, W, NE, NW, SE, SW)
+- Center-seeking: Move trees toward centroid of configuration
+
+### For Greedy Construction
+- Use weighted random angles (favor diagonal orientations for corner packing)
+- Place trees from outside-in, moving toward center until collision
+- Try multiple random starting positions, keep best
+
 ## Files Reference
 - Sample submission: `/home/data/sample_submission.csv`
 - Getting started kernel: `../research/kernels/inversion_santa-2025-getting-started/`
 - bbox3 runner: `../research/kernels/yongsukprasertsuk_santa-2025-best-keeping-bbox3-runner/`
 - C++ implementation: `../research/kernels/smartmanoj_santa-claude/`
 - Validation/repair: `../research/kernels/jazivxt_why-not/`
+- Combined approach: `../research/kernels/saspav_santa-submission/`
+
+## Quick Start Code Template
+
+```python
+import pandas as pd
+import numpy as np
+from decimal import Decimal, getcontext
+from shapely import affinity
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+from shapely.strtree import STRtree
+from scipy.optimize import minimize_scalar
+from scipy.spatial import ConvexHull
+
+getcontext().prec = 25
+
+# Tree polygon vertices (relative to center at origin, 0° rotation)
+TX = [0, 0.125, 0.0625, 0.2, 0.1, 0.35, 0.075, 0.075, -0.075, -0.075, -0.35, -0.1, -0.2, -0.0625, -0.125]
+TY = [0.8, 0.5, 0.5, 0.25, 0.25, 0, 0, -0.2, -0.2, 0, 0, 0.25, 0.25, 0.5, 0.5]
+
+def make_tree_polygon(x, y, deg):
+    """Create a tree polygon at position (x,y) with rotation deg."""
+    base = Polygon(zip(TX, TY))
+    rotated = affinity.rotate(base, deg, origin=(0, 0))
+    return affinity.translate(rotated, x, y)
+
+def check_overlap(poly1, poly2):
+    """Check if two polygons overlap (touching is OK)."""
+    return poly1.intersects(poly2) and not poly1.touches(poly2)
+
+def calculate_score(trees_df, n):
+    """Calculate score for n-tree configuration."""
+    group = trees_df[trees_df['id'].str.startswith(f'{n:03d}_')]
+    polygons = []
+    for _, row in group.iterrows():
+        x = float(str(row['x'])[1:])
+        y = float(str(row['y'])[1:])
+        deg = float(str(row['deg'])[1:])
+        polygons.append(make_tree_polygon(x, y, deg))
+    
+    bounds = unary_union(polygons).bounds
+    side = max(bounds[2] - bounds[0], bounds[3] - bounds[1])
+    return side**2 / n
+
+def total_score(trees_df):
+    """Calculate total score for all configurations."""
+    return sum(calculate_score(trees_df, n) for n in range(1, 201))
+```
