@@ -20,14 +20,15 @@ trunk_w = 0.15, trunk_h = 0.2
 base_w = 0.7, mid_w = 0.4, top_w = 0.25
 tip_y = 0.8, tier_1_y = 0.5, tier_2_y = 0.25, base_y = 0.0
 ```
-The tree has a trunk at the bottom and three tiers of branches, with the tip at y=0.8.
+The tree has a trunk at the bottom and three tiers of branches, with the tip at y=0.8. Total height ~1.0 units.
 
 ## Key Techniques from Top Kernels
 
-### 1. bbox3 External Optimizer (CRITICAL)
+### 1. bbox3 External Optimizer (CRITICAL - PRIMARY TOOL)
 The top kernels use an external binary optimizer called `bbox3`:
 - Usage: `./bbox3 -n <iterations> -r <rounds>`
 - Typical parameters: -n 1000-2000, -r 30-96
+- Higher values = better results but longer runtime
 - This is the primary optimization tool used by winning solutions
 - See: `../research/kernels/jazivxt_why-not/why-not.ipynb`
 
@@ -56,12 +57,13 @@ from shapely.strtree import STRtree
 ### 4. C++ Simulated Annealing Optimizer
 The Santa Claude kernel implements a sophisticated C++ optimizer with:
 - Simulated annealing with temperature scheduling
-- Local search with multiple step sizes
+- Local search with multiple step sizes (0.01, 0.004, 0.0015, 0.0006, 0.00025, 0.0001)
 - Compaction (move trees toward center)
-- Squeeze (scale configuration down)
+- Squeeze (scale configuration down uniformly)
 - Swap moves between trees
 - Multi-angle restarts
 - Boundary tree optimization
+- Compile: `g++ -O3 -march=native -std=c++17 -fopenmp -o tree_packer tree_packer.cpp`
 See: `../research/kernels/smartmanoj_santa-claude/santa-claude.ipynb`
 
 ### 5. Backward Propagation
@@ -69,21 +71,31 @@ Start from N=200 and work backwards:
 - For each N, try removing boundary-touching trees
 - If the resulting (N-1) configuration is better than current best, save it
 - This can improve smaller N configurations using larger N solutions
+- Focus on trees that touch the bounding box boundary
 
 ### 6. Greedy Initialization
 The getting-started notebook shows a greedy approach:
 - Place trees one at a time
-- For each new tree, try multiple random angles
+- For each new tree, try multiple random angles (weighted by |sin(2*angle)|)
 - Move from far away toward center until collision
 - Back up until no collision
-- Keep the best placement
+- Keep the best placement from multiple attempts
 See: `../research/kernels/inversion_santa-2025-getting-started/santa-2025-getting-started.ipynb`
+
+## Academic Literature Insights (2D Irregular Polygon Packing)
+
+From research on 2D irregular packing problems:
+1. **Meta-heuristics dominate**: GA, simulated annealing, tabu search are most effective
+2. **No-fit polygon (NFP)**: Precompute collision-free placement regions for efficiency
+3. **Bottom-left heuristic**: Classic placement strategy - place at lowest-leftmost valid position
+4. **Jostle algorithm**: Iteratively shake/compact pieces to reduce waste
+5. **Extended local search**: Combine local search with nonlinear programming for fine-tuning
 
 ## Recommended Experiment Pipeline
 
-### Experiment 1: Baseline with bbox3
+### Experiment 1: Baseline with bbox3 (PRIORITY)
 1. Start with sample_submission.csv
-2. Run bbox3 optimizer with various parameters
+2. Run bbox3 optimizer: `./bbox3 -n 1000 -r 60`
 3. Apply fix_direction rotation optimization
 4. Validate and repair overlaps
 5. Expected: Should beat baseline significantly
@@ -94,15 +106,21 @@ See: `../research/kernels/inversion_santa-2025-getting-started/santa-2025-gettin
 3. Run with high iterations: `-n 5000 -r 16` or higher
 4. Apply backward propagation post-processing
 
-### Experiment 3: Ensemble/Combination
+### Experiment 3: Multi-Phase Optimization
+1. Phase A: Short runs with many parameter combinations (2 min each)
+2. Phase B: Medium runs on top candidates (10 min each)
+3. Phase C: Long runs on best few (20 min each)
+4. Always keep best solution, revert on regression
+
+### Experiment 4: Ensemble/Combination
 1. Run multiple optimizers with different seeds
 2. For each N, keep the best configuration across all runs
 3. Combine best results from bbox3 and C++ optimizer
 
-### Experiment 4: Parameter Tuning
-- bbox3: Try different -n and -r combinations
+### Experiment 5: Parameter Tuning
+- bbox3: Try -n {1000, 1200, 1500, 1800, 2000} and -r {30, 60, 90}
 - C++ optimizer: Tune temperature, iterations, step sizes
-- fix_direction: Multiple passes
+- fix_direction: Multiple passes (1-3)
 
 ## Implementation Notes
 
@@ -129,6 +147,9 @@ def get_score(trees, n):
     # Find min/max x and y
     # side = max(width, height)
     # return side**2 / n
+
+def total_score(all_configs):
+    return sum(get_score(trees, n) for n, trees in all_configs.items())
 ```
 
 ### Validation
@@ -136,16 +157,26 @@ def get_score(trees, n):
 def has_overlap(trees):
     # Use STRtree for efficient queries
     # Check intersects() and not touches()
+    polygons = [t.polygon for t in trees]
+    tree_index = STRtree(polygons)
+    for i, poly in enumerate(polygons):
+        indices = tree_index.query(poly)
+        for idx in indices:
+            if idx != i and poly.intersects(polygons[idx]) and not poly.touches(polygons[idx]):
+                return True
+    return False
 ```
 
 ## Key Insights
 
-1. **Precision matters**: Use Decimal with high precision (25+ digits) and scale factors
+1. **Precision matters**: Use Decimal with high precision (25+ digits) and scale factors (1e15 or 1e18)
 2. **Rotation optimization is cheap**: Always apply fix_direction after any optimization
 3. **Overlap repair is essential**: Optimizers may create overlaps; always validate and repair
 4. **Parallel processing**: Use OpenMP for C++ or multiprocessing for Python
 5. **Incremental improvement**: Keep best solutions and only accept improvements
 6. **Time budget**: Kaggle kernels have ~12 hour limit; plan optimization phases accordingly
+7. **Boundary trees matter**: Trees touching the bounding box boundary determine the score
+8. **Lattice patterns**: Good solutions often show crystalline/lattice-like arrangements
 
 ## Files to Reference
 - Getting started: `../research/kernels/inversion_santa-2025-getting-started/`
@@ -153,3 +184,34 @@ def has_overlap(trees):
 - Fix direction: `../research/kernels/saspav_santa-submission/`
 - C++ optimizer: `../research/kernels/smartmanoj_santa-claude/`
 - Why Not (bbox3): `../research/kernels/jazivxt_why-not/`
+
+## Critical Implementation Details
+
+### Submission Format
+```python
+# Values must be prefixed with 's' for string precision
+for col in ['x', 'y', 'deg']:
+    submission[col] = 's' + submission[col].astype('string')
+```
+
+### Overlap Repair Strategy
+When overlaps are detected, replace the invalid configuration with a known-good one:
+```python
+def replace_group(target_file, donor_file, group_id, output_file):
+    # Load both files
+    # Replace the invalid group with donor's version
+    # Save result
+```
+
+### Multi-Run Best Selection
+```python
+def merge_best_configs(run_results):
+    best_configs = {}
+    for n in range(1, 201):
+        best_side = float('inf')
+        for result in run_results:
+            if result[n]['side'] < best_side and not result[n]['has_overlap']:
+                best_side = result[n]['side']
+                best_configs[n] = result[n]['trees']
+    return best_configs
+```
