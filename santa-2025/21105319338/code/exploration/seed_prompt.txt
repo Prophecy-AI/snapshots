@@ -1,0 +1,190 @@
+# Santa 2025 Christmas Tree Packing - Seed Prompt
+
+## Problem Overview
+This is a 2D irregular polygon packing optimization problem. The goal is to pack N Christmas trees (N=1 to 200) into the smallest possible square bounding box for each N value.
+
+**Scoring:** score = Σ(s_n² / n) for n=1 to 200, where s_n is the side length of the bounding square for n trees.
+
+**Tree Shape:** 15-vertex polygon with:
+- Trunk: 0.15 wide, 0.2 tall
+- Base tier: 0.7 wide
+- Middle tier: 0.4 wide  
+- Top tier: 0.25 wide
+- Tip at y=0.8
+- Origin at center of trunk top
+
+**Target Score:** Beat 68.931058 (lower is better)
+
+## Top Approaches from Public Kernels
+
+### 1. bbox3 Binary Optimizer (CRITICAL - Most Effective)
+The `bbox3` compiled C++ binary is the core optimizer used by top solutions.
+- **Usage:** `./bbox3 -n <iterations> -r <restarts>`
+- **Recommended settings:**
+  - Quick runs: `-n 1000 -r 30` to `-n 2000 -r 96`
+  - Medium runs: `-n 5000 -r 16`
+  - Long runs: `-n 10000 -r 256`
+- **Source:** Available in kernel datasets (e.g., `/kaggle/input/santa-2025-csv/bbox3`)
+- See `../research/kernels/jazivxt_why-not/why-not.ipynb` for usage
+
+### 2. fix_direction - Rotation Optimization (ESSENTIAL)
+After bbox3 optimization, rotate the entire configuration to minimize bounding box:
+```python
+from scipy.optimize import minimize_scalar
+from scipy.spatial import ConvexHull
+
+def optimize_rotation(trees):
+    # Get convex hull of all tree polygon points
+    all_points = []
+    for tree in trees:
+        all_points.extend(list(tree.polygon.exterior.coords))
+    points_np = np.array(all_points)
+    hull_points = points_np[ConvexHull(points_np).vertices]
+    
+    # Find optimal rotation angle (0 to 90 degrees)
+    res = minimize_scalar(
+        lambda a: calculate_bbox_side_at_angle(a, hull_points),
+        bounds=(0.001, 89.999), method='bounded'
+    )
+    return res.x, res.fun
+```
+- Apply multiple passes (1-3) for better results
+- See `../research/kernels/saspav_santa-submission/santa-submission.ipynb`
+
+### 3. Backward Propagation (NOVEL TECHNIQUE)
+Use larger N configurations to improve smaller N:
+```
+For N from 200 down to 2:
+    For each tree touching the bounding box boundary:
+        Try removing that tree
+        If resulting (N-1) config is better than stored best for (N-1):
+            Update the stored best
+```
+- See `../research/kernels/smartmanoj_santa-claude/santa-claude.ipynb` for bp.cpp implementation
+
+### 4. C++ Tree Packer v21 (Alternative Optimizer)
+Full C++ implementation with:
+- **Squeeze:** Scale all trees towards center
+- **Compaction:** Move trees towards center in small steps
+- **Local search:** 8-directional moves + rotations
+- **Simulated annealing:** With swap moves
+- **Multi-start:** Different random seeds
+- Compile: `g++ -O3 -march=native -std=c++17 -fopenmp -o tree_packer tree_packer.cpp`
+
+### 5. Overlap Detection and Repair
+After optimization, validate and repair overlapping configurations:
+```python
+from shapely.strtree import STRtree
+
+def has_overlap(trees):
+    polygons = [t.polygon for t in trees]
+    tree_index = STRtree(polygons)
+    for i, poly in enumerate(polygons):
+        indices = tree_index.query(poly)
+        for idx in indices:
+            if idx != i and poly.intersects(polygons[idx]) and not poly.touches(polygons[idx]):
+                return True
+    return False
+```
+- If overlap detected, replace with known-good configuration from donor file
+
+## Recommended Experiment Pipeline
+
+### Phase 1: Baseline (Match Best Kernel ~69-70)
+1. Download best submission CSV and bbox3 binary from kernel datasets
+2. Run bbox3 with moderate settings: `./bbox3 -n 2000 -r 60`
+3. Apply fix_direction with 1-2 passes
+4. Validate and repair overlaps
+5. Expected score: ~69-70
+
+### Phase 2: Extended Optimization (Beat 68.931)
+1. Run bbox3 with MUCH longer settings: `-n 10000 -r 200`
+2. Apply fix_direction with 3+ passes
+3. Run backward propagation
+4. Identify worst-performing N values and focus optimization there
+5. Try multiple random seeds and keep best
+
+### Phase 3: Advanced Techniques
+1. **Per-tree rotation optimization:** Optimize each tree's angle individually
+2. **Greedy backtracking:** Beam search to remove/reposition trees
+3. **Fractional translation:** Very fine position adjustments (0.001 units)
+4. **Multi-start optimization:** Run from 10+ different initial configurations
+5. **Ensemble:** Combine best configurations from different approaches
+
+## Key Implementation Details
+
+### Submission Format
+```csv
+id,x,y,deg
+001_0,s0.0,s0.0,s20.411299
+002_0,s0.0,s0.0,s20.411299
+002_1,s-0.541068,s0.259317,s51.66348
+```
+- Values prefixed with 's' to preserve precision
+- Coordinates constrained to -100 ≤ x, y ≤ 100
+
+### ChristmasTree Class
+```python
+from decimal import Decimal, getcontext
+from shapely import affinity
+from shapely.geometry import Polygon
+
+getcontext().prec = 25
+scale_factor = Decimal('1e15')  # For precision
+
+class ChristmasTree:
+    def __init__(self, center_x='0', center_y='0', angle='0'):
+        self.center_x = Decimal(center_x)
+        self.center_y = Decimal(center_y)
+        self.angle = Decimal(angle)
+        # Build 15-vertex polygon and apply rotation/translation
+```
+
+### Score Calculation
+```python
+def get_total_score(dict_of_side_length):
+    score = Decimal('0')
+    for n, side in dict_of_side_length.items():
+        score += side ** 2 / Decimal(str(n))
+    return score
+```
+
+## Additional Techniques from Research
+
+### No-Fit Polygon (NFP)
+- Precompute collision-free regions for faster placement
+- Enables tighter packings of irregular shapes
+
+### Simulated Annealing Parameters
+- Higher initial temperature for more exploration
+- Slow cooling schedule
+- Swap moves between trees
+
+### Local Search Neighborhoods
+1. Translate single tree (8 directions)
+2. Rotate single tree
+3. Swap two trees
+4. Move tree towards center
+
+## Validation Strategy
+- Always validate no overlaps before submission
+- Use STRtree for efficient collision detection
+- Keep backup of known-good configurations
+- Replace invalid configs with donor file versions
+
+## Priority Order for Experiments
+1. **FIRST:** Reproduce best kernel score using bbox3 + fix_direction
+2. Run bbox3 with extended iterations (-n 10000+)
+3. Apply backward propagation
+4. Focus on worst-performing N values
+5. Try tree_packer_v21 as alternative optimizer
+6. Ensemble best results from different approaches
+
+## Files and Resources
+- Sample submission: `/home/data/sample_submission.csv`
+- Kernels: `../research/kernels/`
+  - `jazivxt_why-not/` - bbox3 usage
+  - `saspav_santa-submission/` - fix_direction implementation
+  - `smartmanoj_santa-claude/` - tree_packer_v21 and backward propagation
+  - `yongsukprasertsuk_santa-2025-best-keeping-bbox3-runner/` - 3-hour optimization runner
+  - `inversion_santa-2025-getting-started/` - Basic greedy algorithm and visualization
