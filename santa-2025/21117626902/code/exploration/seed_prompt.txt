@@ -12,84 +12,152 @@ Pack Christmas tree toys (15-vertex polygons) into the smallest square bounding 
 
 ### 1. bbox3 C++ Optimizer (HIGHEST PRIORITY)
 From `../research/kernels/jazivxt_why-not/why-not.ipynb` and `../research/kernels/yongsukprasertsuk_santa-2025-best-keeping-bbox3-runner/`:
-- **Simulated annealing** with temperature scheduling
+- **Simulated annealing** with geometric cooling: T(k+1) = α * T(k), α ≈ 0.95-0.99
 - **Local search** with multiple move types: translation, rotation, swap
 - **Squeeze/compaction**: Move trees toward center to reduce bounding box
 - **Multi-start optimization** with different random seeds
-- Parameters: `-n` (iterations), `-r` (restarts)
-- Uses OpenMP for parallelization
-- Key features: Complex number vector coordination, fluid dynamics, hinge pivot, density gradient flow
+- Parameters: `-n` (iterations, try 5000-20000), `-r` (restarts, try 16-256)
+- Uses OpenMP for parallelization: `export OMP_NUM_THREADS=96`
+- Compile: `g++ -O3 -march=native -std=c++17 -fopenmp -o bbox3 bbox3.cpp`
 
 ### 2. fix_direction - Rotation Tightening
 From `../research/kernels/saspav_santa-submission/santa-submission.ipynb`:
-- After placing trees, find optimal rotation angle for entire configuration
-- Uses `scipy.optimize.minimize_scalar` with bounds (0.001, 89.999)
-- Computes convex hull of all tree vertices
-- Rotates entire configuration to minimize bounding box side length
-- Can reduce score by finding better axis alignment
+```python
+from scipy.optimize import minimize_scalar
+from scipy.spatial import ConvexHull
+
+def optimize_rotation(trees):
+    # Get all polygon vertices
+    all_points = []
+    for tree in trees:
+        all_points.extend(list(tree.polygon.exterior.coords))
+    points_np = np.array(all_points)
+    hull_points = points_np[ConvexHull(points_np).vertices]
+    
+    # Find optimal rotation angle
+    res = minimize_scalar(
+        lambda a: calculate_bbox_side_at_angle(a, hull_points),
+        bounds=(0.001, 89.999), method='bounded'
+    )
+    return res.x, res.fun
+```
 
 ### 3. Backward Propagation
 From `../research/kernels/smartmanoj_santa-claude/santa-claude.ipynb`:
 - Start from N=200 configuration
-- Remove boundary-touching trees one by one
-- If resulting (N-1) configuration is better than stored, save it
-- Propagate improvements down to smaller N values
+- For each N from 200 down to 2:
+  - Find trees touching bounding box boundary
+  - Try removing each boundary tree
+  - If resulting (N-1) config is better than stored, save it
 - Key insight: Good N=200 packing may contain good N=199, N=198, etc.
 
-### 4. Greedy Placement (Baseline)
-From `../research/kernels/inversion_santa-2025-getting-started/santa-2025-getting-started.ipynb`:
-- Build configurations incrementally from N=1 to N=200
-- For each new tree: start far from center, move toward center until collision
-- Use weighted angle distribution favoring diagonal directions (corners)
-- Back up until no overlap
-- Keep 10 random attempts, select best
+### 4. tree_packer C++ (Alternative Optimizer)
+From `../research/kernels/smartmanoj_santa-claude/santa-claude.ipynb`:
+- Uses long double precision for better accuracy
+- Implements: squeeze, compaction, localSearch, simulated annealing
+- Multi-angle restarts for exploration
+- Swap move operator for escaping local optima
 
 ## Implementation Strategy
 
 ### Experiment 1: Baseline with Pre-optimized CSV
-1. Download best available pre-optimized submission from Kaggle datasets
-2. Run fix_direction rotation tightening
+```bash
+# Download best submission
+wget -q https://raw.githubusercontent.com/SmartManoj/Santa-Scoreboard/main/submission.csv -O submission.csv
+
+# Or use Kaggle datasets
+kaggle datasets download -d <dataset-name>
+```
+1. Load pre-optimized submission
+2. Run fix_direction rotation tightening on all N
 3. Validate no overlaps using shapely
 4. Score and submit
 
-### Experiment 2: C++ Optimizer (bbox3 or tree_packer)
-1. Compile C++ optimizer with OpenMP: `g++ -O3 -march=native -std=c++17 -fopenmp -o optimizer optimizer.cpp`
-2. Run with high iterations: `-n 10000 -r 256`
-3. Apply fix_direction post-processing
-4. Validate and submit
+### Experiment 2: C++ Optimizer (Extended Run)
+```bash
+# Compile with optimizations
+g++ -O3 -march=native -std=c++17 -fopenmp -o optimizer optimizer.cpp
 
-### Experiment 3: Backward Propagation
-1. Start from best N=200 configuration
-2. Implement backward propagation in C++
-3. For each N from 200 to 2:
-   - Find boundary-touching trees
-   - Try removing each, keep best result
-   - If better than stored N-1 config, save it
-4. Apply fix_direction to all configurations
-5. Submit
+# Run with high iterations
+export OMP_NUM_THREADS=$(nproc)
+./optimizer -n 10000 -r 256
+```
+- Run for 3-11 hours (Kaggle notebook limit)
+- Apply fix_direction post-processing
+- Validate and submit
+
+### Experiment 3: Backward Propagation + Forward Optimization
+1. Run backward propagation from N=200 to N=2
+2. For each improved configuration, run local optimization
+3. Apply fix_direction to all configurations
+4. Combine best results per N
 
 ### Experiment 4: Constructive Greedy with Beam Search
 **CRITICAL: If pre-optimized baseline is at local optimum, local search won't help!**
-1. Build solutions from scratch using greedy placement
-2. Use beam search: keep top K configurations at each step
-3. For each N, try multiple construction strategies:
-   - Different starting angles
-   - Different placement orders
-   - Different collision resolution strategies
-4. This is FUNDAMENTALLY DIFFERENT from optimizing existing solutions
+```python
+def greedy_beam_search(n, beam_width=10):
+    # Start with multiple random configurations
+    configs = [random_init() for _ in range(beam_width)]
+    
+    for tree_idx in range(n):
+        candidates = []
+        for config in configs:
+            # Try multiple placements for next tree
+            for angle in [0, 45, 90, 135, 180, 225, 270, 315]:
+                new_config = place_tree(config, tree_idx, angle)
+                if not has_overlap(new_config):
+                    candidates.append((score(new_config), new_config))
+        
+        # Keep top beam_width configurations
+        candidates.sort(key=lambda x: x[0])
+        configs = [c[1] for c in candidates[:beam_width]]
+    
+    return min(configs, key=score)
+```
 
 ## Technical Details
 
 ### Tree Polygon Vertices (15 points)
-```python
-TX = [0, 0.125, 0.0625, 0.2, 0.1, 0.35, 0.075, 0.075, -0.075, -0.075, -0.35, -0.1, -0.2, -0.0625, -0.125]
-TY = [0.8, 0.5, 0.5, 0.25, 0.25, 0, 0, -0.2, -0.2, 0, 0, 0.25, 0.25, 0.5, 0.5]
+```cpp
+const double TX[15] = {0, 0.125, 0.0625, 0.2, 0.1, 0.35, 0.075, 0.075, -0.075, -0.075, -0.35, -0.1, -0.2, -0.0625, -0.125};
+const double TY[15] = {0.8, 0.5, 0.5, 0.25, 0.25, 0, 0, -0.2, -0.2, 0, 0, 0.25, 0.25, 0.5, 0.5};
 ```
 
-### Overlap Detection
-- Use shapely STRtree for efficient spatial queries
-- Check: point-in-polygon AND segment intersection
-- Touching (not overlapping) is allowed: `intersects() and not touches()`
+### Overlap Detection (C++)
+```cpp
+bool overlap(const Poly& a, const Poly& b) {
+    // Bounding box check first (fast rejection)
+    if (a.x1 < b.x0 || b.x1 < a.x0 || a.y1 < b.y0 || b.y1 < a.y0) return false;
+    
+    // Point-in-polygon check
+    for (int i = 0; i < NV; i++) {
+        if (pip(a.p[i].x, a.p[i].y, b)) return true;
+        if (pip(b.p[i].x, b.p[i].y, a)) return true;
+    }
+    
+    // Segment intersection check
+    for (int i = 0; i < NV; i++)
+        for (int j = 0; j < NV; j++)
+            if (segInt(a.p[i], a.p[(i+1)%NV], b.p[j], b.p[(j+1)%NV])) return true;
+    
+    return false;
+}
+```
+
+### Simulated Annealing Parameters
+```cpp
+// Recommended settings from research
+double T0 = initial_score * 0.1;  // Initial temperature
+double alpha = 0.95;               // Cooling rate
+double T_min = 1e-10;              // Minimum temperature
+
+// Acceptance probability
+double delta = new_score - current_score;
+if (delta < 0 || random() < exp(-delta / T)) {
+    accept_move();
+}
+T = alpha * T;
+```
 
 ### Submission Format
 ```csv
@@ -101,6 +169,7 @@ id,x,y,deg
 ```
 - Values prefixed with 's' to preserve precision
 - id format: `{N:03d}_{tree_index}`
+- Total rows: 20100 (sum of 1 to 200)
 
 ### Scoring Function
 ```python
@@ -108,23 +177,19 @@ def score(submission):
     total = 0
     for n in range(1, 201):
         trees = get_trees_for_n(submission, n)
-        side = get_bounding_box_side(trees)
+        bounds = get_bounding_box(trees)
+        side = max(bounds.width, bounds.height)
         total += side**2 / n
     return total
 ```
 
-## Optimization Techniques from Research
-
-### Corner-Occupying (CCOA) Heuristic
-- Place each new tree so it touches two already-placed items
-- Yields high-density packings quickly
-- Good for initial solution generation
+## Optimization Techniques
 
 ### Squeeze Operation
 ```python
 def squeeze(config):
     cx, cy = centroid(config)
-    for scale in [0.9995, 0.999, 0.9985, ...]:
+    for scale in np.arange(0.9995, 0.98, -0.0005):
         trial = scale_toward_center(config, cx, cy, scale)
         if not has_overlap(trial):
             config = trial
@@ -134,26 +199,44 @@ def squeeze(config):
 ```
 
 ### Local Search Moves
-1. **Translation**: Move single tree in 8 directions with varying step sizes
-2. **Rotation**: Rotate single tree by small angles
+1. **Translation**: Move single tree in 8 directions with step sizes [0.01, 0.004, 0.0015, 0.0006, 0.00025, 0.0001]
+2. **Rotation**: Rotate single tree by angles [5.0, 2.0, 0.8, 0.3, 0.1] degrees
 3. **Swap**: Exchange positions of two trees
 4. **Compaction**: Move trees toward center
 
+### Overlap Repair
+If optimization creates overlaps:
+```python
+def repair_overlaps(submission, donor_submission):
+    for n in range(1, 201):
+        if has_overlap(get_config(submission, n)):
+            # Replace with donor configuration
+            replace_config(submission, donor_submission, n)
+    return submission
+```
+
 ## Validation Checklist
 Before submitting:
-1. Check all N=1 to 200 configurations present
-2. Verify no overlaps in any configuration
-3. Verify all coordinates in [-100, 100]
-4. Verify 's' prefix on all values
-5. Calculate local score and compare to expected
+1. ✓ Check all N=1 to 200 configurations present (20100 rows)
+2. ✓ Verify no overlaps in any configuration
+3. ✓ Verify all coordinates in [-100, 100]
+4. ✓ Verify 's' prefix on all values
+5. ✓ Calculate local score and compare to expected
 
 ## External Resources
-- Pre-optimized submissions available on Kaggle datasets (search for "santa-2025-csv", "bucket-of-chump")
-- SmartManoj's GitHub has updated submissions: `https://raw.githubusercontent.com/SmartManoj/Santa-Scoreboard/main/submission.csv`
+- Pre-optimized submissions: Kaggle datasets "santa-2025-csv", "bucket-of-chump"
+- SmartManoj's GitHub: `https://raw.githubusercontent.com/SmartManoj/Santa-Scoreboard/main/submission.csv`
+- bbox3 binary may be available in Kaggle datasets
 
 ## Priority Order for Experiments
-1. **First**: Get baseline working with pre-optimized CSV + fix_direction
-2. **Second**: Run C++ optimizer (bbox3/tree_packer) for extended time
-3. **Third**: Implement backward propagation
-4. **Fourth**: Try constructive approaches if local search plateaus
+1. **First**: Get baseline working with pre-optimized CSV + fix_direction (~68-69 score)
+2. **Second**: Run C++ optimizer (bbox3/tree_packer) for 3+ hours
+3. **Third**: Implement backward propagation from N=200
+4. **Fourth**: Try constructive beam search if local search plateaus
 5. **Fifth**: Ensemble best configurations per N from different approaches
+
+## Key Insights from Discussions
+- Asymmetric solutions often outperform symmetric ones
+- Lattice patterns with alternating "blue" (upward) and "pink" (downward) trees
+- Crystallization patterns emerge in optimal packings
+- Scores around 67 are achievable with extended optimization
