@@ -1,4 +1,3 @@
-%%writefile a.cpp
 // Tree Packer v3 - C++ version matching optimizer_v3.py
 // Features: Corner tree targeting, population-based search, basin hopping
 // Compile: g++ -O3 -march=native -std=c++17 -o tree_packer_v3 tree_packer_v3.cpp
