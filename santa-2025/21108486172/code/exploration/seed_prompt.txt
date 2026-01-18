@@ -1,132 +1,107 @@
 # Santa 2025 Christmas Tree Packing - Evolved Seed Prompt (Loop 2)
 
 ## Current Status
-- Best CV score: 70.734327 from exp_001 (002_extended_optimization)
-- Best LB score: N/A (no submissions yet - SUBMIT IMMEDIATELY!)
-- Target: 68.931058 | Gap: 1.803269 (2.6%)
+- Best CV score: 70.7343 from exp_001 (002_extended_optimization)
+- Best LB score: 70.7343 (CV-LB gap: 0.0000 - perfect match!)
+- Target: 68.931058 | Gap to target: 1.803 points (2.6%)
 
-## CRITICAL DISCOVERY: THE PATH TO VICTORY IS CLEAR!
-
-**The ensemble of best configs scores 67.77 - BELOW the target of 68.93!**
-
-But these configs have overlaps. The breakdown:
-- 30 N values have overlaps (ALL 2.96 points of improvement is here)
-- 170 N values have no overlaps (same as baseline)
-- If overlaps can be repaired, we beat the target by 1.16 points!
-
-The overlap structure is SEVERE:
-- N=3: 3 overlapping pairs (all 3 trees overlap each other)
-- N=4: 6 overlapping pairs (all 4 trees overlap each other)
-- N=5: 10 overlapping pairs (all 5 trees overlap each other)
-- etc.
-
-This suggests the cpp_parallel_sa optimizer found very compact configurations but ignored collision constraints.
+## CV-LB Relationship Analysis
+- CV = LB exactly (gap = 0.0000)
+- This is a pure optimization problem with deterministic scoring
+- NO distribution shift - improving CV directly improves LB
 
 ## Response to Evaluator
 
-**FULLY AGREE with the evaluator's analysis.** The evaluator correctly identified:
-1. Better configs EXIST (67.77 score) but have overlaps
-2. The baseline is NOT "well-optimized" - it's just the best VALID config
-3. Overlap repair is the key, not more optimization
+The evaluator correctly identified that:
+1. **Ensemble with overlaps scores 67.77** (below target!)
+2. **Valid ensemble (no overlaps) scores 70.73** (same as baseline)
+3. **ALL 2.96 points of improvement is locked behind overlaps**
 
-The evaluator's suggested approach is correct. The next experiment should focus on OVERLAP REPAIR.
+However, after deeper analysis, I found a CRITICAL issue:
+- **ALL cpp_parallel_sa configurations have MASSIVE overlaps** (183-198 N values with overlaps per file)
+- The SA was run WITHOUT proper collision constraints
+- Simple "nudge repair" CANNOT fix this - N=7 has 21 overlapping pairs where almost all trees overlap with each other
+- The "better" configurations are fundamentally broken, not just slightly overlapping
+
+**The evaluator's suggestion to "repair overlaps" is NOT viable for these configurations.**
+
+## Key Insight: The Path Forward
+
+The baseline (70.73) is already well-optimized WITH collision constraints. The cpp_parallel_sa configs score "better" only because they IGNORE collisions.
+
+**Real options:**
+1. **Run proper SA with collision constraints** - Start from baseline, use SA that REJECTS overlapping moves
+2. **Use bbox3 binary** - The top kernels use this, but it has GLIBC 2.34 compatibility issues (system has 2.31)
+3. **Implement crystalline packing for large N** - Research suggests N>58 benefits from regular lattice structures
+4. **Focus on specific N values** - Some N values may have more room for improvement than others
 
 ## Recommended Approaches (Priority Order)
 
-### 1. **[HIGHEST PRIORITY] Overlap Repair via Local Search**
+### 1. **[HIGHEST PRIORITY] Implement Proper SA with Collision Constraints**
+The C++ sa_parallel.cpp code has the right structure but was run incorrectly. Key changes needed:
+- ALWAYS check `hasOvl(i)` before accepting a move
+- Start from the BASELINE (which has no overlaps)
+- Use proper temperature schedule (T0=1.0, cooling=0.9995)
+- Run for many iterations (10000+) with multiple restarts
 
-For each N with overlaps (30 N values total):
-1. Load the better config from ensemble (has overlaps)
-2. Identify overlapping tree pairs
-3. Apply local search to separate overlapping trees:
-   - Try small translations (0.001-0.01) in 8 directions
-   - Try small rotations (±1°, ±5°, ±10°)
-   - Accept moves that reduce overlap count without creating new overlaps
-4. If repair succeeds → keep improved config
-5. If repair fails after many attempts → fall back to baseline
-
-**Implementation approach:**
-```python
-def repair_overlaps(xs, ys, degs, tx, ty, max_iter=10000):
-    """Repair overlaps via local search"""
-    step_sizes = [0.01, 0.005, 0.002, 0.001, 0.0005]
-    rot_steps = [10, 5, 2, 1, 0.5]
-    
-    for iteration in range(max_iter):
-        pairs = find_overlapping_pairs(xs, ys, degs, tx, ty)
-        if not pairs:
-            return xs, ys, degs, True  # Success!
-        
-        # Pick a random overlapping pair
-        i, j = random.choice(pairs)
-        
-        # Try moves to separate them
-        for tree_idx in [i, j]:
-            for step in step_sizes:
-                for dx, dy in [(step, 0), (-step, 0), (0, step), (0, -step), 
-                               (step, step), (step, -step), (-step, step), (-step, -step)]:
-                    new_xs = xs.copy()
-                    new_ys = ys.copy()
-                    new_xs[tree_idx] += dx
-                    new_ys[tree_idx] += dy
-                    
-                    # Check if this reduces overlaps
-                    new_pairs = find_overlapping_pairs(new_xs, new_ys, degs, tx, ty)
-                    if len(new_pairs) < len(pairs):
-                        xs, ys = new_xs, new_ys
-                        break
-            
-            # Also try rotation
-            for rot_step in rot_steps:
-                for drot in [rot_step, -rot_step]:
-                    new_degs = degs.copy()
-                    new_degs[tree_idx] += drot
-                    
-                    new_pairs = find_overlapping_pairs(xs, ys, new_degs, tx, ty)
-                    if len(new_pairs) < len(pairs):
-                        degs = new_degs
-                        break
-    
-    return xs, ys, degs, False  # Failed to repair
+```cpp
+// Key: Only accept moves that don't create overlaps
+if (ok && (ns < bs || rf() < exp((bs - ns) / T))) {
+    if (ns < bs) { bs = ns; best = c; }
+} else {
+    // REVERT the move
+    c.x[i] = ox; c.y[i] = oy; c.a[i] = oa;
+    c.upd(i);
+}
 ```
 
-### 2. **[HIGH PRIORITY] Constrained Re-optimization**
+### 2. **[HIGH PRIORITY] Try Different Optimization Approaches**
+- **Backward propagation**: Start from N=200, remove trees to get N-1 configs
+- **Per-tree rotation optimization**: After global optimization, fine-tune individual tree rotations
+- **Squeeze/compaction**: Move trees towards center of mass
 
-For N values where repair fails, try re-running optimization WITH collision constraints:
-- Use the better config as starting point
-- Run simulated annealing that REJECTS moves creating overlaps
-- This may find a valid config close to the better score
+### 3. **[MEDIUM PRIORITY] Crystalline Packing for Large N**
+Research suggests N>58 benefits from regular lattice structures:
+- Alternating orientations (0°, 180°)
+- Hexagonal or grid arrangements
+- May require different approach than SA
 
-### 3. **[MEDIUM PRIORITY] Hybrid Ensemble**
-
-Create a hybrid submission:
-- For N values where repair succeeds: use repaired config
-- For N values where repair fails: use baseline
-- Track which N values need more work
+### 4. **[LOWER PRIORITY] Build bbox3 from Source**
+The bbox3 binary is used by top kernels but has GLIBC issues. Options:
+- Find source code and compile locally
+- Use a different binary optimizer
+- Implement equivalent functionality in Python/C++
 
 ## What NOT to Try
-- Running more optimization on the baseline (already optimal for valid configs)
-- Searching for better valid configs in snapshots (already done - baseline is best)
-- Fractional translation on baseline (already tried - no improvement)
+- ❌ Simple "nudge repair" on cpp_parallel_sa configs (overlaps are too severe)
+- ❌ Running more iterations on already-optimized baseline (diminishing returns)
+- ❌ Fractional translation on small N (already tried, no improvement)
+
+## Implementation Strategy for Next Experiment
+
+**Experiment 003: Proper SA with Collision Constraints**
+
+1. **Compile the sa_parallel.cpp** with proper collision checking enabled
+2. **Start from baseline** (santa-2025.csv which has no overlaps)
+3. **Run SA with parameters**:
+   - Iterations: 15000
+   - Temperature: T0=1.0, Tf=0.001, cooling=0.9995
+   - Step sizes: Start large (0.1), decrease to fine (0.0001)
+   - Restarts: 5-10 per N value
+4. **Apply post-processing**:
+   - fix_direction (rotation optimization)
+   - Local search refinement
+   - Fractional translation
+5. **Validate**: Ensure no overlaps before saving
+
+**Expected outcome**: Should find some improvement over baseline while maintaining validity.
 
 ## Validation Notes
-- Always validate for overlaps before saving
-- Use Shapely STRtree for efficient overlap detection
-- Score = sum of (side^2 / N) for N=1 to 200
+- CV scheme: Direct score calculation (sum of side²/N for all N)
+- Overlap check: Use Shapely STRtree for efficient collision detection
+- All N values (1-200) must be present and valid
 
 ## SUBMISSION STRATEGY
-- Remaining submissions: 96 (ABUNDANT!)
-- **SUBMIT IMMEDIATELY** to get LB feedback
-- Even if score doesn't improve, we need LB calibration
-- Submit after EVERY experiment
-
-## Key Files
-- Ensemble with overlaps: `/home/nonroot/snapshots/santa-2025/21108486172/code/experiments/001_baseline/ensemble_submission.csv`
-- Baseline (no overlaps): `/home/nonroot/snapshots/santa-2025/21105319338/code/datasets/santa-2025-csv/santa-2025.csv`
-- cpp_parallel_sa configs: `/home/nonroot/snapshots/santa-2025/21090949260/code/experiments/009_cpp_parallel_sa/`
-
-## Success Criteria
-- If we can repair overlaps in even SOME of the 30 N values, we improve
-- Each N value repaired contributes ~0.1-0.24 points of improvement
-- We only need to repair enough N values to gain 1.8 points total
-- The top 10 N values with overlaps have 2.0 points of improvement potential
+- Remaining submissions: 95
+- Submit after this experiment? **YES** - we have abundant submissions and need LB feedback
+- Even small improvements should be submitted to track progress
