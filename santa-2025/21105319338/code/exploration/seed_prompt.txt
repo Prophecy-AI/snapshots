@@ -1,286 +1,107 @@
-# Santa 2025 Christmas Tree Packing - Seed Prompt
+# Santa 2025 Christmas Tree Packing - Evolved Seed Prompt (Loop 1)
 
-## Problem Overview
-This is a 2D irregular polygon packing optimization problem. The goal is to pack N Christmas trees (N=1 to 200) into the smallest possible square bounding box for each N value.
+## Current Status
+- Best CV score: 70.734327 from exp_000 (001_baseline_tree_packer_v21)
+- Best LB score: N/A (no submissions yet)
+- Target: 68.931058 | Gap to target: 1.803 (2.62%)
 
-**Scoring:** score = Σ(s_n² / n) for n=1 to 200, where s_n is the side length of the bounding square for n trees.
+## Public Kernel Status (CRITICAL!)
+- Have we implemented the best kernel yet? **PARTIALLY** - We used tree_packer_v21 but with modest settings
+- Top kernels identified:
+  1. Santa-submission (saspav) - uses bbox3 + fix_direction
+  2. Santa Claude (smartmanoj) - uses tree_packer_v21 + backward propagation
+  3. [Santa25] Ensemble + SA + Fractional Translation (jonathanchan) - combines multiple sources
+  4. Santa25 Simulated Annealing with Translations (egortrushin) - grid-based SA
+- Kernels we've implemented: tree_packer_v21 with -n 2000 -r 30 (too modest)
+- **CRITICAL ISSUE**: bbox3 binary requires GLIBC 2.34 but system has GLIBC 2.31. Cannot use pre-compiled bbox3.
 
-**Tree Shape:** 15-vertex polygon with:
-- Trunk: 0.15 wide, 0.2 tall
-- Base tier: 0.7 wide
-- Middle tier: 0.4 wide  
-- Top tier: 0.25 wide
-- Tip at y=0.8
-- Origin at center of trunk top
+## Key Technical Findings
+1. **Per-N Analysis**: Small N values (1-15) contribute disproportionately to score. Top 10 worst N values contribute 6.1% of total. N=1 alone = 0.66 (0.93% of total).
+2. **Need ~2.5% improvement** across all N to beat target
+3. **tree_packer_v21 compiled and works** - can use with more aggressive settings
+4. **Ensemble approach is key** - top kernels combine best configs from multiple sources for each N
 
-**Target Score:** Beat 68.931058 (lower is better)
+## Response to Evaluator
+The evaluator correctly identified:
+1. **Settings too modest**: -n 2000 -r 30 is insufficient. Agree - need -n 10000+ -r 256+
+2. **bbox3 not used**: Correct, but we discovered bbox3 requires GLIBC 2.34 which is unavailable. Must rely on tree_packer_v21.
+3. **Backward propagation not implemented**: Agree - this is a key technique to implement
+4. **Per-N analysis needed**: Done - identified N=1-15 as worst performers
 
-## Critical Insight: Different Strategies for Different N
-Based on competition analysis:
-- **N < 58:** Use simulated annealing for unstructured, chaotic packings
-- **N ≥ 58:** Consider "crystalline packing" (regular geometric lattices) which is mathematically superior for large numbers
+## Recommended Approaches (Priority Order)
 
-## REQUIRED EXTERNAL DATASETS
-**CRITICAL:** Download these datasets before running experiments:
+### 1. **[HIGHEST PRIORITY]** Run tree_packer_v21 with AGGRESSIVE settings
+Since bbox3 is unavailable, maximize tree_packer_v21:
 ```bash
-kaggle datasets download -d jazivxt/bucket-of-chump
-kaggle datasets download -d saspav/santa-2025-csv
+./tree_packer_v21 -n 10000 -r 256  # Much longer runs
 ```
-These contain:
-- `bbox3` binary optimizer (compiled C++)
-- Pre-optimized submission.csv files as starting points
+Run for 1-2 hours minimum. The current submission is already at a local optimum for modest settings.
 
-## Top Approaches from Public Kernels
+### 2. **[HIGH PRIORITY]** Implement Ensemble Approach
+The jonathanchan kernel shows the key insight: **for each N, pick the BEST configuration from multiple sources**.
+- Download multiple pre-optimized submissions from different kernels
+- For each N=1 to 200, compare scores and keep the best
+- This alone can improve score significantly
 
-### 1. bbox3 Binary Optimizer (CRITICAL - Most Effective)
-The `bbox3` compiled C++ binary is the core optimizer used by top solutions.
-- **Usage:** `./bbox3 -n <iterations> -r <restarts>`
-- **Recommended settings:**
-  - Quick runs: `-n 1000 -r 30` to `-n 2000 -r 96`
-  - Medium runs: `-n 5000 -r 16`
-  - Long runs: `-n 10000 -r 256`
-- **Source:** Available in kernel datasets (e.g., `bucket-of-chump/bbox3` or `santa-2025-csv/bbox3`)
-- See `../research/kernels/jazivxt_why-not/why-not.ipynb` for usage
-
-### 2. fix_direction - Rotation Optimization (ESSENTIAL)
-After bbox3 optimization, rotate the entire configuration to minimize bounding box:
-```python
-from scipy.optimize import minimize_scalar
-from scipy.spatial import ConvexHull
-import numpy as np
-
-def calculate_bbox_side_at_angle(angle_deg, points):
-    angle_rad = np.radians(angle_deg)
-    c, s = np.cos(angle_rad), np.sin(angle_rad)
-    rot_matrix_T = np.array([[c, s], [-s, c]])
-    rotated_points = points.dot(rot_matrix_T)
-    min_xy = np.min(rotated_points, axis=0)
-    max_xy = np.max(rotated_points, axis=0)
-    return max(max_xy[0] - min_xy[0], max_xy[1] - min_xy[1])
-
-def optimize_rotation(trees):
-    # Get convex hull of all tree polygon points
-    all_points = []
-    for tree in trees:
-        all_points.extend(list(tree.polygon.exterior.coords))
-    points_np = np.array(all_points)
-    hull_points = points_np[ConvexHull(points_np).vertices]
-    
-    # Find optimal rotation angle (0 to 90 degrees)
-    res = minimize_scalar(
-        lambda a: calculate_bbox_side_at_angle(a, hull_points),
-        bounds=(0.001, 89.999), method='bounded'
-    )
-    return res.x, res.fun
-```
-- Apply multiple passes (1-3) for better results
-- See `../research/kernels/saspav_santa-submission/santa-submission.ipynb`
-
-### 3. Backward Propagation (NOVEL TECHNIQUE)
-Use larger N configurations to improve smaller N:
+### 3. **[HIGH PRIORITY]** Implement Backward Propagation
+From santa-claude kernel:
 ```
 For N from 200 down to 2:
-    For each tree touching the bounding box boundary:
+    For each tree in configuration N:
         Try removing that tree
         If resulting (N-1) config is better than stored best for (N-1):
-            Update the stored best
+            Update stored best
 ```
-- See `../research/kernels/smartmanoj_santa-claude/santa-claude.ipynb` for bp.cpp implementation
+This propagates good configurations from larger N to smaller N.
 
-### 4. C++ Tree Packer v21 (Alternative Optimizer)
-Full C++ implementation with:
-- **Squeeze:** Scale all trees towards center
-- **Compaction:** Move trees towards center in small steps
-- **Local search:** 8-directional moves + rotations
-- **Simulated annealing:** With swap moves
-- **Multi-start:** Different random seeds
-- Compile: `g++ -O3 -march=native -std=c++17 -fopenmp -o tree_packer tree_packer.cpp`
-
-### 5. Overlap Detection and Repair
-After optimization, validate and repair overlapping configurations:
-```python
-from shapely.strtree import STRtree
-
-def has_overlap(trees):
-    polygons = [t.polygon for t in trees]
-    tree_index = STRtree(polygons)
-    for i, poly in enumerate(polygons):
-        indices = tree_index.query(poly)
-        for idx in indices:
-            if idx != i and poly.intersects(polygons[idx]) and not poly.touches(polygons[idx]):
-                return True
-    return False
+### 4. **[MEDIUM PRIORITY]** Implement Fractional Translation Polish
+From jonathanchan kernel - very fine position adjustments:
+```cpp
+double frac_steps[] = {0.001, 0.0005, 0.0002, 0.0001, 0.00005, 0.00002, 0.00001};
 ```
-- If overlap detected, replace with known-good configuration from donor file
+Apply after main optimization to squeeze out final improvements.
 
-## Recommended Experiment Pipeline
+### 5. **[MEDIUM PRIORITY]** Apply fix_direction with Multiple Passes
+Current implementation uses 2 passes. Try 5+ passes for better rotation optimization.
 
-### Phase 1: Baseline (Match Best Kernel ~69-70)
-1. Download datasets: `kaggle datasets download -d jazivxt/bucket-of-chump`
-2. Copy bbox3 and submission.csv to working directory
-3. Make bbox3 executable: `chmod +x ./bbox3`
-4. Run bbox3 with moderate settings: `./bbox3 -n 2000 -r 60`
-5. Apply fix_direction with 1-2 passes
-6. Validate and repair overlaps
-7. Expected score: ~69-70
+### 6. **[LOWER PRIORITY]** Focus on Worst N Values
+N=1 through N=15 contribute disproportionately. Consider:
+- Manual optimization for N=1 (optimal is 45° rotation, score ~0.66)
+- Extra optimization iterations for small N
 
-### Phase 2: Extended Optimization (Beat 68.931)
-1. Run bbox3 with MUCH longer settings: `-n 10000 -r 200`
-2. Apply fix_direction with 3+ passes
-3. Run backward propagation
-4. Identify worst-performing N values and focus optimization there
-5. Try multiple random seeds and keep best
+## Implementation Strategy for Next Experiment
 
-### Phase 3: Advanced Techniques
-1. **Per-tree rotation optimization:** Optimize each tree's angle individually
-2. **Greedy backtracking:** Beam search to remove/reposition trees
-3. **Fractional translation:** Very fine position adjustments (0.001 units)
-4. **Multi-start optimization:** Run from 10+ different initial configurations
-5. **Ensemble:** Combine best configurations from different approaches
-6. **Crystalline lattice patterns:** For large N, try regular geometric arrangements
+### Experiment 002: Extended Optimization + Ensemble
+1. **Download additional pre-optimized submissions**:
+   - bucket-of-chump/submission.csv (already have)
+   - santa-2025-csv/santa-2025.csv (already have)
+   - Try to get more from other kernel datasets
 
-## Key Implementation Details
+2. **Run tree_packer_v21 with aggressive settings**:
+   ```bash
+   ./tree_packer_v21 -n 10000 -r 128  # Start with this
+   ```
+   
+3. **Implement ensemble**: For each N, compare all available submissions and keep best
 
-### Submission Format
-```csv
-id,x,y,deg
-001_0,s0.0,s0.0,s20.411299
-002_0,s0.0,s0.0,s20.411299
-002_1,s-0.541068,s0.259317,s51.66348
-```
-- Values prefixed with 's' to preserve precision
-- Coordinates constrained to -100 ≤ x, y ≤ 100
+4. **Apply fix_direction with 5 passes**
 
-### ChristmasTree Class
-```python
-from decimal import Decimal, getcontext
-from shapely import affinity
-from shapely.geometry import Polygon
+5. **Implement backward propagation**
 
-getcontext().prec = 25
-scale_factor = Decimal('1e15')  # For precision
+6. **Apply fractional translation polish**
 
-class ChristmasTree:
-    def __init__(self, center_x='0', center_y='0', angle='0'):
-        self.center_x = Decimal(center_x)
-        self.center_y = Decimal(center_y)
-        self.angle = Decimal(angle)
-        
-        trunk_w = Decimal('0.15')
-        trunk_h = Decimal('0.2')
-        base_w = Decimal('0.7')
-        mid_w = Decimal('0.4')
-        top_w = Decimal('0.25')
-        tip_y = Decimal('0.8')
-        tier_1_y = Decimal('0.5')
-        tier_2_y = Decimal('0.25')
-        base_y = Decimal('0.0')
-        trunk_bottom_y = -trunk_h
-        
-        # Build 15-vertex polygon
-        initial_polygon = Polygon([
-            (Decimal('0.0') * scale_factor, tip_y * scale_factor),
-            (top_w / Decimal('2') * scale_factor, tier_1_y * scale_factor),
-            (top_w / Decimal('4') * scale_factor, tier_1_y * scale_factor),
-            (mid_w / Decimal('2') * scale_factor, tier_2_y * scale_factor),
-            (mid_w / Decimal('4') * scale_factor, tier_2_y * scale_factor),
-            (base_w / Decimal('2') * scale_factor, base_y * scale_factor),
-            (trunk_w / Decimal('2') * scale_factor, base_y * scale_factor),
-            (trunk_w / Decimal('2') * scale_factor, trunk_bottom_y * scale_factor),
-            (-(trunk_w / Decimal('2')) * scale_factor, trunk_bottom_y * scale_factor),
-            (-(trunk_w / Decimal('2')) * scale_factor, base_y * scale_factor),
-            (-(base_w / Decimal('2')) * scale_factor, base_y * scale_factor),
-            (-(mid_w / Decimal('4')) * scale_factor, tier_2_y * scale_factor),
-            (-(mid_w / Decimal('2')) * scale_factor, tier_2_y * scale_factor),
-            (-(top_w / Decimal('4')) * scale_factor, tier_1_y * scale_factor),
-            (-(top_w / Decimal('2')) * scale_factor, tier_1_y * scale_factor),
-        ])
-        
-        rotated = affinity.rotate(initial_polygon, float(self.angle), origin=(0, 0))
-        self.polygon = affinity.translate(rotated,
-            xoff=float(self.center_x * scale_factor),
-            yoff=float(self.center_y * scale_factor))
-```
+Expected improvement: 1-2 points (from 70.73 to ~69)
 
-### Score Calculation
-```python
-def get_total_score(dict_of_side_length):
-    score = Decimal('0')
-    for n, side in dict_of_side_length.items():
-        score += side ** 2 / Decimal(str(n))
-    return score
-```
+## SUBMISSION STRATEGY
+- Remaining submissions: 99
+- **Submit after this experiment? YES** - We have abundant submissions and need LB feedback to calibrate CV-LB relationship
 
-## Simulated Annealing Strategy (Key for Beating Target)
+## What NOT to Try
+- Trying to run bbox3 (GLIBC incompatibility)
+- Modest optimization settings (-n < 5000)
+- Single-source approaches (ensemble is key)
 
-### Temperature Schedule
-```python
-temperature = 1.0
-cooling_rate = 0.9995  # Slow cooling for better exploration
-
-for i in range(max_iterations):
-    # High temperature: Random spin and throw trees (Explorer Phase)
-    # Low temperature: Jiggle by microscopic amounts (Exploiter Phase)
-    
-    # Propose move
-    idx = random.randint(0, len(layout) - 1)
-    original_pos = layout[idx].copy()
-    
-    # Perturb position and rotation
-    layout[idx][0] += np.random.normal(0, temperature)
-    layout[idx][1] += np.random.normal(0, temperature)
-    layout[idx][2] += np.random.normal(0, temperature * 10)
-    
-    # Check overlap - if invalid, revert immediately
-    if check_overlap(layout):
-        layout[idx] = original_pos
-        continue
-    
-    # Metropolis-Hastings acceptance
-    new_score = calculate_area(layout)
-    delta = new_score - current_score
-    if delta < 0 or math.exp(-delta / temperature) > random.random():
-        current_score = new_score
-    else:
-        layout[idx] = original_pos
-    
-    temperature *= cooling_rate
-```
-
-### Local Search Neighborhoods
-1. Translate single tree (8 directions + towards center)
-2. Rotate single tree (small angle adjustments)
-3. Swap two trees (positions and/or rotations)
-4. Move boundary trees inward
-
-## Validation Strategy
-- Always validate no overlaps before submission
-- Use STRtree for efficient collision detection
-- Keep backup of known-good configurations
-- Replace invalid configs with donor file versions
-
-## Priority Order for Experiments
-1. **FIRST:** Download datasets and reproduce best kernel score using bbox3 + fix_direction
-2. Run bbox3 with extended iterations (-n 10000+)
-3. Apply backward propagation
-4. Focus on worst-performing N values (analyze score contribution per N)
-5. Try tree_packer_v21 as alternative optimizer
-6. Ensemble best results from different approaches
-7. Experiment with crystalline patterns for large N
-
-## Files and Resources
-- Sample submission: `/home/data/sample_submission.csv`
-- Kernels: `../research/kernels/`
-  - `jazivxt_why-not/` - bbox3 usage (uses `jazivxt/bucket-of-chump` dataset)
-  - `saspav_santa-submission/` - fix_direction implementation (uses `saspav/santa-2025-csv` dataset)
-  - `smartmanoj_santa-claude/` - tree_packer_v21 and backward propagation
-  - `yongsukprasertsuk_santa-2025-best-keeping-bbox3-runner/` - 3-hour optimization runner
-  - `inversion_santa-2025-getting-started/` - Basic greedy algorithm and visualization
-
-## Performance Tips
-1. Use OpenMP for parallelization: `export OMP_NUM_THREADS=96`
-2. Compile with `-O3 -march=native` for maximum speed
-3. Use Decimal precision (25+ digits) for accurate scoring
-4. Scale factor of 1e15 or 1e18 for polygon operations
-5. Run optimization loops for hours, not minutes
-6. Python is too slow - use compiled C++ for core optimization loops
+## Validation Notes
+- Score = Σ(s²/n) for n=1 to 200
+- Validate no overlaps before submission
+- Use Shapely for collision detection
