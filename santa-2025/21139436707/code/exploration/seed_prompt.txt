@@ -19,6 +19,12 @@ This is a 2D irregular polygon packing optimization problem. The goal is to pack
 - Tip at y=0.8, trunk bottom at y=-0.2
 - Total height ~1.0, max width 0.7
 
+Vertex coordinates (TX, TY):
+```
+TX = [0, 0.125, 0.0625, 0.2, 0.1, 0.35, 0.075, 0.075, -0.075, -0.075, -0.35, -0.1, -0.2, -0.0625, -0.125]
+TY = [0.8, 0.5, 0.5, 0.25, 0.25, 0, 0, -0.2, -0.2, 0, 0, 0.25, 0.25, 0.5, 0.5]
+```
+
 ## Top Approaches from Public Kernels
 
 ### 1. bbox3 C++ Optimizer (Best Performing)
@@ -58,14 +64,23 @@ Key technique:
 - Rotate entire configuration to minimize bounding box side
 
 ## Collision Detection (Essential)
+
+### Basic Approach (used in kernels)
 1. **Bounding Box Check** - quick rejection if boxes don't overlap
 2. **Point-in-Polygon** - check if any vertex is inside other polygon
 3. **Segment Intersection** - check if any edges cross
 4. Use STRtree (Shapely) for efficient spatial queries
 
+### Advanced: No-Fit Polygon (NFP)
+The NFP is a powerful technique for 2D irregular packing:
+- For polygons A and B, NFP represents all positions where B touches/overlaps A
+- Reduces overlap detection from O(nm) to O(k) point-in-polygon test
+- Can be computed via Minkowski sums or orbital method
+- Pre-compute NFP for tree pairs to speed up placement decisions
+
 ## Recommended Implementation Strategy
 
-### Approach 1: Implement bbox3-style optimizer
+### Approach 1: Implement bbox3-style optimizer (RECOMMENDED)
 1. Start with greedy placement (weighted random angles)
 2. Apply squeeze/compaction to reduce bounding box
 3. Use local search with small position/rotation perturbations
@@ -89,30 +104,78 @@ Key technique:
 ## Key Optimization Techniques
 
 ### Greedy Placement
+```python
+def generate_weighted_angle():
+    # Favor diagonal orientations for better corner packing
+    while True:
+        angle = random.uniform(0, 2 * math.pi)
+        if random.uniform(0, 1) < abs(math.sin(2 * angle)):
+            return angle
+```
 - Place trees one at a time
-- Use weighted random angles (favor diagonal orientations for corners)
 - Move from far away toward center until collision
 - Back up to valid position
 
 ### Squeeze/Compaction
-```
-for scale in [0.9995, 0.999, ...]:
-    scale all positions toward center
-    if no overlap: accept
-    else: break
+```python
+def squeeze(config):
+    cx, cy = centroid(config)
+    for scale in [0.9995, 0.999, 0.9985, ...]:
+        trial = scale_toward_center(config, cx, cy, scale)
+        if not has_overlap(trial):
+            config = trial
+        else:
+            break
+    return config
 ```
 
 ### Local Search
-- Try small translations (0.01, 0.004, 0.0015, ...)
-- Try small rotations (5°, 2°, 0.8°, ...)
-- 8-directional moves + toward-center moves
-- Accept if reduces bounding box without overlap
+```python
+steps = [0.01, 0.004, 0.0015, 0.0006, 0.00025, 0.0001]
+rotations = [5.0, 2.0, 0.8, 0.3, 0.1]
+directions = [(1,0), (-1,0), (0,1), (0,-1), (1,1), (1,-1), (-1,1), (-1,-1)]
+
+for tree in config:
+    # Try toward-center moves
+    for step in steps:
+        move_toward_center(tree, step)
+        if improves_and_valid(): accept()
+    
+    # Try 8-directional moves
+    for step in steps:
+        for dx, dy in directions:
+            move(tree, dx*step, dy*step)
+            if improves_and_valid(): accept()
+    
+    # Try rotations
+    for rot in rotations:
+        for da in [rot, -rot]:
+            rotate(tree, da)
+            if improves_and_valid(): accept()
+```
 
 ### Rotation Optimization
-- Collect all polygon vertices
-- Compute convex hull
-- Find angle that minimizes max(width, height) of rotated hull
-- Apply rotation to all trees
+```python
+from scipy.spatial import ConvexHull
+from scipy.optimize import minimize_scalar
+
+def optimize_rotation(trees):
+    # Collect all polygon vertices
+    all_points = []
+    for tree in trees:
+        all_points.extend(tree.polygon.exterior.coords)
+    
+    # Get convex hull
+    hull_points = points[ConvexHull(points).vertices]
+    
+    # Find optimal rotation angle
+    def bbox_side_at_angle(angle_deg):
+        rotated = rotate_points(hull_points, angle_deg)
+        return max(rotated.max(0) - rotated.min(0))
+    
+    result = minimize_scalar(bbox_side_at_angle, bounds=(0, 90), method='bounded')
+    return result.x  # optimal angle
+```
 
 ## Validation Requirements
 1. No overlapping trees (intersects but not touches)
@@ -123,13 +186,14 @@ for scale in [0.9995, 0.999, ...]:
 
 ### Precision
 - Use Decimal for high precision calculations
-- Scale factor for integer-like operations
+- Scale factor (e.g., 1e15) for integer-like operations
 - Round to 6-12 decimal places for submission
 
 ### Performance
-- Use OpenMP for parallel overlap checking
-- STRtree for spatial indexing
+- Use OpenMP for parallel overlap checking (C++)
+- STRtree for spatial indexing (Python/Shapely)
 - Cache polygon computations
+- Process all n-configurations in parallel
 
 ### Submission Format
 ```
@@ -145,22 +209,34 @@ id,x,y,deg
 1. **Implement basic greedy + squeeze + rotation optimization**
    - Should beat baseline significantly
    - Reference: getting-started notebook
+   - Expected improvement: 10-20%
 
 2. **Add local search with position/rotation perturbations**
-   - Focus on boundary-touching trees
+   - Focus on boundary-touching trees (they define bounding box)
    - Reference: tree_packer_v21
+   - Expected improvement: 5-10%
 
 3. **Implement simulated annealing with swap moves**
    - Higher exploration capability
    - Reference: tree_packer_v21
+   - Expected improvement: 2-5%
 
 4. **Try backward propagation**
    - Leverage good large-n solutions for smaller n
    - Reference: smartmanoj kernel
+   - Expected improvement: 1-3%
 
 5. **Multi-start with different initial angles**
    - Run multiple times with different random seeds
    - Keep best result for each n
+   - Expected improvement: 1-2%
+
+## Critical Success Factors
+
+1. **Focus on boundary trees** - Trees touching the bounding box edges determine the score
+2. **Rotation is key** - The fix_direction optimization can significantly reduce bounding box
+3. **Iterative refinement** - Multiple passes of squeeze + local search + rotation
+4. **Validate thoroughly** - Overlapping submissions are rejected
 
 ## References
 - Getting Started: `../research/kernels/inversion_santa-2025-getting-started/`
