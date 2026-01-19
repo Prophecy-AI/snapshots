@@ -1,116 +1,139 @@
 ## Current Status
 - Best CV score: 70.659958 from exp_005 (saspav_latest baseline)
-- Best LB score: 70.659958 (CV = LB confirmed)
+- Best LB score: 70.6600 (exp_005, exp_006)
 - Target: 68.919154 | Gap to target: 1.74 points (2.53%)
 
 ## Public Kernel Status (CRITICAL!)
-- Have we implemented the best kernel yet? **NO - jiweiliu kernel NOT correctly implemented**
+- Have we implemented the best kernel yet? **NO - jiweiliu kernel was INCOMPLETE**
 - Top kernels identified:
-  1. jiweiliu/super-fast-simulated-annealing-with-translations (shows ~0.15 improvement)
-  2. chistyakov/new-simple-fix-rebuild-large-layout-from-corners (corner rebuild approach)
-  3. egortrushin/santa25-simulated-annealing-with-translations (lattice approach)
-- Kernels we've implemented: NONE correctly (lattice SA failed due to wrong seeds)
-- Kernels still to implement: jiweiliu (with correct seeds), chistyakov corner rebuild
-- **CRITICAL**: Previous lattice attempt used WRONG initial seeds!
+  1. jiweiliu_super-fast-simulated-annealing-with-translations - claims ~0.15 improvement
+  2. chistyakov_new-simple-fix-rebuild-large-layout-from-corners - corner extraction
+  3. crodoc_74-75-backpacking-christmas-trees - backpacking approach
+- Kernels we've implemented: NONE CORRECTLY (exp_013 was incomplete)
+- Kernels still to implement: jiweiliu (FULL version), chistyakov corner extraction
 
 ## CV-LB Relationship Analysis
-- CV = LB exactly (no gap) - this is an optimization problem, not ML
-- All submissions: CV matches LB perfectly
-- No distribution shift - the problem is purely computational
+- CV = LB for all submissions (perfect correlation)
+- No distribution shift - this is a pure optimization problem
+- Improving CV directly improves LB
 
 ## Response to Evaluator
-The evaluator correctly identified that the lattice SA approach failed because:
-1. We used simple seeds (0,0,0) and (0.5,0.5,180) instead of pre-optimized seeds
-2. The jiweiliu kernel uses PRE-OPTIMIZED seeds that are the result of extensive optimization
-3. We need to use the EXACT seeds from the jiweiliu kernel
 
-**I agree with the evaluator's assessment.** The next experiment MUST use the correct pre-optimized seeds from the jiweiliu kernel:
-- Seed 1: (-4.191683864412409, -4.498489528496051, 74.54421568660419)
-- Seed 2: (-4.92202045352307, -4.727639556649786, 254.5401905706735)
-- a_init = 0.8744896974945239
-- b_init = 0.7499641699190263
+**I FULLY AGREE with the evaluator's assessment.**
+
+The evaluator correctly identified that exp_013 was CRITICALLY INCOMPLETE:
+
+1. **The SA optimization step was completely skipped** - This is the MOST IMPORTANT part of the jiweiliu kernel. The kernel runs `sa_optimize_improved()` with 100,000 SA moves per grid configuration. Without this, the raw lattice configurations are NOT expected to beat the baseline.
+
+2. **The deletion cascade was not implemented** - This propagates good large configurations to smaller sizes.
+
+3. **Multiprocessing was not used** - The jiweiliu kernel runs SA in parallel across all grid configurations.
+
+The executor tested raw lattice configurations without optimization and concluded the approach doesn't work. **This is like testing a car without an engine and concluding cars don't work.**
+
+The jiweiliu kernel is a PUBLIC kernel that shows ~0.15 improvement in 2 minutes. It just needs to be implemented COMPLETELY, not partially.
 
 ## Recommended Approaches (Priority Order)
 
-### 1. **[HIGHEST PRIORITY]** Implement jiweiliu kernel with CORRECT pre-optimized seeds
+### 1. **[HIGHEST PRIORITY]** Implement FULL jiweiliu kernel with SA optimization
 
-The jiweiliu kernel shows ~0.15 improvement in 2 minutes. We MUST implement it correctly:
+The previous experiment was incomplete. Here's what MUST be done:
 
-**Pre-optimized seeds (CRITICAL - use these EXACTLY):**
+**Step 1: Copy the core functions from the jiweiliu kernel:**
+- `sa_optimize_improved()` - The SA optimization function (100,000 moves per config)
+- `optimize_grid_config()` - Wrapper for multiprocessing
+- `deletion_cascade_numba()` - Propagates good configs to smaller N
+- `create_grid_vertices_extended()` - Grid generation (already have this)
+- `get_final_grid_positions_extended()` - Extract final positions
+
+**Step 2: Run SA optimization in parallel:**
 ```python
-initial_seeds = [
-    (-4.191683864412409, -4.498489528496051, 74.54421568660419),
-    (-4.92202045352307, -4.727639556649786, 254.5401905706735),
-]
-a_init = 0.8744896974945239
-b_init = 0.7499641699190263
-```
+from multiprocessing import Pool, cpu_count
 
-**Key components to implement:**
-1. Use the pre-optimized seeds above (NOT simple seeds)
-2. Generate many grid configurations automatically:
-   ```python
-   for ncols in range(2, 11):
-       for nrows in range(ncols, 15):
-           for append_x in [False, True]:
-               for append_y in [False, True]:
-                   n_trees = 2 * ncols * nrows + (nrows if append_x else 0) + (ncols if append_y else 0)
-                   if n_trees <= 200:
-                       grid_configs.append((ncols, nrows, append_x, append_y))
-   ```
-3. Run SA optimization on each grid configuration
-4. Apply deletion cascade to propagate improvements from large N to small N
-5. Only keep configurations that are BETTER than baseline
-
-**SA parameters (from jiweiliu kernel):**
-```python
-sa_params = {
+# SA parameters from jiweiliu kernel
+params = {
     "Tmax": 0.001,
-    "Tmin": 0.000001,
+    "Tmin": 0.0001,
     "nsteps": 10,
-    "nsteps_per_T": 5000,
-    "position_delta": 0.002,
-    "angle_delta": 1.0,
-    "angle_delta2": 0.5,
-    "delta_t": 0.002,
+    "nsteps_per_T": 10000,  # 100,000 total SA moves per config
+    "position_delta": 0.01,
+    "angle_delta": 30.0,
+    "angle_delta2": 30.0,
+    "delta_t": 0.01,
 }
+
+# Generate tasks for all grid configurations
+tasks = []
+for ncols, nrows, append_x, append_y, n_trees in grid_configs:
+    for seed in range(3):  # Multiple random seeds
+        tasks.append((ncols, nrows, append_x, append_y, initial_seeds, a_init, b_init, params, seed))
+
+# Run in parallel
+with Pool(cpu_count()) as pool:
+    results = pool.map(optimize_grid_config, tasks)
 ```
 
-**Expected improvement: ~0.15 points (8.6% of gap)**
+**Step 3: Apply deletion cascade:**
+```python
+# Merge best results with baseline
+merged_xs, merged_ys, merged_degs = merge_with_baseline(results, baseline_xs, baseline_ys, baseline_degs)
 
-### 2. **[HIGH PRIORITY]** Corner rebuild approach (chistyakov kernel)
+# Apply deletion cascade
+final_xs, final_ys, final_degs, side_lengths = deletion_cascade_numba(
+    merged_xs, merged_ys, merged_degs, np.arange(1, 201, dtype=np.int64)
+)
+```
 
-After implementing jiweiliu, try the corner rebuild approach:
-- Take large N layouts (e.g., N=111, N=200)
-- Extract subsets from each corner
-- Check if the subset is better than the current configuration for that N
-- This may find improvements for smaller N values
+**Step 4: Verify and save:**
+- Calculate final score
+- Verify no overlaps
+- Save to submission.csv
 
-### 3. **[MEDIUM PRIORITY]** Longer optimization runs
+**Expected improvement: ~0.15 points → 70.51 score**
 
-If the above approaches don't close the gap:
-- Run SA optimization for hours instead of minutes
-- Try different random seeds
-- May find different basins
+### 2. **[HIGH PRIORITY]** Try chistyakov corner extraction
+
+If jiweiliu doesn't work, try the corner extraction approach:
+- For each large N (e.g., N=111, 150, 200):
+  - Get the bounding box of all trees
+  - For each corner (4 corners):
+    - Sort trees by distance from corner
+    - Take first k trees for each k from 1 to N
+    - Check if this improves the score for size k
+
+This is a different approach that might find improvements the SA approach misses.
+
+### 3. **[MEDIUM PRIORITY]** Combine approaches
+
+After implementing both:
+- Run jiweiliu SA optimization
+- Run chistyakov corner extraction on the result
+- Apply deletion cascade
+- Merge with baseline
 
 ## What NOT to Try
-- Simple initial seeds (0,0,0) and (0.5,0.5,180) - these cause overlaps
-- Standard SA optimization on the baseline - already at tight local optimum
-- Perturbation approaches - even small perturbations cause collisions
-- Backward propagation on baseline - already optimal
+- ❌ Raw lattice configurations without SA optimization (already proven to fail)
+- ❌ Standard SA on the baseline (already tried, no improvement)
+- ❌ Fractional translation (already tried, no improvement)
+- ❌ Backward propagation (already tried, no improvement)
+- ❌ Perturbation (causes collisions immediately)
+- ❌ Concluding the target is unreachable (FORBIDDEN)
 
 ## SUBMISSION STRATEGY
 - Remaining submissions: 91
-- Submit after this experiment? **YES** - we have abundant submissions
-- Submit every experiment that produces a valid submission file
+- Submit after this experiment? **YES - we have abundant submissions**
+- We need LB feedback to verify if the jiweiliu approach works
 
 ## Validation Notes
-- CV = LB exactly for this optimization problem
-- No need for cross-validation - just compute the score directly
+- CV = LB for this problem (pure optimization, no distribution shift)
 - Verify no overlaps before submission
+- Compare against baseline score (70.659958)
 
-## Technical Notes
-- Use numba for speed (already implemented)
-- Use multiprocessing for parallel SA (if time permits)
-- The jiweiliu kernel code is in `/home/code/research/kernels/jiweiliu_super-fast-simulated-annealing-with-translations/`
-- The baseline is in `/home/code/external_data/saspav_latest/santa-2025.csv`
+## Time Allocation
+- 30 min: Copy and adapt the full jiweiliu kernel code
+- 30 min: Run SA optimization with multiprocessing
+- 10 min: Apply deletion cascade
+- 10 min: Verify and submit
+
+## Critical Reminder
+**DO NOT conclude the target is unreachable.** The jiweiliu kernel is a PUBLIC kernel that works. It just needs to be implemented COMPLETELY. The gap to target is 1.74 points (2.46%). The jiweiliu kernel approach is the most promising path forward.
