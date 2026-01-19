@@ -6,6 +6,14 @@ This is a 2D irregular polygon packing optimization problem. The goal is to pack
 **Scoring:** score = Σ(side_length² / N) for all N from 1 to 200. Lower is better.
 **Target:** Beat 68.922808
 
+## Score Distribution Analysis
+Based on EDA (see `exploration/eda.ipynb`):
+- N=1-50 contributes ~20% of total score
+- N=51-100 contributes ~25% of total score  
+- N=101-150 contributes ~27% of total score
+- N=151-200 contributes ~28% of total score
+**Implication:** Focus optimization efforts on higher N values for maximum impact.
+
 ## Data Format
 - Submission CSV with columns: id, x, y, deg
 - id format: "NNN_T" where NNN is the tree count (001-200) and T is tree index
@@ -13,7 +21,7 @@ This is a 2D irregular polygon packing optimization problem. The goal is to pack
 - Total rows: 20,100 (sum of 1+2+...+200)
 
 ## Tree Geometry (15 vertices)
-```
+```python
 TX = [0, 0.125, 0.0625, 0.2, 0.1, 0.35, 0.075, 0.075, -0.075, -0.075, -0.35, -0.1, -0.2, -0.0625, -0.125]
 TY = [0.8, 0.5, 0.5, 0.25, 0.25, 0, 0, -0.2, -0.2, 0, 0, 0.25, 0.25, 0.5, 0.5]
 ```
@@ -176,24 +184,74 @@ def random_initialization(n_trees, num_attempts=100):
 
 ## Key Implementation Details
 
-### Collision Detection
-- Use Shapely library for polygon operations
-- STRtree for efficient spatial indexing
-- Check: `poly.intersects(other) and not poly.touches(other)`
-- Bounding box pre-filter for speed
+### ChristmasTree Class (from kernels)
+```python
+from decimal import Decimal, getcontext
+from shapely import affinity
+from shapely.geometry import Polygon
 
-### Overlap Repair
-- When optimizer creates overlaps, replace with known-good configuration
-- Keep donor CSV with valid configurations for fallback
+getcontext().prec = 30
+
+class ChristmasTree:
+    def __init__(self, center_x='0', center_y='0', angle='0'):
+        self.center_x = Decimal(str(center_x))
+        self.center_y = Decimal(str(center_y))
+        self.angle = Decimal(str(angle))
+        
+        # Tree dimensions
+        trunk_w, trunk_h = Decimal('0.15'), Decimal('0.2')
+        base_w, mid_w, top_w = Decimal('0.7'), Decimal('0.4'), Decimal('0.25')
+        tip_y, tier_1_y, tier_2_y = Decimal('0.8'), Decimal('0.5'), Decimal('0.25')
+        base_y, trunk_bottom_y = Decimal('0.0'), -trunk_h
+        
+        initial_polygon = Polygon([
+            (0, float(tip_y)),
+            (float(top_w/2), float(tier_1_y)), (float(top_w/4), float(tier_1_y)),
+            (float(mid_w/2), float(tier_2_y)), (float(mid_w/4), float(tier_2_y)),
+            (float(base_w/2), float(base_y)),
+            (float(trunk_w/2), float(base_y)), (float(trunk_w/2), float(trunk_bottom_y)),
+            (float(-trunk_w/2), float(trunk_bottom_y)), (float(-trunk_w/2), float(base_y)),
+            (float(-base_w/2), float(base_y)),
+            (float(-mid_w/4), float(tier_2_y)), (float(-mid_w/2), float(tier_2_y)),
+            (float(-top_w/4), float(tier_1_y)), (float(-top_w/2), float(tier_1_y)),
+        ])
+        
+        rotated = affinity.rotate(initial_polygon, float(self.angle), origin=(0, 0))
+        self.polygon = affinity.translate(rotated, xoff=float(self.center_x), yoff=float(self.center_y))
+```
+
+### Collision Detection
+```python
+from shapely.strtree import STRtree
+
+def has_overlap(trees):
+    if len(trees) <= 1:
+        return False
+    polygons = [t.polygon for t in trees]
+    tree_index = STRtree(polygons)
+    
+    for i, poly in enumerate(polygons):
+        indices = tree_index.query(poly)
+        for idx in indices:
+            if idx != i:
+                if poly.intersects(polygons[idx]) and not poly.touches(polygons[idx]):
+                    return True
+    return False
+```
 
 ### Scoring Function
 ```python
+from shapely.ops import unary_union
+
 def get_score(trees, n):
-    xys = np.concatenate([np.asarray(t.polygon.exterior.xy).T for t in trees])
-    min_x, min_y = xys.min(axis=0)
-    max_x, max_y = xys.max(axis=0)
-    side_length = max(max_x - min_x, max_y - min_y)
+    all_polygons = [t.polygon for t in trees]
+    bounds = unary_union(all_polygons).bounds
+    side_length = max(bounds[2] - bounds[0], bounds[3] - bounds[1])
     return side_length**2 / n
+
+def get_total_score(configs):
+    """configs is dict: {n: [trees]}"""
+    return sum(get_score(trees, n) for n, trees in configs.items())
 ```
 
 ## Recommended Experiment Strategy
@@ -230,7 +288,7 @@ def get_score(trees, n):
 
 ## Critical Optimization Insights
 
-1. **Focus on high-N configurations:** N=150-200 contribute most to score
+1. **Focus on high-N configurations:** N=150-200 contribute ~28% of total score
 2. **Rotation matters:** fix_direction can significantly reduce bounding box
 3. **Boundary trees are key:** Trees touching the bounding box define the score
 4. **Incremental improvement:** Small improvements compound across 200 configurations
@@ -260,4 +318,25 @@ g++ -O3 -std=c++17 -o bp bp.cpp
 # Run optimizer
 export OMP_NUM_THREADS=4
 ./bbox3 -n 5000 -r 64
+```
+
+## Submission Format
+```python
+def create_submission(configs, output_path):
+    """
+    configs: dict {n: list of ChristmasTree objects}
+    """
+    rows = []
+    for n in range(1, 201):
+        trees = configs[n]
+        for idx, tree in enumerate(trees):
+            rows.append({
+                'id': f'{n:03d}_{idx}',
+                'x': f's{tree.center_x}',
+                'y': f's{tree.center_y}',
+                'deg': f's{tree.angle}'
+            })
+    
+    df = pd.DataFrame(rows)
+    df.to_csv(output_path, index=False)
 ```
