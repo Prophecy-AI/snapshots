@@ -5,13 +5,15 @@ This is a 2D irregular polygon packing optimization problem. The goal is to pack
 
 **Metric:** Score = Σ(s²/n) for n=1 to 200, where s is the side length of the bounding square. Lower is better.
 **Target Score:** Beat 68.922808
+**Total submission rows:** 20,100 (sum of 1 to 200)
 
 ## Tree Geometry
-- 15-vertex polygon with trunk
+- 15-vertex polygon with trunk (non-convex shape)
 - Key dimensions: trunk_w=0.15, trunk_h=0.2, base_w=0.7, mid_w=0.4, top_w=0.25, tip_y=0.8
-- TX/TY coordinates define the base shape
-- Trees can be rotated (0-360 degrees) and positioned (x, y)
-- Collision detection uses Shapely polygons with high precision
+- TX coordinates: [0, 0.125, 0.0625, 0.2, 0.1, 0.35, 0.075, 0.075, -0.075, -0.075, -0.35, -0.1, -0.2, -0.0625, -0.125]
+- TY coordinates: [0.8, 0.5, 0.5, 0.25, 0.25, 0, 0, -0.2, -0.2, 0, 0, 0.25, 0.25, 0.5, 0.5]
+- Trees can be rotated (0-360 degrees continuous) and positioned (x, y)
+- Collision detection uses Shapely polygons with high precision (Decimal type)
 
 ## Top Approaches from Public Kernels
 
@@ -25,6 +27,7 @@ The bbox3 optimizer is the most successful approach, using:
 - Density gradient flow
 - Global boundary tension
 - OpenMP parallelization for speed
+- Aggressive overlap repair cycles
 
 **Key parameters:**
 - `-n`: Number of iterations (try 1000-10000)
@@ -41,20 +44,42 @@ g++ -O3 -march=native -std=c++17 -fopenmp -o bbox3 bbox3.cpp
 
 Alternative optimizer with different techniques:
 - Swap moves between trees
-- Multi-angle restarts
+- Multi-angle restarts (try different starting rotations)
 - Higher temperature simulated annealing
-- Squeeze operation (scale towards center)
-- Compaction (move trees toward center)
-- Local search with 8-directional moves
+- Squeeze operation (scale all trees towards center)
+- Compaction (move individual trees toward center)
+- Local search with 8-directional moves + rotation adjustments
+- Uses long double precision for accuracy
 
-### 3. fix_direction Post-Processing
+### 3. fix_direction Post-Processing (CRITICAL)
 **Source:** `../research/kernels/saspav_santa-submission/santa-submission.ipynb`
 
 Critical post-processing step that optimizes the rotation of the entire configuration:
-- Uses scipy.optimize.minimize_scalar
-- Computes convex hull of all tree points
+- Uses scipy.optimize.minimize_scalar with bounded method
+- Computes convex hull of all tree polygon points
 - Finds optimal rotation angle (0-90 degrees) to minimize bounding box
-- Can improve score significantly
+- Can improve score significantly - always apply after optimization
+- Multiple passes (1-3) can help
+
+```python
+from scipy.optimize import minimize_scalar
+from scipy.spatial import ConvexHull
+
+def optimize_rotation(trees):
+    # Get all polygon points
+    all_points = []
+    for tree in trees:
+        all_points.extend(list(tree.polygon.exterior.coords))
+    points_np = np.array(all_points)
+    hull_points = points_np[ConvexHull(points_np).vertices]
+    
+    # Find optimal rotation
+    res = minimize_scalar(
+        lambda a: calculate_bbox_side_at_angle(a, hull_points),
+        bounds=(0.001, 89.999), method='bounded'
+    )
+    return res.x, res.fun
+```
 
 ### 4. Backward Propagation
 **Source:** `../research/kernels/smartmanoj_santa-claude/santa-claude.ipynb`
@@ -70,9 +95,12 @@ Improves smaller configurations by extracting from larger ones:
 
 Recommended workflow:
 1. **Phase A (Short runs):** 2-min runs with many n/r combinations to find promising settings
-2. **Phase B (Medium runs):** 10-min runs on top candidates
-3. **Phase C (Long runs):** 20-min runs on best few settings
+   - n_values: [1000, 1200, 1500, 1800, 2000]
+   - r_values: [30, 60, 90]
+2. **Phase B (Medium runs):** 10-min runs on top 3 candidates
+3. **Phase C (Long runs):** 20-min runs on best 2 settings
 4. **Validation:** Check for overlaps, repair by replacing with donor solution
+5. **Post-processing:** Apply fix_direction with multiple passes
 
 ## Key Optimization Techniques from Research
 
@@ -84,8 +112,9 @@ Recommended workflow:
 ### Local Search Moves
 - **Jostle:** Small random perturbations
 - **Swap:** Exchange positions of two trees
-- **Rotate:** Adjust individual tree angles
+- **Rotate:** Adjust individual tree angles (try ±5°, ±2°, ±0.8°, ±0.3°, ±0.1°)
 - **Translate:** Move trees toward center or away from boundaries
+- **Boundary focus:** Prioritize moving trees that touch the bounding box
 
 ### Meta-heuristics
 - Simulated Annealing with adaptive temperature
@@ -93,24 +122,35 @@ Recommended workflow:
 - Particle Swarm Optimization for placement order
 
 ### Geometric Techniques
-- No-fit polygon (NFP) for collision-free regions
+- No-fit polygon (NFP) for collision-free regions - reduces collision check from O(nm) to O(k)
 - Convex hull for bounding box optimization
-- STRtree for efficient spatial queries
+- STRtree for efficient spatial queries (Shapely)
+- Minkowski sums for NFP computation
 
 ## Validation & Overlap Repair
 
-Critical: Submissions with overlapping trees are rejected!
+**CRITICAL:** Submissions with overlapping trees are rejected!
 
 **Overlap detection:**
 ```python
 from shapely.strtree import STRtree
-# Use STRtree for efficient collision detection
-# Check: poly.intersects(other) and not poly.touches(other)
+
+def has_overlap(trees):
+    polygons = [t.polygon for t in trees]
+    tree_index = STRtree(polygons)
+    for i, poly in enumerate(polygons):
+        indices = tree_index.query(poly)
+        for idx in indices:
+            if idx != i:
+                if poly.intersects(polygons[idx]) and not poly.touches(polygons[idx]):
+                    return True
+    return False
 ```
 
 **Repair strategy:**
 - If overlaps detected for configuration n, replace with known-good solution
 - Keep a "donor" submission with valid configurations
+- Use replace_group() function to swap individual n-configurations
 
 ## Recommended Experiments (Priority Order)
 
@@ -124,8 +164,16 @@ from shapely.strtree import STRtree
 3. **Backward propagation** - Extract better small configs from large ones
 
 4. **Ensemble approach** - Keep best configuration for each n across multiple runs
+   - Run optimizer multiple times with different seeds
+   - For each n, keep the configuration with smallest bounding box
 
 5. **Local search refinement** - Fine-tune positions with small step sizes
+   - Focus on boundary-touching trees
+   - Try small translations and rotations
+
+6. **Hybrid approach** - Combine bbox3 and tree_packer
+   - Use bbox3 for initial optimization
+   - Apply tree_packer's local search for refinement
 
 ## Submission Format
 ```
@@ -137,9 +185,34 @@ id,x,y,deg
 ```
 - Values prefixed with 's' to preserve precision
 - Coordinates constrained to -100 ≤ x, y ≤ 100
+- Use high precision (at least 6 decimal places)
+
+## Important Implementation Notes
+
+1. **Precision matters:** Use Decimal type or long double for coordinates
+2. **Continuous rotation:** Don't limit to 90° increments - use continuous angles
+3. **Parallel processing:** Use OpenMP for C++ or multiprocessing for Python
+4. **Incremental improvement:** Save best solution after each improvement
+5. **Time management:** Budget time across phases, don't spend all time on one approach
 
 ## Code References
 - Getting started: `../research/kernels/inversion_santa-2025-getting-started/`
 - bbox3 source: `../research/kernels/jazivxt_why-not/why-not.ipynb`
 - tree_packer: `../research/kernels/smartmanoj_santa-claude/santa-claude.ipynb`
 - Multi-phase runner: `../research/kernels/yongsukprasertsuk_santa-2025-best-keeping-bbox3-runner/`
+- Fix direction: `../research/kernels/saspav_santa-submission/santa-submission.ipynb`
+
+## Quick Start Implementation
+
+For a Python-only approach without C++ compilation:
+
+```python
+# 1. Load best available submission
+# 2. Apply fix_direction optimization
+# 3. Validate for overlaps
+# 4. Apply local search refinement
+# 5. Backward propagation for small configs
+# 6. Final validation and save
+```
+
+For best results, use the C++ optimizers (bbox3 or tree_packer) with Python post-processing.
