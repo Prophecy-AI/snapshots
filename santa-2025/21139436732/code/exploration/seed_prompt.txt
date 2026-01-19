@@ -13,25 +13,34 @@ This is a 2D geometric packing optimization problem. The goal is to pack Christm
 - Submission format: id (nnn_idx), x, y, deg (all prefixed with 's' for precision)
 - Coordinates must be in range [-100, 100]
 - No overlapping trees allowed (touching is OK)
+- Total rows: 20100 (sum of 1 to 200)
 
 ## Key Techniques from Top Kernels
 
-### 1. Core Optimization Algorithms (from bbox3.cpp / tree_packer_v21.cpp)
-Reference: `../research/kernels/jazivxt_why-not/why-not.ipynb`
-Reference: `../research/kernels/smartmanoj_santa-claude/santa-claude.ipynb`
+### 1. Core Optimization Algorithms (C++ Required)
+Reference: `../research/kernels/jazivxt_why-not/why-not.ipynb` (bbox3.cpp)
+Reference: `../research/kernels/smartmanoj_santa-claude/santa-claude.ipynb` (tree_packer_v21.cpp)
 
 **C++ Optimizers are essential** - Python is too slow for this problem:
 - Compile with: `g++ -O3 -march=native -std=c++17 -fopenmp -o optimizer optimizer.cpp`
 - Use OpenMP for parallelization across n-values
 
 **Key optimization moves:**
-1. **Squeeze/Compaction**: Scale all trees toward center, check for overlaps
-2. **Local Search**: 8-directional moves + rotation adjustments
-3. **Simulated Annealing**: Accept worse moves with decreasing probability
+1. **Squeeze/Compaction**: Scale all trees toward center (scale=0.9995 to 0.98), check for overlaps
+2. **Local Search**: 8-directional moves (steps: 0.01, 0.004, 0.0015, 0.0006, 0.00025, 0.0001) + rotation adjustments (5°, 2°, 0.8°, 0.3°, 0.1°)
+3. **Simulated Annealing**: Accept worse moves with decreasing probability, higher temperature for exploration
 4. **Swap Moves**: Exchange positions of two trees
-5. **Boundary Tree Focus**: Prioritize moving trees that define the bounding box
+5. **Boundary Tree Focus**: Prioritize moving trees that define the bounding box edges
 
-### 2. Rotation Tightening (fix_direction)
+**Advanced techniques from bbox3.cpp:**
+- Complex number vector coordination for geometry
+- Fluid dynamics simulation for tree movement
+- Hinge pivot mechanics
+- Density gradient flow
+- Global boundary tension
+- Aggressive overlap repair using separation vectors (MTV approximation)
+
+### 2. Rotation Tightening (fix_direction) - CRITICAL
 Reference: `../research/kernels/yongsukprasertsuk_santa-2025-best-keeping-bbox3-runner/`
 
 After packing, rotate the entire configuration to minimize bounding box:
@@ -40,7 +49,13 @@ from scipy.spatial import ConvexHull
 from scipy.optimize import minimize_scalar
 
 def optimize_rotation(trees):
-    # Get convex hull of all tree vertices
+    # Get all polygon vertices
+    all_points = []
+    for tree in trees:
+        all_points.extend(list(tree.polygon.exterior.coords))
+    points_np = np.array(all_points)
+    
+    # Get convex hull for efficiency
     hull_points = points_np[ConvexHull(points_np).vertices]
     
     # Find optimal rotation angle (0-90 degrees)
@@ -51,13 +66,14 @@ def optimize_rotation(trees):
     return res.x, res.fun
 ```
 
-### 3. Backward Propagation
+### 3. Backward Propagation - IMPORTANT
 Reference: `../research/kernels/smartmanoj_santa-claude/santa-claude.ipynb`
 
 Use larger configurations to improve smaller ones:
 - Start from n=200, work down to n=2
 - Remove boundary-touching trees one at a time
 - If resulting (n-1) config is better than stored, save it
+- Key insight: Good n=200 solution can provide good n=199, n=198, etc.
 
 ### 4. Overlap Detection & Repair
 Reference: `../research/kernels/saspav_santa-submission/santa-submission.ipynb`
@@ -65,72 +81,113 @@ Reference: `../research/kernels/saspav_santa-submission/santa-submission.ipynb`
 - Use Shapely with STRtree for efficient collision detection
 - Point-in-polygon + segment intersection checks
 - If overlaps found, replace with known-good configuration from baseline
+- Bounding box pre-check for fast rejection
 
 ### 5. Greedy Initialization
 Reference: `../research/kernels/inversion_santa-2025-getting-started/`
 
-- Place trees one at a time, starting far from center
-- Move toward center until collision, then back up
-- Use weighted random angles (sin(2*angle)) to favor diagonal placements
+- Place trees one at a time, starting far from center (radius=20)
+- Move toward center in steps of 0.5 until collision
+- Back up in steps of 0.05 until no collision
+- Use weighted random angles: `abs(sin(2*angle))` to favor diagonal placements (better corner packing)
+- Try 10 random starting attempts, keep best
+
+## Academic Best Practices (from literature)
+
+1. **Bottom-Left (BL) Placement Strategy**: Place items as far bottom-left as possible
+2. **Djang-Finch (DJD) Heuristic**: Adapted from 1D bin packing for selection order
+3. **Meta-heuristics**: GA, SA, tabu search dominate state-of-the-art
+4. **Hybrid approaches**: Combine local search with GA for best results
+5. **Extended local search with nonlinear programming**: Refine solutions with continuous optimization
+6. **Jostle algorithm**: Shake/compact placements to improve density
+7. **No-fit polygons (NFP)**: Precompute valid placement regions for efficiency
 
 ## Recommended Approach
 
-### Phase 1: Baseline Implementation
-1. Start with sample_submission.csv or a known good baseline
-2. Implement basic Python validation (overlap checking, score calculation)
+### Phase 1: Baseline Setup
+1. Start with sample_submission.csv or fetch a known good baseline
+2. Implement Python validation (overlap checking, score calculation)
 3. Set up C++ compilation pipeline
 
-### Phase 2: C++ Optimizer
-1. Implement or adapt bbox3.cpp optimizer
+### Phase 2: C++ Optimizer (Main Work)
+1. Adapt bbox3.cpp or tree_packer_v21.cpp from kernels
 2. Key parameters to tune:
-   - n (iterations): 1000-5000
+   - n (iterations): 1000-10000
    - r (restarts): 30-256
    - Temperature schedule for SA
 3. Run for extended time (3-9 hours on Kaggle)
+4. Use phased approach:
+   - Phase A: Short 2-min runs to find promising (n, r) combinations
+   - Phase B: Medium 10-min runs on top candidates
+   - Phase C: Long 20-min runs on best few
 
 ### Phase 3: Post-Processing
-1. Apply fix_direction rotation optimization
+1. Apply fix_direction rotation optimization (multiple passes)
 2. Run backward propagation
-3. Validate no overlaps, repair if needed
+3. Validate no overlaps, repair if needed by replacing with baseline
 
 ### Phase 4: Iterative Refinement
-1. Use phased approach: short runs to find promising parameters
-2. Longer runs on best candidates
-3. Keep best submission, revert on regressions
+1. Keep best submission, revert on regressions
+2. Track improvements with MIN_IMPROVEMENT_TO_PROCESS threshold (1e-10)
+3. Save snapshots at each improvement
 
 ## Implementation Notes
 
 ### Precision
-- Use Decimal or long double for coordinates
-- Scale factor of 1e15 used in some implementations
+- Use Decimal (Python) or long double (C++) for coordinates
+- Scale factor of 1e15 used in some implementations for integer arithmetic
 - Round to 6-12 decimal places for submission
+- Prepend 's' to all numeric values in submission
 
-### Tree Geometry (15 vertices)
+### Tree Geometry (15 vertices, origin at top of trunk)
 ```cpp
-const double TX[15] = {0,0.125,0.0625,0.2,0.1,0.35,0.075,0.075,-0.075,-0.075,-0.35,-0.1,-0.2,-0.0625,-0.125};
-const double TY[15] = {0.8,0.5,0.5,0.25,0.25,0,0,-0.2,-0.2,0,0,0.25,0.25,0.5,0.5};
+const double TX[15] = {0, 0.125, 0.0625, 0.2, 0.1, 0.35, 0.075, 0.075, -0.075, -0.075, -0.35, -0.1, -0.2, -0.0625, -0.125};
+const double TY[15] = {0.8, 0.5, 0.5, 0.25, 0.25, 0, 0, -0.2, -0.2, 0, 0, 0.25, 0.25, 0.5, 0.5};
+// Tree tip at (0, 0.8), trunk bottom at y=-0.2
+// Width: 0.7 at base (y=0), 0.4 at middle tier, 0.25 at top tier
 ```
 
-### Collision Detection
-- Bounding box pre-check (fast rejection)
-- Point-in-polygon test
-- Segment intersection test
-- Touching (not overlapping) is allowed
+### Collision Detection (fast to slow)
+1. Bounding box pre-check (AABB rejection)
+2. Point-in-polygon test (ray casting)
+3. Segment intersection test (for edge cases)
+4. Note: Touching (not overlapping) is allowed
 
-## Experiments to Try
+### Score Calculation
+```python
+def calculate_score(submission_df):
+    total_score = 0
+    for n in range(1, 201):
+        group = submission_df[submission_df['id'].str.startswith(f'{n:03d}_')]
+        # Parse coordinates (strip 's' prefix)
+        x = group['x'].str[1:].astype(float)
+        y = group['y'].str[1:].astype(float)
+        deg = group['deg'].str[1:].astype(float)
+        
+        # Build polygons and get bounding box
+        # ... (use ChristmasTree class)
+        side_length = max(max_x - min_x, max_y - min_y)
+        total_score += side_length**2 / n
+    return total_score
+```
 
-1. **Baseline C++ optimizer**: Adapt bbox3.cpp or tree_packer_v21.cpp
-2. **Parameter sweep**: Try different n, r values
-3. **Hybrid approach**: Combine multiple optimizers
-4. **Focus on high-n configurations**: n=150-200 contribute most to score
-5. **Lattice patterns**: Some solutions show crystalline arrangements
+## Experiments to Try (Priority Order)
+
+1. **Adapt bbox3.cpp**: Most sophisticated optimizer in kernels
+2. **Adapt tree_packer_v21.cpp**: Alternative with swap moves and multi-start
+3. **Parameter sweep**: Try n=1000-5000, r=30-256
+4. **Backward propagation**: Run after main optimization
+5. **Rotation optimization**: Apply fix_direction with multiple passes
+6. **Focus on high-n**: n=150-200 contribute most to score (larger side^2)
+7. **Lattice patterns**: Some solutions show crystalline arrangements with alternating orientations
 
 ## Validation Checklist
 - [ ] No overlapping trees (touching OK)
 - [ ] All coordinates in [-100, 100]
-- [ ] Correct number of trees per configuration
+- [ ] Correct number of trees per configuration (n trees for config n)
 - [ ] Values prefixed with 's' in submission
-- [ ] Score calculated correctly: sum(side^2 / n)
+- [ ] Score calculated correctly: sum(side^2 / n) for n=1 to 200
+- [ ] Total rows = 20100
 
 ## Reference Notebooks
 - EDA: `exploration/eda.ipynb`
@@ -138,3 +195,13 @@ const double TY[15] = {0.8,0.5,0.5,0.25,0.25,0,0,-0.2,-0.2,0,0,0.25,0.25,0.5,0.5
 - bbox3 optimizer: `../research/kernels/jazivxt_why-not/why-not.ipynb`
 - tree_packer: `../research/kernels/smartmanoj_santa-claude/santa-claude.ipynb`
 - Rotation optimization: `../research/kernels/yongsukprasertsuk_santa-2025-best-keeping-bbox3-runner/`
+- Combined approach: `../research/kernels/saspav_santa-submission/santa-submission.ipynb`
+
+## Key Insights from Kernels
+
+1. **Runtime matters**: Top solutions run for 3-9+ hours
+2. **C++ is mandatory**: Python too slow for competitive solutions
+3. **Iterative improvement**: Keep best, revert on regressions
+4. **Post-processing critical**: Rotation optimization can significantly improve scores
+5. **Overlap repair**: Replace broken configs with known-good baseline
+6. **Parallelization**: Use OpenMP to optimize multiple n-values simultaneously
