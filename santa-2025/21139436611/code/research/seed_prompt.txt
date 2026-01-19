@@ -1,0 +1,113 @@
+# Christmas Tree Packing Optimization - Evolved Seed Prompt (Loop 1)
+
+## Current Status
+- Best CV score: 170.87 from exp_000 (greedy baseline with rotation optimization)
+- Best LB score: N/A (no submissions yet)
+- Target: 68.922808 | Gap to target: 101.95 points (~60% improvement needed)
+
+## Response to Evaluator
+- Technical verdict was TRUSTWORTHY. The greedy baseline implementation is correct.
+- Evaluator's top priority: **COMPILE AND USE THE BBOX3 C++ OPTIMIZER**. I FULLY AGREE.
+- Key concerns raised: 
+  1. Fundamental approach limitation - greedy placement cannot reach target
+  2. Not leveraging available resources (bbox3, multi-phase runner)
+  3. Missing physics-based optimization
+- How I'm addressing: I have verified that bbox3 compiles and works. A quick 2.5-minute test run improved score from 173.65 to 157.94 (9% improvement). The path forward is clear.
+
+## Critical Discovery This Loop
+**bbox3 C++ optimizer is working!**
+- Successfully compiled with g++ 9.4.0 and OpenMP (26 threads)
+- Test run (n=200 iterations, 2.5 min): 173.65 → 157.94 (9% improvement)
+- The optimizer uses physics-based simulation: fluid dynamics, hinge pivot, density gradient flow
+- With longer runs and multi-phase strategy, we should reach competitive scores
+
+## Data Understanding
+- Reference notebooks: See `exploration/eda.ipynb` for problem overview
+- Key patterns:
+  1. Score = Σ(s²/n) for n=1 to 200, where s is bounding box side length
+  2. Larger n configurations contribute more to score (n=200 contributes ~0.85 per unit s²)
+  3. Trees can interlock in "blue/pink phase" patterns for optimal packing
+  4. Rotation optimization (fix_direction) can tighten bounding boxes by 4-5%
+
+## Recommended Approaches (Priority Order)
+
+### 1. IMMEDIATE: Full bbox3 Multi-Phase Optimization (HIGHEST PRIORITY)
+Implement the multi-phase runner strategy from the research kernels:
+- **Phase A**: Short 2-minute runs with various (n, r) parameters to find promising candidates
+  - n_values: [1000, 1200, 1500, 1800, 2000]
+  - r_values: [30, 60, 90]
+  - Keep top 6 candidates
+- **Phase B**: 10-minute runs on top 3-6 candidates
+- **Phase C**: 20-minute runs on best 2 candidates
+- Apply fix_direction post-processing to tighten bounding boxes
+- Validate and repair overlaps using baseline as donor
+
+**Implementation steps:**
+1. Create experiment folder: `/home/code/experiments/002_bbox3_multiphase`
+2. Copy bbox3 binary from `/home/code/bbox3`
+3. Implement Python wrapper for running bbox3 with different parameters
+4. Implement fix_direction rotation optimization
+5. Implement overlap detection and repair
+6. Run multi-phase optimization
+7. Save best submission
+
+### 2. Rotation Optimization (fix_direction)
+Apply after each bbox3 run:
+```python
+from scipy.optimize import minimize_scalar
+from scipy.spatial import ConvexHull
+
+def optimize_rotation(trees):
+    # Get all polygon points
+    all_points = []
+    for tree in trees:
+        all_points.extend(list(tree.polygon.exterior.coords))
+    points_np = np.array(all_points)
+    hull_points = points_np[ConvexHull(points_np).vertices]
+    
+    def bbox_side_at_angle(angle_deg):
+        angle_rad = np.radians(angle_deg)
+        c, s = np.cos(angle_rad), np.sin(angle_rad)
+        rot_matrix = np.array([[c, s], [-s, c]])
+        rotated = hull_points.dot(rot_matrix)
+        return max(rotated.max(0) - rotated.min(0))
+    
+    res = minimize_scalar(bbox_side_at_angle, bounds=(0, 90), method='bounded')
+    return res.x, res.fun
+```
+
+### 3. Overlap Repair
+When bbox3 creates overlaps, replace those configurations with baseline:
+```python
+def repair_overlaps(new_csv, baseline_csv, output_csv, failed_n_list):
+    df_new = pd.read_csv(new_csv)
+    df_baseline = pd.read_csv(baseline_csv)
+    failed_prefixes = [f"{n:03d}_" for n in failed_n_list]
+    df_to_keep = df_new[~df_new["id"].str.startswith(tuple(failed_prefixes))]
+    df_replacement = df_baseline[df_baseline["id"].str.startswith(tuple(failed_prefixes))]
+    df_repaired = pd.concat([df_to_keep, df_replacement]).sort_values(by="id")
+    df_repaired.to_csv(output_csv, index=False)
+```
+
+## What NOT to Try
+- ❌ More greedy placement variations - ceiling reached at ~170
+- ❌ Pure Python optimization - too slow, need C++ for competitive performance
+- ❌ Hyperparameter tuning on greedy approach - wrong direction
+
+## Validation Notes
+- CV scheme: Calculate score = Σ(s²/n) for all 200 configurations
+- Overlap detection: Use Shapely's intersects() and touches() methods
+- Submission format: Values prefixed with 's', ID format NNN_T
+
+## Expected Outcomes
+- Phase A (15 runs × 2 min = 30 min): Should find promising (n, r) combinations
+- Phase B (3-6 runs × 10 min = 30-60 min): Should improve score significantly
+- Phase C (2 runs × 20 min = 40 min): Final refinement
+- Target: Score below 100 after multi-phase optimization
+- Stretch goal: Score below 80 (close to target of 68.92)
+
+## Key Resources
+- bbox3 binary: `/home/code/bbox3`
+- Sample submission: `/home/data/sample_submission.csv`
+- Multi-phase runner reference: `/home/code/research/kernels/yongsukprasertsuk_santa-2025-best-keeping-bbox3-runner/`
+- fix_direction reference: `/home/code/research/kernels/saspav_santa-submission/`
