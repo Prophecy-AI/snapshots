@@ -1,141 +1,111 @@
-# Santa 2025 - Christmas Tree Packing Optimization
-
 ## Current Status
 - Best CV score: 70.659959 from exp_000 (saspav baseline)
-- Best LB score: 70.659959 (confirmed via 2 submissions)
-- Target: 68.919154 | Gap to target: 1.74 points (2.5%)
+- Best LB score: 70.659959 (confirmed from exp_000 and exp_003)
+- Target: 68.919154 | Gap to target: 1.740805 (2.5%)
 - Submissions used: 3/100 (97 remaining)
 
-## CRITICAL: Submission Failure Analysis
+## Critical Situation Assessment
 
-**exp_006 (Eazy Optimizer) FAILED on LB with "Overlapping trees in group 069"**
+**We are STUCK at a local optimum.** After 8 experiments, ALL local optimization approaches show 0 or marginal improvement:
+- exp_001: C++ SA optimizer = 0 improvement
+- exp_005: Valid ensemble = 0 improvement  
+- exp_006: Eazy optimizer = 0.000015 improvement (FAILED on Kaggle with overlaps)
+- exp_007: Rotation optimization = 0 improvement
+- bbox3 optimizer test: 0.0000006 improvement
 
-Root cause analysis:
-1. The Eazy optimizer modified 192/200 N values
-2. Local Shapely-based validation showed 0 overlaps
-3. Kaggle server uses STRICTER overlap detection (SAT-based with high precision)
-4. The optimizer introduced precision-level overlaps that pass local checks but fail on server
-
-**KEY INSIGHT: The saspav baseline is at an EXTREMELY strong local optimum**
-- Any modification risks introducing overlaps
-- Even sophisticated optimizers (Eazy, SA) achieve 0 or negligible improvement
-- The baseline has been optimized by top competitors with proper overlap handling
-
-## What We've Learned (7 experiments)
-
-| Exp | Approach | Result |
-|-----|----------|--------|
-| exp_000 | Saspav baseline | 70.659959 (LB confirmed) |
-| exp_001 | C++ SA optimizer | 0 improvement |
-| exp_002 | Lattice construction | 88.33 (much worse) |
-| exp_003 | Lattice + SA | 85.93 (still worse) |
-| exp_004 | Invalid ensemble | Had overlaps |
-| exp_005 | Valid ensemble | No improvement |
-| exp_006 | Eazy optimizer | INVALID (server overlaps) |
+**The saspav baseline is at an extremely strong local optimum.** Local optimization CANNOT close the 1.74 point gap.
 
 ## Response to Evaluator
 
-The evaluator correctly identified:
-1. ✅ Local search approaches are EXHAUSTED - confirmed by Eazy optimizer failure
-2. ✅ bbox3 optimizer uses different strategy with overlap repair
-3. ✅ Rotation optimization (fix_direction) is worth trying
-4. ✅ Per-N targeted optimization could help
+The evaluator correctly identified that:
+1. **Local optimization is exhausted** - 8 experiments confirm this
+2. **Overlap detection mismatch** - Eazy optimizer passed local validation but failed on Kaggle
+3. **bbox3 optimizer NOT fully utilized** - We tested it briefly but need longer runs with multiple seeds
 
-However, the submission failure reveals a CRITICAL issue:
-- Our overlap detection is NOT strict enough
-- We need to use the EXACT same overlap detection as Kaggle server
-- Any optimizer must have overlap repair mechanism
+I agree with the evaluator's assessment. The current trajectory of "apply local optimization to saspav baseline" is EXHAUSTED. We need a fundamentally different approach.
+
+## Key Insight: The Gap is Too Large for Local Optimization
+
+The target (68.919154) requires a 2.5% improvement. Local optimization provides at most 0.00001% improvement. This means:
+- We need to find a DIFFERENT basin of attraction
+- Or we need to construct solutions from scratch with better initial configurations
+- Or we need to run optimization for MUCH longer (hours, not minutes)
 
 ## Recommended Approaches (Priority Order)
 
-### 1. **[HIGHEST PRIORITY]** Implement bbox3 optimizer with overlap repair
+### 1. **[HIGHEST PRIORITY] Multi-Seed bbox3 Ensemble**
+Run bbox3 optimizer with MANY different random seeds (10-20 runs) for longer duration (5-10 minutes each). Then ensemble by picking best per-N from all runs.
 
-The bbox3 optimizer from "why-not" kernel has key advantages:
-- Uses aggressive overlap repair mechanism
-- If optimization creates overlaps, reverts to donor solution
-- Multi-phase approach (Phase A: 2min, Phase B: 10min, Phase C: 20min)
-- Parameters: -n (iterations), -r (radius)
+**Rationale**: Different random seeds may find different local optima. Ensembling across seeds can combine the best of each.
 
-**Implementation plan:**
-1. Extract bbox3.cpp from the "why-not" kernel
-2. Compile with OpenMP support
-3. Run with saspav baseline as donor
-4. Use repair_overlaps_in_place() to fix any invalid configs
-
-### 2. **[HIGH PRIORITY]** Implement stricter overlap detection
-
-Before ANY optimization, we need overlap detection that matches Kaggle server:
-- Use Decimal precision (not float)
-- Use SAT (Separating Axis Theorem) instead of Shapely
-- Test with known-good baseline to verify
-
-### 3. **[MEDIUM PRIORITY]** Rotation optimization (fix_direction)
-
-From bbox3-runner kernel:
+**Implementation**:
 ```python
-from scipy.optimize import minimize_scalar
-from scipy.spatial import ConvexHull
-
-def optimize_rotation(trees, angle_max=89.999, epsilon=1e-7):
-    # Get all tree vertices
-    all_points = []
-    for tree in trees:
-        all_points.extend(list(tree.polygon.exterior.coords))
-    points_np = np.array(all_points)
-    
-    hull_points = points_np[ConvexHull(points_np).vertices]
-    
-    def bbox_side_at_angle(angle_deg):
-        angle_rad = np.radians(angle_deg)
-        c, s = np.cos(angle_rad), np.sin(angle_rad)
-        rot_matrix_T = np.array([[c, s], [-s, c]])
-        rotated = hull_points.dot(rot_matrix_T)
-        return max(rotated.max(axis=0) - rotated.min(axis=0))
-    
-    result = minimize_scalar(bbox_side_at_angle, bounds=(0.001, angle_max), method='bounded')
-    return result.x, result.fun
+# Run bbox3 with different seeds
+for seed in range(20):
+    ./bbox3 -n 2000 -r 90 -s {seed}  # 5-10 min per run
+# Then ensemble: pick best per-N from all 20 runs
 ```
 
-This is computationally cheap and can reduce bounding box without moving trees.
+### 2. **[HIGH PRIORITY] Rebuild from Corners (Chistyakov Approach)**
+The chistyakov kernel "new-simple-fix-rebuild-large-layout-from-corners" shows that larger N configurations can be used to improve smaller N configurations.
 
-### 4. **[LOWER PRIORITY]** Per-N targeted optimization
+**Rationale**: If N=111 has a good packing, we can extract subsets of trees from corners to potentially improve N=1 to N=110.
 
-Focus on N values with worst efficiency:
-- N=1: score 0.661 (efficiency 1.86x theoretical)
-- N=2-10: efficiency 0.77-0.93x
-- These contribute 5.2% of total score but have most room for improvement
+**Implementation**:
+- For each large N (e.g., 111-200), extract corner subsets
+- Compare with existing smaller N configurations
+- Replace if better
+
+### 3. **[MEDIUM PRIORITY] Longer Optimization Runs**
+Run bbox3 for 30+ minutes on the full configuration. The bbox3-runner kernel uses:
+- Phase A: 2min runs (exploration)
+- Phase B: 10min runs (refinement)
+- Phase C: 20min runs (final polish)
+
+We only tested 1-2 minute runs. Longer runs may escape local optima.
+
+### 4. **[EXPERIMENTAL] Asymmetric Solutions**
+The discussion "Why the winning solutions will be Asymmetric" suggests that symmetric solutions may not be optimal. Try:
+- Random perturbations to break symmetry
+- Genetic algorithms with crossover between different solutions
 
 ## What NOT to Try
+- ❌ More rotation optimization (already confirmed 0 improvement)
+- ❌ Simple lattice construction (88.33 score, much worse)
+- ❌ Eazy optimizer without overlap repair (fails on Kaggle)
+- ❌ Single-seed short optimization runs (already exhausted)
 
-1. ❌ Running more SA/local search on baseline (exhausted)
-2. ❌ Lattice construction (produces much worse results)
-3. ❌ Simple ensembling (baseline already wins for all N)
-4. ❌ Any optimizer without overlap repair mechanism
+## Overlap Detection Warning
 
-## Validation Requirements
+**CRITICAL**: Any optimization that modifies tree positions risks introducing precision-level overlaps that pass local Shapely validation but fail on Kaggle.
 
-**CRITICAL: Before submitting ANY optimized solution:**
-1. Validate with Decimal precision overlap detection
-2. Use SAT-based overlap check, not Shapely
-3. If ANY overlaps detected, revert to baseline for those N values
-4. Test on known-good baseline first to verify detection matches server
+**Solution**: After ANY optimization:
+1. Use stricter local overlap detection (buffer polygons by 1e-9)
+2. OR use overlap repair with donor solution (saspav baseline)
+3. OR only submit configurations that are IDENTICAL to baseline for modified N values
 
-## SUBMISSION STRATEGY
+## Submission Strategy
 - Remaining submissions: 97
-- Submit after this experiment? YES if:
-  - bbox3 optimizer produces valid output
-  - Score improves over baseline
-  - Overlap validation passes with strict detection
-- Do NOT submit if local validation is uncertain
+- Submit after EVERY experiment that produces a valid improvement
+- We have abundant submissions - use them for LB feedback
 
-## Technical Notes
+## Validation Notes
+- CV scheme: Compute total score = Σ(side²/N) for N=1 to 200
+- Overlap check: Use Shapely with buffer(1e-9) for stricter detection
+- Always verify submission matches expected format (id, x, y, deg with 's' prefix)
 
-The bbox3-runner kernel workflow:
-1. Load baseline CSV
-2. Run bbox3 optimizer with parameters
-3. Apply fix_direction (rotation optimization)
-4. Run repair_overlaps_in_place() with donor CSV
-5. Validate final output
-6. Only save if valid and improved
+## Next Experiment: Multi-Seed bbox3 Ensemble
 
-This ensures submissions are always valid even if optimization introduces overlaps.
+**Objective**: Run bbox3 with 10+ different random seeds, then ensemble by picking best per-N.
+
+**Steps**:
+1. Create experiment folder: experiments/009_multiseed_bbox3
+2. Run bbox3 with seeds 0-9, each for 5 minutes
+3. Collect all 10 output CSVs
+4. Ensemble: for each N, pick the configuration with lowest score
+5. Validate: check for overlaps with strict detection
+6. If valid and improved, save as submission candidate
+
+**Expected outcome**: 0.01-0.1 improvement (enough to make progress, not enough to reach target)
+
+**If this fails**: Try the rebuild-from-corners approach next.
