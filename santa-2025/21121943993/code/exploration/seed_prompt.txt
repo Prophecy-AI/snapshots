@@ -13,6 +13,24 @@ This is a 2D irregular polygon packing optimization problem. Pack 1-200 Christma
 - Tip at y=0.8, trunk bottom at y=-0.2
 - Position defined by (x, y) at trunk top center and rotation angle (deg)
 
+## CRITICAL: Strategy to Beat Public Kernels
+
+The best public kernel scores 71.78, but target is 68.92. To beat this:
+
+1. **Ensemble MORE sources** - Collect solutions from every available source
+2. **Run SA LONGER** - Public kernels have time limits; we can run longer
+3. **Focus on HIGH-IMPACT N values** - Score contribution varies by N
+4. **Use MULTIPLE random restarts** - Escape local minima
+5. **Implement NOVEL construction** - Don't just optimize existing solutions
+
+### Score Impact Analysis
+The score formula s_n^2/n means:
+- Small N (1-20): Each tree contributes ~1.0 to score
+- Medium N (50-100): Each tree contributes ~0.5 to score  
+- Large N (150-200): Each tree contributes ~0.3 to score
+
+**Focus optimization effort on small N values for maximum impact!**
+
 ## Top Approaches from Public Kernels
 
 ### 1. Ensemble Strategy (CRITICAL - Start Here)
@@ -67,7 +85,7 @@ Start from n=200 and work backward to n=1:
 3. Drop extra trees from the copied configuration
 4. Propagates successful patterns to smaller tree counts
 
-### 5. Greedy Construction
+### 5. Greedy Construction with Beam Search
 **Source:** `../research/kernels/inversion_santa-2025-getting-started/`
 
 Build configurations tree-by-tree:
@@ -78,25 +96,63 @@ Build configurations tree-by-tree:
    - Back up until no overlap
 3. Use weighted angle distribution: abs(sin(2*angle)) to favor diagonal placements
 
-## Advanced Techniques from Research
+**ENHANCEMENT: Add beam search**
+- Keep top K configurations at each step
+- Explore multiple placement options per tree
+- Select best final configuration
 
-### No-Fit Polygon (NFP)
-Precompute collision-free regions for each pair of tree orientations. This speeds up overlap detection significantly.
+## Advanced Techniques for Beating Target
 
-### Bottom-Left Placement
-Classic heuristic: place each piece as far bottom-left as possible without overlap.
+### 1. Greedy Backtracking with Beam Search (HIGH PRIORITY)
+Build solutions from scratch with exploration:
+```
+BEAM = 10  # Keep top 10 configurations
+DEPTH = 10  # Look ahead 10 trees
+MAX_STATES = 4000  # Limit search space
 
-### Local Search Refinements
-After SA, apply:
-1. **Jostle algorithm:** Slightly perturb all trees, then compact
-2. **Compaction:** Push trees toward center iteratively
-3. **Rotation optimization:** Fine-tune angles for each tree
+for n in range(1, 201):
+    states = [empty_config]
+    for tree_idx in range(n):
+        new_states = []
+        for state in states:
+            for angle in [0, 45, 90, 135, 180, 225, 270, 315]:
+                for position in candidate_positions(state, angle):
+                    new_state = place_tree(state, position, angle)
+                    new_states.append(new_state)
+        states = select_top_k(new_states, BEAM)
+    best[n] = min(states, key=score)
+```
 
-### Genetic Algorithms
-Can be used for:
-- Ordering of tree placement
-- Selection of rotation angles
-- Combining good partial solutions
+### 2. Random Initialization Strategy
+Don't just optimize pre-optimized solutions:
+```
+for trial in range(100):
+    config = random_valid_configuration(n)
+    optimized = simulated_annealing(config)
+    if score(optimized) < best_score:
+        best_score = score(optimized)
+        best_config = optimized
+```
+
+### 3. Per-N Construction
+For each N, try multiple construction strategies:
+- Greedy from scratch
+- Copy from N+1 and remove worst tree
+- Copy from N-1 and add best tree
+- Random valid configuration + SA
+
+### 4. No-Fit Polygon (NFP) for Speed
+Precompute collision-free regions:
+- For each pair of rotation angles, compute NFP
+- Use NFP to quickly find valid positions
+- Dramatically speeds up placement search
+
+### 5. Genetic Algorithm for Configuration
+Evolve good configurations:
+- Chromosome: sequence of (position, angle) for each tree
+- Crossover: combine partial configurations
+- Mutation: small position/angle changes
+- Selection: tournament based on score
 
 ## Collision Detection (Critical for Performance)
 
@@ -116,34 +172,35 @@ def overlap(poly_a, poly_b):
 
 ## Recommended Experiment Strategy
 
-### Experiment 1: Baseline Ensemble
-1. Download best public solutions from multiple sources
+### Experiment 1: Baseline Ensemble (MUST DO FIRST)
+1. Download ALL available public solutions
 2. Create ensemble by selecting best per N
-3. Submit to establish baseline (expect ~71-72)
+3. Submit to establish baseline
+4. **Expected score: ~71-72**
 
-### Experiment 2: SA Optimization
-1. Implement C++ SA optimizer (copy from kernel)
-2. Run on ensemble baseline
+### Experiment 2: Extended SA Optimization
+1. Copy C++ SA optimizer from kernel
+2. Run with 2-3x more iterations than public kernels
 3. Use fractional translation refinement
-4. Target: ~70-71
+4. **Target: ~70-71**
 
-### Experiment 3: BackPacking + Fresh Construction
-1. Implement backward iteration strategy
-2. Build some configurations from scratch with greedy
-3. Combine with ensemble
-4. Target: ~69-70
+### Experiment 3: Fresh Construction + Ensemble
+1. Implement greedy construction with beam search
+2. Build fresh configurations for N=1 to 50 (high impact)
+3. Ensemble with existing solutions
+4. **Target: ~69-70**
 
-### Experiment 4: Intensive Optimization
-1. Increase SA iterations significantly
-2. Run multiple random restarts
-3. Focus on configurations with highest per-N scores
-4. Target: ~68-69
+### Experiment 4: Intensive Small-N Optimization
+1. Focus on N=1 to 30 (highest score impact)
+2. Run 10x more SA iterations on these
+3. Try 100+ random restarts per N
+4. **Target: ~68.5-69**
 
 ### Experiment 5: Novel Approaches
-1. Try different construction heuristics (bottom-left, shelf packing)
-2. Implement genetic algorithm for placement order
-3. Use NFP for faster collision detection
-4. Target: Beat 68.922808
+1. Implement genetic algorithm
+2. Use NFP for faster search
+3. Try completely different construction heuristics
+4. **Target: Beat 68.922808**
 
 ## Key Implementation Notes
 
@@ -161,34 +218,53 @@ id,x,y,deg
 
 ### Score Calculation
 ```python
-def calculate_score(trees, n):
-    # Get bounding box
-    all_polys = [tree.polygon for tree in trees]
-    bounds = unary_union(all_polys).bounds
-    side = max(bounds[2]-bounds[0], bounds[3]-bounds[1])
+@njit
+def score_group(xs, ys, degs, tx, ty):
+    n = xs.size
+    V = tx.size
+    mnx = mny = 1e300
+    mxx = mxy = -1e300
+    for i in range(n):
+        r = degs[i] * math.pi / 180.0
+        c, s = math.cos(r), math.sin(r)
+        for j in range(V):
+            X = c * tx[j] - s * ty[j] + xs[i]
+            Y = s * tx[j] + c * ty[j] + ys[i]
+            mnx, mxx = min(mnx, X), max(mxx, X)
+            mny, mxy = min(mny, Y), max(mxy, Y)
+    side = max(mxx - mnx, mxy - mny)
     return side * side / n
 ```
 
-### Numba JIT for Speed
-Use @njit decorator for hot loops:
+### Tree Polygon Template
 ```python
-@njit
-def score_group(xs, ys, degs, tx, ty):
-    # Fast scoring with numba
+TX = [0, 0.125, 0.0625, 0.2, 0.1, 0.35, 0.075, 0.075, -0.075, -0.075, -0.35, -0.1, -0.2, -0.0625, -0.125]
+TY = [0.8, 0.5, 0.5, 0.25, 0.25, 0, 0, -0.2, -0.2, 0, 0, 0.25, 0.25, 0.5, 0.5]
 ```
 
 ## Data Sources for Ensemble
 
 Public datasets and kernels to ensemble:
 1. SmartManoj Santa Scoreboard: https://raw.githubusercontent.com/SmartManoj/Santa-Scoreboard/main/submission.csv
-2. Various Kaggle datasets (bucket-of-chump, santa25-public, etc.)
+2. Kaggle datasets: bucket-of-chump, santa25-public, telegram-public-shared-solution
 3. All kernel outputs from top solutions
+4. Sample submission (baseline)
 
 ## Critical Success Factors
 
 1. **Start with ensemble** - Don't build from scratch
 2. **Use C++ for SA** - Python is too slow for intensive optimization
 3. **Parallelize** - Use OpenMP for multi-core processing
-4. **Fine-tune per N** - Different N values need different strategies
+4. **Focus on small N** - Highest score impact per improvement
 5. **Fractional translation** - Critical for final score improvement
 6. **Multiple restarts** - SA can get stuck in local minima
+7. **Fresh construction** - Don't just optimize pre-optimized solutions
+8. **Run LONGER** - We have more time than public kernels
+
+## WARNING: Local Search Limitations
+
+If starting from a pre-optimized CSV (like public kernel outputs):
+- Local search (SA, hill climbing) may not improve much
+- The solution is likely already at a local optimum
+- Need CONSTRUCTIVE approaches to find new basins
+- Random restarts from scratch can find better solutions
