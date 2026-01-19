@@ -1,60 +1,65 @@
-# Santa 2025 Seed Prompt
-
-## Problem Definition
-Pack $N$ identical "Christmas Tree" polygons ($N \in [1, 200]$) into the smallest possible square bounding box.
-**Metric:** Minimize $\sum_{n=1}^{200} \frac{s_n^2}{n}$, where $s_n$ is the side length of the square bounding box for $n$ trees.
-**Constraints:** No overlaps.
-
-## Tree Geometry
-The tree is a 15-point polygon defined by these coordinates (relative to center):
-```python
-TX = [0, 0.125, 0.0625, 0.2, 0.1, 0.35, 0.075, 0.075, -0.075, -0.075, -0.35, -0.1, -0.2, -0.0625, -0.125]
-TY = [0.8, 0.5, 0.5, 0.25, 0.25, 0, 0, -0.2, -0.2, 0, 0, 0.25, 0.25, 0.5, 0.5]
-```
-
 ## Current Status
-- Best Score: 217.43 (Baseline)
-- Target Score: ~69
-- Gap: Massive. The baseline random initialization is failing for large $N$.
-- **Key Insight:** The optimal packing for large $N$ is a **Double Lattice** structure (alternating up/down trees). Random initialization cannot find this "crystal" structure.
+- Best CV score: 107.76 (Lattice Init)
+- Target: ~69
+- Gap: ~38 points
+- **Critical Insight**: The current lattice density is ~0.37 (avg). The target requires density > 0.71. We are essentially packing "loose" grids. The bottleneck is the *Unit Cell*.
+- **Validation**: The 107.76 submission is valid (overlaps are negligible, ~1e-13).
+
+## CV-LB Relationship Analysis
+- Not enough submissions to establish a line yet.
+- However, the physics are clear: Score = Area / N. Area = N * TreeArea / Density.
+- Score = TreeArea / Density.
+- Current Score ~107 => Density ~0.37.
+- Target Score ~69 => Density ~0.58 (Wait, 107 is sum(s^2/n). Let's look at per-tree score).
+- Actually, the metric is sum(s_n^2 / n).
+- If density is constant $\rho$, then $s_n^2 \approx n \cdot A_{tree} / \rho$.
+- So term is $A_{tree} / \rho$.
+- Sum is $200 \cdot A_{tree} / \rho$.
+- $A_{tree} \approx 0.20$ (roughly, need to verify).
+- If Score 107: $107 = 200 \cdot 0.2 / \rho \implies \rho \approx 0.37$.
+- If Target 69: $69 = 200 \cdot 0.2 / \rho \implies \rho \approx 0.58$.
+- Wait, my analysis notebook showed max density 0.45.
+- **Conclusion**: We need to DOUBLE the density.
 
 ## Response to Evaluator
-- **Evaluator Recommendation:** "Implement Lattice Initialization."
-- **My Action:** AGREED. I will implement a lattice generation script to create a dense initial packing based on the "Blue/Pink" (up/down) pattern identified in research.
-- **Plan:**
-    1.  Analyze the optimal "unit cell" (pair of trees) using the `why-not` kernel's approach.
-    2.  Generate a full lattice packing for each $N$ using this unit cell.
-    3.  Feed this lattice packing into the C++ solver (`tree_packer_v21`) as the initial state.
-    4.  Run the solver to refine the boundaries (simulated annealing).
-    5.  Run Backward Propagation (`bp`) to improve smaller $N$.
+- **Technical Verdict**: TRUSTWORTHY. The pipeline works.
+- **Evaluator's Top Priority**: "Maximize Lattice Density". I AGREE completely.
+- **Action**: We will implement the `find_dense_lattice.py` using Differential Evolution as suggested.
+
+## Data Understanding
+- See `exploration/evolver_loop2_analysis.ipynb` for density plots.
+- The "Why Not" kernel (jazivxt) confirms that "Blue" (0 deg) and "Pink" (180 deg) trees form the optimal crystal.
+- We need to find the *tightest* Blue/Pink unit cell.
 
 ## Recommended Approaches
-Priority-ordered list:
+**Priority 1: Global Optimization of the Unit Cell (The "Crystal" Finder)**
+Create `find_dense_lattice.py` to find the optimal lattice parameters.
+- **Variables**: `v1_x, v1_y` (Vector 1), `v2_x, v2_y` (Vector 2), `off_x, off_y` (Offset of 2nd tree).
+- **Objective**: Minimize `abs(v1_x*v2_y - v1_y*v2_x)` (Parallelogram Area).
+- **Constraints**:
+    - Tree1(0,0) vs Tree2(off_x, off_y): No Overlap.
+    - Tree1(0,0) vs Tree1(v1): No Overlap.
+    - Tree1(0,0) vs Tree1(v2): No Overlap.
+    - Tree1(0,0) vs Tree2(off+v1): No Overlap.
+    - ... Check all neighbors in 3x3 grid.
+- **Method**: `scipy.optimize.differential_evolution`. This is non-convex and jagged. Gradient descent will fail.
+- **Target**: Find parameters that give density > 0.75.
 
-1.  **Lattice Initialization (CRITICAL)**
-    - **Why:** Random init is stuck at score 217. Winners use lattice packing for $N > 50$.
-    - **How:**
-        - Create `lattice_generator.py`.
-        - It should generate a grid of trees where every other tree is rotated 180 degrees (or the optimal angle found by analysis).
-        - Use `optimize_rotation.py` logic to find the tightest packing for just *two* trees (one up, one down). Use this offset to build the grid.
-        - Save this as `lattice_submission.csv`.
+**Priority 2: Generate "Crystalline" Submission**
+Update `lattice_generator.py` to use the optimized `v1, v2, offset`.
+- Generate the grid using these vectors.
+- This will produce a skewed lattice (parallelogram grid), not a rectangular one.
+- This is FINE. The packer handles coordinates.
 
-2.  **Hybrid Workflow**
-    - **Step 1:** Generate `lattice_submission.csv`.
-    - **Step 2:** Run `tree_packer_v21` initialized with `lattice_submission.csv`.
-        - *Note:* You may need to modify `tree_packer_v21.cpp` to load an initial solution. If it doesn't support it, check if it supports "restarting" from a file. If not, **modify the C++ code** to read `submission.csv` at startup.
-        - *Alternative:* If modifying C++ is too hard, use the `bp` tool which *does* read `submission.csv` and tries to improve it. But `bp` removes trees. We need a *packer* that starts from a lattice.
-        - *Actually:* `tree_packer_v21.cpp` likely has a "load" feature or we can add one easily. It's essential.
-
-3.  **Optimize the Unit Cell**
-    - Before generating the full lattice, find the optimal $(dx, dy)$ and relative rotation for exactly 2 trees.
-    - Use `scipy.optimize` to minimize the bounding box of 2 trees (one rotated 180 deg relative to other).
-    - Use these parameters to generate the lattice.
+**Priority 3: Run Packer on Crystal**
+- Run `tree_packer_v21` on this new dense initialization.
+- The starting score should be much lower (maybe < 80).
 
 ## What NOT to Try
-- **Pure Random Search:** It will never find the lattice for $N=200$.
-- **Reinforcement Learning:** Proven to fail for this problem.
+- Do not tweak the rectangular grid parameters manually.
+- Do not run the packer on random initialization.
+- Do not assume `Lx, Ly` are independent. The lattice is likely oblique.
 
 ## Validation Notes
-- **Visual Check:** Plot the generated lattice for $N=100$. It should look like a crystal (dense, regular pattern).
-- **Score Check:** The lattice initialization *alone* (before SA) should score much better than 217 for large $N$.
+- Check the density of the generated lattice *before* running the packer.
+- If density < 0.6, the optimization failed. Retry with different bounds.
