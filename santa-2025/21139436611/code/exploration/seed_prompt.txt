@@ -6,6 +6,8 @@ This is a 2D irregular polygon packing optimization problem. The goal is to pack
 **Scoring:** score = Σ(s²/n) for n=1 to 200, where s is the side length of the bounding square for each n-tree configuration. Lower is better.
 
 **Target Score:** Beat 68.922808
+**Baseline (greedy):** ~173.65 (sample submission)
+**Improvement needed:** ~60% reduction from baseline
 
 ## Tree Geometry
 Each tree is a 15-vertex polygon with:
@@ -13,6 +15,11 @@ Each tree is a 15-vertex polygon with:
 - Three tiers of branches at y=0.5, 0.25, 0
 - Trunk from y=0 to y=-0.2
 - Base width: 0.7, Mid width: 0.4, Top width: 0.25, Trunk width: 0.15
+
+```python
+TX = [0, 0.125, 0.0625, 0.2, 0.1, 0.35, 0.075, 0.075, -0.075, -0.075, -0.35, -0.1, -0.2, -0.0625, -0.125]
+TY = [0.8, 0.5, 0.5, 0.25, 0.25, 0, 0, -0.2, -0.2, 0, 0, 0.25, 0.25, 0.5, 0.5]
+```
 
 Trees can be rotated (0-360 degrees) and positioned at any (x, y) coordinates.
 
@@ -38,6 +45,28 @@ Post-processing technique to tighten bounding boxes:
 - Apply rotation to all trees in configuration
 - Can improve score significantly with minimal computation
 
+```python
+from scipy.optimize import minimize_scalar
+from scipy.spatial import ConvexHull
+
+def optimize_rotation(trees):
+    all_points = []
+    for tree in trees:
+        all_points.extend(list(tree.polygon.exterior.coords))
+    points_np = np.array(all_points)
+    hull_points = points_np[ConvexHull(points_np).vertices]
+    
+    def bbox_side_at_angle(angle_deg):
+        angle_rad = np.radians(angle_deg)
+        c, s = np.cos(angle_rad), np.sin(angle_rad)
+        rot_matrix = np.array([[c, s], [-s, c]])
+        rotated = points.dot(rot_matrix)
+        return max(rotated.max(0) - rotated.min(0))
+    
+    res = minimize_scalar(bbox_side_at_angle, bounds=(0, 90), method='bounded')
+    return res.x, res.fun
+```
+
 ### 3. Greedy Placement Algorithm (from `../research/kernels/inversion_santa-2025-getting-started/`)
 Initial solution generation:
 - Use weighted angle distribution: `abs(sin(2*angle))` to favor diagonal placements
@@ -56,21 +85,30 @@ Efficient time management:
 
 ## Additional Techniques from Research
 
+### Simulated Annealing (SA) Best Practices
+1. **No-Fit Polygon (NFP)** - Precompute valid placement regions for each polygon pair
+   - NFP describes all positions where two polygons touch without overlapping
+   - Enables fast sampling of legal moves
+2. **Adaptive Neighborhoods** - Change move types as temperature drops
+   - Large translations/rotations early, fine-grained tweaks later
+3. **Hybrid SA** - Embed deterministic placement routine inside SA iterations
+   - SA explores ordering/orientation, recursive step finds optimal insertion
+4. **Row-building heuristic** - Place polygons in rows before SA refinement
+
 ### Meta-heuristics for Irregular Packing
 1. **Genetic Algorithms** - Evolve placement sequences with crossover/mutation
-2. **Simulated Annealing** - Accept worse solutions probabilistically to escape local minima
-3. **Tabu Search** - Forbid recently visited configurations to explore new regions
-4. **Local Search with Jostle Moves** - Small perturbations to improve packing
+2. **Tabu Search** - Forbid recently visited configurations to explore new regions
+3. **Local Search with Jostle Moves** - Small perturbations to improve packing
 
 ### Placement Heuristics
 1. **Bottom-Left Fill (BLF)** - Place each piece at lowest, leftmost valid position
 2. **DJD Selection Heuristic** - Smart selection of which piece to place next
-3. **No-Fit Polygon (NFP)** - Precompute valid placement regions for each piece pair
+3. **Compaction Algorithm** - Iteratively move pieces closer together
 
 ### Overlap Resolution
 1. **Separation Vector (MTV)** - Minimum Translation Vector to separate overlapping polygons
 2. **Nonlinear Programming** - Fine-tune positions to minimize overlap
-3. **Compaction Algorithm** - Iteratively move pieces closer together
+3. **Binary search for scale factor** - Find maximum scale that fits without overlap
 
 ## Recommended Experiments (Priority Order)
 
@@ -86,21 +124,21 @@ Efficient time management:
 - Apply to all 200 configurations
 - See `../research/kernels/saspav_santa-submission/` for implementation
 
-### Experiment 3: Improved Greedy Initialization
+### Experiment 3: Simulated Annealing with NFP
+- Precompute No-Fit Polygons for tree pairs at various angles
+- Moves: translate tree along NFP boundary, rotate tree, swap two trees
+- Adaptive cooling: start T high, decrease geometrically
+- Accept worse moves with probability exp(-delta/T)
+
+### Experiment 4: Improved Greedy Initialization
 - Better initial placements lead to better final solutions
 - Try different angle distributions and placement orders
 - Consider sorting trees by some heuristic before placement
 
-### Experiment 4: Simulated Annealing Refinement
-- Start from greedy solution
-- Moves: translate tree, rotate tree, swap two trees
-- Accept worse moves with probability exp(-delta/T)
-- Gradually decrease temperature
-
 ### Experiment 5: Genetic Algorithm
 - Chromosome: sequence of tree placements + angles
-- Crossover: combine good partial solutions
-- Mutation: perturb positions/angles
+- Crossover: combine good partial solutions (order crossover)
+- Mutation: perturb positions/angles, swap tree order
 - Selection: tournament or roulette wheel
 
 ### Experiment 6: Ensemble Best Solutions
@@ -114,7 +152,15 @@ Efficient time management:
 Use Shapely library for robust polygon operations:
 ```python
 from shapely.geometry import Polygon
+from shapely import affinity
 from shapely.strtree import STRtree
+
+def get_tree_polygon(x, y, deg):
+    TX = [0, 0.125, 0.0625, 0.2, 0.1, 0.35, 0.075, 0.075, -0.075, -0.075, -0.35, -0.1, -0.2, -0.0625, -0.125]
+    TY = [0.8, 0.5, 0.5, 0.25, 0.25, 0, 0, -0.2, -0.2, 0, 0, 0.25, 0.25, 0.5, 0.5]
+    base_poly = Polygon(zip(TX, TY))
+    rotated = affinity.rotate(base_poly, deg, origin=(0, 0))
+    return affinity.translate(rotated, xoff=x, yoff=y)
 
 def has_overlap(trees):
     polygons = [t.polygon for t in trees]
@@ -131,6 +177,7 @@ def has_overlap(trees):
 - Values must be strings prefixed with 's': `s0.123456`
 - Coordinates constrained to -100 ≤ x, y ≤ 100
 - ID format: `NNN_T` where NNN is zero-padded tree count, T is tree index
+- Total rows: 20100 (sum of 1 to 200)
 
 ## Key Insights
 
@@ -140,6 +187,22 @@ def has_overlap(trees):
 4. **Incremental building** - Good n-tree solutions often lead to good (n+1)-tree solutions
 5. **Post-processing matters** - Rotation optimization can significantly improve any solution
 6. **Multiple random seeds** - Run optimizers multiple times and keep best results
+7. **Lattice patterns** - For larger n, crystalline/lattice arrangements may be optimal
+8. **Blue/Pink phases** - Trees pointing up vs down can interlock efficiently
+
+## Scoring Function
+```python
+def calculate_total_score(submission_df):
+    total_score = 0
+    for n in range(1, 201):
+        group = submission_df[submission_df['n'] == n]
+        polygons = [get_tree_polygon(row['x'], row['y'], row['deg']) for _, row in group.iterrows()]
+        union = unary_union(polygons)
+        bounds = union.bounds
+        side = max(bounds[2] - bounds[0], bounds[3] - bounds[1])
+        total_score += (side ** 2) / n
+    return total_score
+```
 
 ## Reference Notebooks
 - Getting Started: `../research/kernels/inversion_santa-2025-getting-started/`
