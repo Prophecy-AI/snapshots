@@ -206,7 +206,7 @@ void saveCSV(string fn, map<int, Cfg>& res) {
 }
 
 int main() {
-    auto res = loadCSV("/kaggle/input/why-not/submission.csv");
+    auto res = loadCSV("submission.csv");
     if(res.empty()) return 1;
     vector<int> keys; for(auto const& [n, g] : res) keys.push_back(n);
     sort(keys.rbegin(), keys.rend());
