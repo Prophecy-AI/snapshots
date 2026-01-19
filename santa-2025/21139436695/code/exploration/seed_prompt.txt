@@ -8,7 +8,7 @@ This is a 2D irregular polygon bin packing optimization problem. The goal is to 
 
 ## Tree Geometry (CRITICAL)
 Each tree is a 15-vertex polygon with:
-- Trunk: 0.15 width × 0.2 height (bottom)
+- Trunk: 0.15 width × 0.2 height (bottom at y=-0.2)
 - Base tier: 0.7 width at y=0
 - Middle tier: 0.4 width at y=0.25
 - Top tier: 0.25 width at y=0.5
@@ -16,6 +16,12 @@ Each tree is a 15-vertex polygon with:
 - Reference point: center of trunk top (0, 0)
 
 The tree shape has notches/indentations between tiers, making interlocking possible.
+
+Vertex coordinates (TX, TY):
+```
+TX = [0, 0.125, 0.0625, 0.2, 0.1, 0.35, 0.075, 0.075, -0.075, -0.075, -0.35, -0.1, -0.2, -0.0625, -0.125]
+TY = [0.8, 0.5, 0.5, 0.25, 0.25, 0, 0, -0.2, -0.2, 0, 0, 0.25, 0.25, 0.5, 0.5]
+```
 
 ## Key Techniques from Public Kernels
 
@@ -50,6 +56,22 @@ From `../research/kernels/yongsukprasertsuk_santa-2025-best-keeping-bbox3-runner
 - Always keep best submission, revert on regressions
 - Overlap repair: replace failed configurations from known-good baseline
 
+### 5. Backward Propagation (NEW)
+From `../research/kernels/smartmanoj_santa-claude/santa-claude.ipynb`:
+- Start from n=200 and work backwards to n=2
+- For each n, try removing trees that touch the bounding box boundary
+- If removing a tree gives a better (n-1) configuration, save it
+- Exploits that good n-tree solutions can derive from (n+1)-tree solutions
+- Very effective for improving smaller configurations
+
+### 6. Tree Packer v21 with Swap Moves
+From `../research/kernels/smartmanoj_santa-claude/santa-claude.ipynb`:
+- Multi-start with different initial angles
+- Swap move operator: exchange positions of two trees
+- Higher temperature SA for more aggressive exploration
+- Uses long double precision for numerical accuracy
+- Squeeze + Compaction + Local Search pipeline
+
 ## Recommended Optimization Approaches
 
 ### Approach 1: Simulated Annealing (Primary)
@@ -57,18 +79,19 @@ From `../research/kernels/yongsukprasertsuk_santa-2025-best-keeping-bbox3-runner
 - Moves: translate tree, rotate tree, swap two trees
 - Accept worse solutions with probability exp(-ΔE/T)
 - Use fast overlap detection with bounding box pre-filtering
+- Target boundary trees for moves (they define the bounding box)
 
 ### Approach 2: Local Search with Compaction
 - Start with greedy placement
 - Iteratively try to move each tree closer to center
 - Apply rotation optimization after each improvement
 - Use tabu search to avoid cycling
+- Multiple step sizes: [0.02, 0.008, 0.003, 0.001, 0.0004]
 
-### Approach 3: Genetic Algorithm Hybrid
-- Encode as permutation (placement order) + angles
-- Crossover: order crossover for permutation
-- Mutation: swap positions, perturb angles
-- Local search on best individuals
+### Approach 3: Squeeze Operation
+- Scale all trees toward centroid by factor (e.g., 0.9995)
+- Repeat until overlap occurs, then back off
+- Very effective for tightening loose configurations
 
 ### Approach 4: Gradient-Based Refinement
 - Treat overlapping as soft constraint with penalty
@@ -86,6 +109,21 @@ candidates = tree_index.query(new_polygon)
 for idx in candidates:
     if new_polygon.intersects(placed[idx]) and not new_polygon.touches(placed[idx]):
         return True  # Overlap!
+```
+
+### Fast C++ Overlap Check
+```cpp
+// Bounding box pre-filter
+if (a.x1 < b.x0 || b.x1 < a.x0 || a.y1 < b.y0 || b.y1 < a.y0) return false;
+// Point-in-polygon + segment intersection
+for (int i = 0; i < NV; i++) {
+    if (pip(a.px[i], a.py[i], b)) return true;
+    if (pip(b.px[i], b.py[i], a)) return true;
+}
+// Edge intersection check
+for (int i = 0; i < NV; i++)
+    for (int j = 0; j < NV; j++)
+        if (segInt(a.p[i], a.p[(i+1)%NV], b.p[j], b.p[(j+1)%NV])) return true;
 ```
 
 ### Bounding Box Calculation
@@ -128,6 +166,7 @@ def optimize_rotation(trees):
 4. **Use crystalline patterns**: For large n, regular lattice-like arrangements work well
 5. **Post-process with rotation**: Always apply fix_direction after optimization
 6. **Validate before submitting**: Check for overlaps, repair from baseline if needed
+7. **Use backward propagation**: Derive smaller configs from larger optimized ones
 
 ## Key Insights from Research
 
@@ -136,9 +175,34 @@ def optimize_rotation(trees):
 3. **Bottom-left heuristic**: Classic placement strategy, but needs refinement for non-convex shapes
 4. **Separation vectors**: Use Minimum Translation Vector (MTV) to push apart overlapping polygons
 5. **Unrestricted rotation**: Allowing continuous rotation angles (not just 0/90/180/270) improves packing density
+6. **Boundary tree targeting**: Focus optimization on trees that define the bounding box edges
+
+## Move Operators for Local Search
+
+1. **Translate**: Move tree by small delta (dx, dy)
+2. **Rotate**: Change tree angle by small delta
+3. **Swap**: Exchange positions of two trees
+4. **Toward-center**: Move tree toward centroid
+5. **8-direction**: Try moves in 8 cardinal/diagonal directions
+
+## Pipeline Recommendation
+
+```
+1. Load baseline submission
+2. For each n from 1 to 200:
+   a. Run simulated annealing with multiple restarts
+   b. Apply squeeze operation
+   c. Run local search with compaction
+   d. Apply rotation optimization (fix_direction)
+   e. Validate no overlaps
+3. Run backward propagation (n=200 down to n=2)
+4. Final rotation optimization pass
+5. Validate and save
+```
 
 ## Files Reference
 - Getting started: `../research/kernels/inversion_santa-2025-getting-started/`
 - bbox3 optimizer: `../research/kernels/jazivxt_why-not/`
 - Multi-phase runner: `../research/kernels/yongsukprasertsuk_santa-2025-best-keeping-bbox3-runner/`
 - Fix direction: `../research/kernels/saspav_santa-submission/`
+- Tree packer v21 + backward prop: `../research/kernels/smartmanoj_santa-claude/`
