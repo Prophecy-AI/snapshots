@@ -1,0 +1,194 @@
+# Santa 2025 Christmas Tree Packing - Seed Prompt
+
+## Problem Overview
+This is a 2D irregular polygon packing optimization problem. Pack 1-200 Christmas trees into the smallest square bounding boxes.
+
+**Scoring:** score = sum(s_n^2 / n) for n=1 to 200, where s_n is the side length of the bounding square for n trees.
+**Target:** Beat 68.922808 (lower is better)
+**Best public kernel:** 71.78
+
+**Tree geometry:** 15-vertex polygon with:
+- Trunk: 0.15 wide x 0.2 tall
+- Three tiers: base (0.7 wide), mid (0.4 wide), top (0.25 wide)
+- Tip at y=0.8, trunk bottom at y=-0.2
+- Position defined by (x, y) at trunk top center and rotation angle (deg)
+
+## Top Approaches from Public Kernels
+
+### 1. Ensemble Strategy (CRITICAL - Start Here)
+**Source:** `../research/kernels/seshurajup_71-78-jit-parallel-sa-c-tpu-96-cores/`
+
+The foundation of all top solutions:
+1. Collect solutions from multiple sources (CSV files, kernels, datasets)
+2. For each N (1-200), select the configuration with the smallest bounding box
+3. Combine into a single ensemble submission
+4. Apply optimization on top
+
+**Key code pattern:**
+```python
+best = {n: {"score": 1e300, "data": None} for n in range(1, 201)}
+for each_csv_file:
+    for n, group in df.groupby("N"):
+        score = calculate_score(group)
+        if score < best[n]["score"]:
+            best[n] = {"score": score, "data": group}
+```
+
+### 2. Simulated Annealing with Translations (C++ Implementation)
+**Source:** `../research/kernels/seshurajup_71-78-jit-parallel-sa-c-tpu-96-cores/`
+
+High-performance C++ implementation with OpenMP parallelization:
+- **Iterations:** 15,000-50,000 per configuration
+- **Restarts:** 5-8 per N
+- **Temperature schedule:** Start 1.0, end 0.000005
+- **Moves:** Translation (x, y shifts), rotation changes
+- **Acceptance:** Metropolis criterion with temperature decay
+
+**Key parameters to tune:**
+- More iterations for small N (n <= 20): 1.5x iterations
+- Fewer iterations for large N (n > 150): 0.8x iterations
+- More restarts for small N
+
+### 3. Fractional Translation Refinement
+**Source:** `../research/kernels/jonathanchan_santa25-ensemble-sa-fractional-translation/`
+
+Fine-grained optimization after SA:
+- Step sizes: [0.001, 0.0005, 0.0002, 0.0001, 0.00005, 0.00002, 0.00001]
+- 8 directions: up, down, left, right, and 4 diagonals
+- For each tree, try all step sizes and directions
+- Accept if bounding box shrinks without overlap
+
+### 4. BackPacking Strategy (Backward Iteration)
+**Source:** `../research/kernels/crodoc_74-75-backpacking-christmas-trees/`
+
+Start from n=200 and work backward to n=1:
+1. Track the best-performing configuration at each step
+2. When configuration at n trees performs poorly, copy best config found so far
+3. Drop extra trees from the copied configuration
+4. Propagates successful patterns to smaller tree counts
+
+### 5. Greedy Construction
+**Source:** `../research/kernels/inversion_santa-2025-getting-started/`
+
+Build configurations tree-by-tree:
+1. Place first tree at origin
+2. For each new tree:
+   - Start far from center (radius ~20)
+   - Move inward along random angle until collision
+   - Back up until no overlap
+3. Use weighted angle distribution: abs(sin(2*angle)) to favor diagonal placements
+
+## Advanced Techniques from Research
+
+### No-Fit Polygon (NFP)
+Precompute collision-free regions for each pair of tree orientations. This speeds up overlap detection significantly.
+
+### Bottom-Left Placement
+Classic heuristic: place each piece as far bottom-left as possible without overlap.
+
+### Local Search Refinements
+After SA, apply:
+1. **Jostle algorithm:** Slightly perturb all trees, then compact
+2. **Compaction:** Push trees toward center iteratively
+3. **Rotation optimization:** Fine-tune angles for each tree
+
+### Genetic Algorithms
+Can be used for:
+- Ordering of tree placement
+- Selection of rotation angles
+- Combining good partial solutions
+
+## Collision Detection (Critical for Performance)
+
+Fast collision detection using:
+1. **Bounding box pre-check:** Skip detailed check if bboxes don't overlap
+2. **Point-in-polygon test:** Check if any vertex is inside other polygon
+3. **Segment intersection:** Check if any edges cross
+4. **STRtree spatial index:** For efficient neighbor queries
+
+```python
+def overlap(poly_a, poly_b):
+    # Quick bbox check
+    if a.x1 < b.x0 or b.x1 < a.x0 or a.y1 < b.y0 or b.y1 < a.y0:
+        return False
+    # Detailed check...
+```
+
+## Recommended Experiment Strategy
+
+### Experiment 1: Baseline Ensemble
+1. Download best public solutions from multiple sources
+2. Create ensemble by selecting best per N
+3. Submit to establish baseline (expect ~71-72)
+
+### Experiment 2: SA Optimization
+1. Implement C++ SA optimizer (copy from kernel)
+2. Run on ensemble baseline
+3. Use fractional translation refinement
+4. Target: ~70-71
+
+### Experiment 3: BackPacking + Fresh Construction
+1. Implement backward iteration strategy
+2. Build some configurations from scratch with greedy
+3. Combine with ensemble
+4. Target: ~69-70
+
+### Experiment 4: Intensive Optimization
+1. Increase SA iterations significantly
+2. Run multiple random restarts
+3. Focus on configurations with highest per-N scores
+4. Target: ~68-69
+
+### Experiment 5: Novel Approaches
+1. Try different construction heuristics (bottom-left, shelf packing)
+2. Implement genetic algorithm for placement order
+3. Use NFP for faster collision detection
+4. Target: Beat 68.922808
+
+## Key Implementation Notes
+
+### Submission Format
+```
+id,x,y,deg
+001_0,s0.0,s0.0,s90.0
+002_0,s0.0,s0.0,s90.0
+002_1,s0.202736,s-0.511271,s90.0
+...
+```
+- Values must be prefixed with 's' to preserve precision
+- Coordinates constrained to [-100, 100]
+- No overlapping trees allowed
+
+### Score Calculation
+```python
+def calculate_score(trees, n):
+    # Get bounding box
+    all_polys = [tree.polygon for tree in trees]
+    bounds = unary_union(all_polys).bounds
+    side = max(bounds[2]-bounds[0], bounds[3]-bounds[1])
+    return side * side / n
+```
+
+### Numba JIT for Speed
+Use @njit decorator for hot loops:
+```python
+@njit
+def score_group(xs, ys, degs, tx, ty):
+    # Fast scoring with numba
+```
+
+## Data Sources for Ensemble
+
+Public datasets and kernels to ensemble:
+1. SmartManoj Santa Scoreboard: https://raw.githubusercontent.com/SmartManoj/Santa-Scoreboard/main/submission.csv
+2. Various Kaggle datasets (bucket-of-chump, santa25-public, etc.)
+3. All kernel outputs from top solutions
+
+## Critical Success Factors
+
+1. **Start with ensemble** - Don't build from scratch
+2. **Use C++ for SA** - Python is too slow for intensive optimization
+3. **Parallelize** - Use OpenMP for multi-core processing
+4. **Fine-tune per N** - Different N values need different strategies
+5. **Fractional translation** - Critical for final score improvement
+6. **Multiple restarts** - SA can get stuck in local minima
