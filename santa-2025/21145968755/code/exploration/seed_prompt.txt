@@ -8,13 +8,12 @@ This is a 2D geometric packing optimization problem:
 - Best pre-optimized baseline: ~70.676 (gap of ~1.75 points)
 
 ## Tree Geometry (15-vertex polygon)
-```
+```python
 TX = [0, 0.125, 0.0625, 0.2, 0.1, 0.35, 0.075, 0.075, -0.075, -0.075, -0.35, -0.1, -0.2, -0.0625, -0.125]
 TY = [0.8, 0.5, 0.5, 0.25, 0.25, 0, 0, -0.2, -0.2, 0, 0, 0.25, 0.25, 0.5, 0.5]
 ```
 - Tip at (0, 0.8), trunk bottom at y=-0.2
 - Base width 0.7, mid width 0.4, top width 0.25, trunk width 0.15
-- Trees can be rotated (angle in degrees) and positioned (x, y coordinates)
 
 ## CRITICAL INSIGHT: Pre-optimized Solutions are at Local Optimum
 Previous experiments (12+ attempts) have shown:
@@ -22,21 +21,18 @@ Previous experiments (12+ attempts) have shown:
 - Backward propagation: 0 improvements  
 - Lattice construction: Produces WORSE scores
 - C++ optimizers (bbox3, tree_packer_v21): Negligible improvement (~1e-9)
-- Local search methods DO NOT WORK on pre-optimized baselines
 
-**The pre-optimized solutions are at a tight local optimum. Local search cannot escape.**
+**Local search methods DO NOT WORK on pre-optimized baselines. Need constructive approaches.**
 
 ## Available Pre-optimized Resources
-Best pre-optimized CSVs are in:
-- `/home/nonroot/snapshots/santa-2025/21116303805/code/preoptimized/`
-  - `santa-2025-csv/santa-2025.csv` - Main pre-optimized solution (~70.676)
-  - `bucket-of-chump/submission.csv` - Another good solution
-  - `best_ensemble.csv` - Ensemble of best per-N configurations
-  - `bbox3` - C++ optimizer binary
+Best pre-optimized CSVs:
+- `/home/nonroot/snapshots/santa-2025/21116303805/code/preoptimized/santa-2025-csv/santa-2025.csv` (~70.676)
+- `/home/nonroot/snapshots/santa-2025/21116303805/code/preoptimized/bucket-of-chump/submission.csv`
+- `/home/nonroot/snapshots/santa-2025/21116303805/code/preoptimized/best_ensemble.csv`
+- bbox3 binary: `/home/nonroot/snapshots/santa-2025/21116303805/code/preoptimized/bbox3`
 
 ## MANDATORY FIRST EXPERIMENT: Baseline Verification
 ```python
-# Load and verify pre-optimized solution
 import pandas as pd
 import shutil
 
@@ -44,49 +40,72 @@ import shutil
 src = '/home/nonroot/snapshots/santa-2025/21116303805/code/preoptimized/santa-2025-csv/santa-2025.csv'
 shutil.copy(src, 'submission.csv')
 
-# Verify score
-score = compute_total_score('submission.csv')
-print(f"Baseline score: {score}")  # Should be ~70.676
+# Verify score ~70.676
 ```
 
 ## Approaches That MUST Be Tried (Priority Order)
 
 ### 1. External Dataset Search (HIGHEST PRIORITY)
-The top teams (68.9 score) likely have access to better pre-optimized solutions.
-Search for Kaggle datasets with better solutions:
+Top teams (68.9 score) likely have better pre-optimized solutions.
 ```bash
 kaggle datasets list -s "santa 2025" --sort-by votes
 ```
-Download and ensemble any found solutions.
 
-### 2. Greedy Backtracking with Beam Search
-Build solutions from scratch, NOT from pre-optimized:
+### 2. Bottom-Left Constructive Heuristic with Beam Search
+Research shows bottom-left placement is highly effective for irregular packing:
 ```python
-def greedy_backtracking(n_trees, beam_width=10):
-    """Build configuration tree-by-tree with beam search"""
-    states = [{'trees': [], 'score': 0}]
+def bottom_left_beam_search(n_trees, beam_width=20):
+    """Build configuration using bottom-left placement with beam search"""
+    states = [{'trees': [], 'polygons': []}]
     
     for tree_idx in range(n_trees):
         candidates = []
         for state in states:
-            # Try many placements for next tree
-            for angle in np.linspace(0, 360, 72):  # 5-degree increments
-                for attempt in range(50):
-                    pos = find_valid_position_greedy(state['trees'], angle)
-                    if pos:
-                        new_trees = state['trees'] + [(pos[0], pos[1], angle)]
-                        new_score = compute_side(new_trees)
-                        candidates.append({'trees': new_trees, 'score': new_score})
-                        break
+            # Try multiple angles
+            for angle in np.linspace(0, 360, 72):
+                # Find bottom-left valid position
+                pos = find_bottom_left_position(state['polygons'], angle)
+                if pos:
+                    new_state = add_tree(state, pos, angle)
+                    score = compute_bounding_side(new_state['polygons'])
+                    candidates.append((score, new_state))
         
         # Keep top beam_width states
-        candidates.sort(key=lambda x: x['score'])
-        states = candidates[:beam_width]
+        candidates.sort(key=lambda x: x[0])
+        states = [c[1] for c in candidates[:beam_width]]
     
-    return min(states, key=lambda x: x['score'])
+    return min(states, key=lambda s: compute_score(s))
 ```
 
-### 3. Random Multi-Start Construction
+### 3. DJD Selection Heuristic (From Research)
+The Djang-Finch heuristic outperforms conventional selection for irregular packing:
+- Sort pieces by size/shape characteristics
+- Use placement heuristic (bottom-left or jostle)
+- Apply local refinement after construction
+
+### 4. Jostle-Style Moves
+Research shows jostle moves (swap + rotate) significantly improve density:
+```python
+def jostle_optimization(config, iterations=1000):
+    """Apply jostle moves to improve packing"""
+    for _ in range(iterations):
+        # Try swapping two trees
+        i, j = random.sample(range(len(config)), 2)
+        new_config = swap_trees(config, i, j)
+        if valid(new_config) and score(new_config) < score(config):
+            config = new_config
+        
+        # Try rotating a tree
+        i = random.randint(0, len(config)-1)
+        for delta_angle in [5, -5, 10, -10, 45, -45]:
+            new_config = rotate_tree(config, i, delta_angle)
+            if valid(new_config) and score(new_config) < score(config):
+                config = new_config
+                break
+    return config
+```
+
+### 5. Random Multi-Start Construction
 Generate many random configurations and keep best:
 ```python
 def random_construction(n_trees, num_restarts=1000):
@@ -104,47 +123,43 @@ def random_construction(n_trees, num_restarts=1000):
     return best_config
 ```
 
-### 4. Per-N Independent Optimization
+### 6. Per-N Independent Optimization
 For each N from 1 to 200:
 - Try 10+ different construction strategies
-- Use different seed angles (0°, 30°, 45°, 60°, 90°, etc.)
+- Use different seed angles (0°, 30°, 45°, 60°, 90°)
 - Try different placement orders (center-out, spiral, random)
-- Keep the best result for each N
 
-### 5. Corner Extraction from Larger N
+### 7. Corner Extraction from Larger N
 Extract subsets from larger configurations:
 ```python
 def corner_extraction(source_n, target_n):
     """Try using corners of N=source_n for N=target_n"""
     source_trees = load_config(source_n)
-    # Get trees that define the bounding box corners
     corner_trees = get_boundary_trees(source_trees)
-    # Try using subsets of these
     for subset in combinations(corner_trees, target_n):
         if not has_overlap(subset):
             score = compute_score(subset)
-            # Compare with current best for target_n
+            # Compare with current best
 ```
 
 ## Key Techniques from Top Kernels
 
-### bbox3 C++ Optimizer (from jazivxt/why-not)
+### bbox3 C++ Optimizer
 ```cpp
 // Key parameters
 constexpr double NEIGHBOR_RADIUS = 0.5;
 constexpr double PIVOT_ANGLE_MAX = 10.0;
 constexpr double GLOBAL_TENSION_STRENGTH = 0.05;
-
-// Run with: ./bbox3 -n <iterations> -r <restarts>
+// Run: ./bbox3 -n <iterations> -r <restarts>
 ```
 
-### tree_packer_v21 C++ Optimizer (from smartmanoj/santa-claude)
+### tree_packer_v21 C++ Optimizer
 ```cpp
 // Key operations:
 // 1. Squeeze: scale 0.9995 to 0.98 toward center
-// 2. Compaction: move trees toward center in steps
+// 2. Compaction: move trees toward center
 // 3. Local search: 8 directions + rotations
-// 4. Swap moves: exchange positions of two trees
+// 4. Swap moves: exchange positions
 // 5. Multi-start: different initial angles
 ```
 
@@ -169,7 +184,7 @@ def optimize_rotation(trees):
 ## Validation Requirements
 - All trees must not overlap (intersect but not touch is OK)
 - Coordinates must be in range [-100, 100]
-- Format: `id,x,y,deg` with 's' prefix on values (e.g., `s0.123`)
+- Format: `id,x,y,deg` with 's' prefix on values
 
 ## Scoring Function
 ```python
@@ -204,9 +219,10 @@ def has_overlap(trees):
 1. **001_baseline**: Load best pre-optimized CSV, verify score ~70.676
 2. **002_dataset_search**: Search for external datasets with better solutions
 3. **003_ensemble**: Combine all available sources, pick best per-N
-4. **004_greedy_beam**: Implement beam search construction for N=1-50
+4. **004_bottom_left_beam**: Bottom-left construction with beam search
 5. **005_random_multi**: Random construction with 1000+ restarts per N
-6. **006_corner_extract**: Systematic corner extraction search
+6. **006_jostle**: Apply jostle moves to best configurations
+7. **007_corner_extract**: Systematic corner extraction search
 
 ## DO NOT WASTE TIME ON:
 - More SA iterations on pre-optimized solutions
@@ -217,9 +233,9 @@ def has_overlap(trees):
 
 ## FOCUS ON:
 - Finding better external pre-optimized solutions
-- Constructive approaches that build from scratch
-- Beam search with multiple parallel states
+- Constructive approaches (bottom-left, beam search)
 - Random initialization with many restarts
+- Jostle-style moves (swap + rotate)
 - Ensemble of diverse construction methods
 
 ## Key Files
