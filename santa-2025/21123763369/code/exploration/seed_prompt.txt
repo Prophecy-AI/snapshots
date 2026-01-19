@@ -7,6 +7,11 @@ This is a 2D irregular polygon packing optimization problem. The goal is to pack
 
 **Target Score to Beat:** 68.922808
 
+## Current Baseline Status
+- Sample submission (greedy): ~114 (too far from target)
+- Pre-optimized from GitHub: ~70.74 (1.82 points above target)
+- **Gap to close: ~2.6% improvement needed**
+
 ## Tree Geometry
 - 15-vertex polygon representing a Christmas tree
 - Trunk: 0.15 wide, 0.2 tall (bottom at y=-0.2)
@@ -23,19 +28,14 @@ This is a 2D irregular polygon packing optimization problem. The goal is to pack
 
 Download the best available pre-optimized submission:
 ```bash
-# Option 1: From GitHub (SmartManoj's scoreboard)
+# From GitHub (SmartManoj's scoreboard) - scores ~70.74
 wget -q "https://raw.githubusercontent.com/SmartManoj/Santa-Scoreboard/main/submission.csv" -O submission.csv
-
-# Option 2: From Kaggle datasets (if available)
-# kaggle datasets download -d <dataset-name>
 ```
-
-The pre-optimized baselines typically score around 68-70, which is close to the target.
 
 ## Key Approaches from Public Kernels
 
 ### 1. bbox3 C++ Optimizer (HIGHEST PRIORITY)
-**Source:** `../research/kernels/jazivxt_why-not/why-not.ipynb`, `../research/kernels/saspav_santa-submission/santa-submission.ipynb`
+**Source:** `../research/kernels/jazivxt_why-not/why-not.ipynb`
 
 The bbox3 binary is a C++ optimizer with:
 - Complex Number Vector Coordination
@@ -51,7 +51,8 @@ g++ -O3 -fopenmp -march=native -std=c++17 -o bbox3 bbox3.cpp
 ```
 
 **Usage:** `./bbox3 -n <iterations> -r <radius>`
-- Typical parameters: n=1000-2000, r=30-90 for short runs; n=5000-10000, r=256 for longer runs
+- Short runs: n=1000-2000, r=30-90
+- Long runs: n=5000-10000, r=256
 
 ### 2. tree_packer C++ Optimizer
 **Source:** `../research/kernels/smartmanoj_santa-claude/santa-claude.ipynb`
@@ -89,40 +90,49 @@ Post-processing step that optimizes the global rotation of each configuration:
 - Rotates entire configuration to minimize bounding box
 - Can reduce score by tightening the bounding box alignment
 
-### 5. Greedy Initialization (for building from scratch)
-**Source:** `../research/kernels/inversion_santa-2025-getting-started/santa-2025-getting-started.ipynb`
+```python
+from scipy.optimize import minimize_scalar
+from scipy.spatial import ConvexHull
 
-For building initial configurations:
-- Start with n-1 tree configuration
-- Add new tree at random angle, far from center
-- Move towards center until collision
-- Back up until no collision
-- Use weighted angle distribution (abs(sin(2*angle))) to favor corners
+def optimize_rotation(trees):
+    all_points = []
+    for tree in trees:
+        all_points.extend(list(tree.polygon.exterior.coords))
+    points_np = np.array(all_points)
+    hull_points = points_np[ConvexHull(points_np).vertices]
+    
+    def bbox_side_at_angle(angle_deg):
+        angle_rad = np.radians(angle_deg)
+        c, s = np.cos(angle_rad), np.sin(angle_rad)
+        rot_matrix_T = np.array([[c, s], [-s, c]])
+        rotated = hull_points.dot(rot_matrix_T)
+        return max(rotated.max(0) - rotated.min(0))
+    
+    res = minimize_scalar(bbox_side_at_angle, bounds=(0.001, 89.999), method='bounded')
+    return res.x, res.fun
+```
 
 ## Recommended Experiment Strategy
 
 ### Experiment 1: Baseline + Validation
 1. Download pre-optimized submission from GitHub
-2. Score it locally using proper polygon-based scoring
+2. Score it locally (~70.74 expected)
 3. Validate no overlaps
-4. Submit to establish baseline (should be ~68-70)
+4. Submit to establish baseline
 
 ### Experiment 2: bbox3 Optimization Loop
 1. Extract bbox3.cpp from `../research/kernels/jazivxt_why-not/why-not.ipynb`
 2. Compile with OpenMP
-3. Run optimization loop:
-   ```python
-   for iteration in range(max_iterations):
-       run_bbox3(n=2000, r=60)
-       fix_direction()
-       repair_overlaps()
-       if score_improved:
-           save_best()
-   ```
-4. Submit best result
+3. Run multi-phase optimization:
+   - Phase A: Short runs (2 min each) with various (n, r) combinations
+   - Phase B: Medium runs (10 min each) on top candidates
+   - Phase C: Long runs (20 min each) on best few
+4. Apply fix_direction post-processing
+5. Validate and repair overlaps
+6. Submit best result
 
 ### Experiment 3: tree_packer + Backward Propagation
-1. Extract tree_packer.cpp and bp.cpp from `../research/kernels/smartmanoj_santa-claude/santa-claude.ipynb`
+1. Extract tree_packer.cpp and bp.cpp from santa-claude kernel
 2. Compile both
 3. Run optimization:
    ```bash
@@ -132,18 +142,16 @@ For building initial configurations:
 4. Apply fix_direction
 5. Submit
 
-### Experiment 4: Multi-phase Optimization (3-hour budget)
-Based on `../research/kernels/yongsukprasertsuk_santa-2025-best-keeping-bbox3-runner/`:
-1. Phase A (2 min each): Many short runs with n=1000-2000, r=30-90
-2. Phase B (10 min each): Medium runs on top 3 candidates
-3. Phase C (20 min each): Long runs on best 2 candidates
-4. Always keep best submission, revert on regressions
-
-### Experiment 5: Configuration Merging
+### Experiment 4: Configuration Merging
 For each n from 1 to 200:
 - Compare configurations from multiple optimization runs
 - Keep the one with smallest bounding box side length
 - Merge into final submission
+
+### Experiment 5: Targeted Optimization
+Focus on configurations with highest score contribution:
+- Large N values (150-200) contribute most to total score
+- Optimize these specifically with longer runs
 
 ## Validation & Overlap Repair
 
@@ -164,21 +172,33 @@ def has_overlap(trees):
             if idx != i and poly.intersects(polygons[idx]) and not poly.touches(polygons[idx]):
                 return True
     return False
-```
 
-Overlap repair:
-- If configuration n has overlap, replace with configuration from donor (baseline) file
-- Use `replace_group()` function to swap specific n-configurations
+def repair_overlaps(submission_path, donor_path, failed_n_list):
+    """Replace overlapping configurations with donor configurations."""
+    df_new = pd.read_csv(submission_path)
+    df_good = pd.read_csv(donor_path)
+    failed_prefixes = [f"{n:03d}_" for n in failed_n_list]
+    df_to_keep = df_new[~df_new["id"].str.startswith(tuple(failed_prefixes))]
+    df_replacement = df_good[df_good["id"].str.startswith(tuple(failed_prefixes))]
+    df_repaired = pd.concat([df_to_keep, df_replacement]).sort_values(by="id")
+    df_repaired.to_csv(submission_path, index=False)
+```
 
 ## Key Code Components
 
 ### ChristmasTree Class
 ```python
+from decimal import Decimal, getcontext
+from shapely import affinity
+from shapely.geometry import Polygon
+
+getcontext().prec = 30
+
 class ChristmasTree:
     def __init__(self, center_x='0', center_y='0', angle='0'):
-        self.center_x = Decimal(center_x)
-        self.center_y = Decimal(center_y)
-        self.angle = Decimal(angle)
+        self.center_x = Decimal(str(center_x))
+        self.center_y = Decimal(str(center_y))
+        self.angle = Decimal(str(angle))
         
         # Tree dimensions
         trunk_w, trunk_h = Decimal('0.15'), Decimal('0.2')
@@ -187,20 +207,27 @@ class ChristmasTree:
         
         # 15-vertex polygon
         initial_polygon = Polygon([
-            (0, tip_y), (top_w/2, tier_1_y), (top_w/4, tier_1_y),
-            (mid_w/2, tier_2_y), (mid_w/4, tier_2_y), (base_w/2, 0),
-            (trunk_w/2, 0), (trunk_w/2, -trunk_h),
-            (-trunk_w/2, -trunk_h), (-trunk_w/2, 0), (-base_w/2, 0),
-            (-mid_w/4, tier_2_y), (-mid_w/2, tier_2_y),
-            (-top_w/4, tier_1_y), (-top_w/2, tier_1_y)
+            (0, float(tip_y)), (float(top_w/2), float(tier_1_y)), (float(top_w/4), float(tier_1_y)),
+            (float(mid_w/2), float(tier_2_y)), (float(mid_w/4), float(tier_2_y)), (float(base_w/2), 0),
+            (float(trunk_w/2), 0), (float(trunk_w/2), float(-trunk_h)),
+            (float(-trunk_w/2), float(-trunk_h)), (float(-trunk_w/2), 0), (float(-base_w/2), 0),
+            (float(-mid_w/4), float(tier_2_y)), (float(-mid_w/2), float(tier_2_y)),
+            (float(-top_w/4), float(tier_1_y)), (float(-top_w/2), float(tier_1_y))
         ])
         
         rotated = affinity.rotate(initial_polygon, float(self.angle), origin=(0, 0))
         self.polygon = affinity.translate(rotated, xoff=float(self.center_x), yoff=float(self.center_y))
 ```
 
-### Scoring Function
+### Scoring Functions
 ```python
+from shapely.ops import unary_union
+
+def get_tree_list_side_length(tree_list):
+    all_polygons = [t.polygon for t in tree_list]
+    bounds = unary_union(all_polygons).bounds
+    return Decimal(str(max(bounds[2] - bounds[0], bounds[3] - bounds[1])))
+
 def get_total_score(dict_of_side_length):
     score = Decimal('0')
     for k, v in dict_of_side_length.items():
@@ -210,13 +237,14 @@ def get_total_score(dict_of_side_length):
 
 ## Key Insights from Research
 
-1. **Start from pre-optimized baseline** - Sample submission scores ~114, target is ~68.9
-2. **Asymmetric solutions often outperform symmetric ones** for larger N values
-3. **Boundary-touching trees** are the key to reducing bounding box size
-4. **Rotation optimization** (fix_direction) provides small but consistent improvements
-5. **Local search on pre-optimized solutions** has diminishing returns
-6. **Backward propagation** can improve smaller N configurations by leveraging larger N solutions
-7. **Multi-phase optimization** with increasing timeouts is effective for long runs
+1. **Start from pre-optimized baseline** - Sample submission scores ~114, pre-optimized ~70.74, target is ~68.92
+2. **Gap to close is ~2.6%** - Need to improve from 70.74 to below 68.92
+3. **Asymmetric solutions often outperform symmetric ones** for larger N values
+4. **Boundary-touching trees** are the key to reducing bounding box size
+5. **Rotation optimization** (fix_direction) provides small but consistent improvements
+6. **Local search on pre-optimized solutions** has diminishing returns - need longer runs or different approaches
+7. **Backward propagation** can improve smaller N configurations by leveraging larger N solutions
+8. **Multi-phase optimization** with increasing timeouts is effective for long runs
 
 ## Time Budget Considerations
 - bbox3 with n=2000, r=60: ~2 minutes per run
@@ -230,3 +258,15 @@ def get_total_score(dict_of_side_length):
 - Key kernel with bbox3 source: `../research/kernels/jazivxt_why-not/why-not.ipynb`
 - Key kernel with tree_packer source: `../research/kernels/smartmanoj_santa-claude/santa-claude.ipynb`
 - Key kernel with multi-phase runner: `../research/kernels/yongsukprasertsuk_santa-2025-best-keeping-bbox3-runner/`
+
+## Submission Format
+```csv
+id,x,y,deg
+001_0,s0.0,s0.0,s90.0
+002_0,s0.0,s0.0,s90.0
+002_1,s0.202736,s-0.511271,s90.0
+...
+```
+- Values must be prefixed with 's' to preserve precision
+- Coordinates must be in range [-100, 100]
+- No overlapping trees allowed
