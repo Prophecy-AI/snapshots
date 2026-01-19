@@ -1,129 +1,126 @@
 # Santa 2025 - Christmas Tree Packing Optimization
 
 ## Current Status
-- Best CV score: 70.676102 from exp_000 (baseline)
-- Best LB score: 70.676102 (confirmed via submission)
+- Best CV score: 70.676102 (from exp_000 baseline)
+- Best LB score: 70.676102 (confirmed from submission)
 - Target: 68.919154 | Gap to target: 1.756948 (2.49%)
 
-## CV-LB Relationship
-- CV = LB for this problem (no train/test split, pure optimization)
-- No distribution shift - what works locally works on LB
+## CRITICAL INSIGHT: THE BASELINE IS AT A TIGHT LOCAL OPTIMUM
+
+After 5 experiments, we've discovered:
+1. **The baseline is packed SO TIGHTLY that even small perturbations cause collisions**
+2. Standard optimization (SA, fractional translation, backward propagation) finds NO improvements
+3. The C++ optimizers (sa_v1_parallel, bbox3) also find NO improvements
+4. **We need to find DIFFERENT BASINS, not optimize the current one**
 
 ## Response to Evaluator
 
 The evaluator correctly identified that:
-1. **Backward propagation found ZERO improvements** - baseline is optimal for this technique
-2. **bbox3 long run found ZERO improvements** - even with -n 50000 -r 64
-3. **The baseline is at an EXTREMELY tight local optimum**
+1. Perturbation without collision resolution is useless on a tightly packed solution
+2. We need to find DIFFERENT BASINS through:
+   - Lattice approach for large N
+   - Long optimization runs (hours, not minutes)
+   - Population-based approach
 
-The evaluator's recommendation to try **perturbation + population-based approach** is spot-on. This is the key technique we haven't tried yet.
-
-**Key insight from my analysis:**
-- fix_direction (rotation optimization) also found ZERO improvements - baseline is already optimally rotated
-- The baseline has been optimized by multiple techniques already
-- The only way to escape is through PERTURBATION - randomly disturbing the solution and re-optimizing
-
-## What Has Been Tried (ALL FAILED)
-1. ✅ sa_v1_parallel C++ optimizer - NO improvement
-2. ✅ Fractional translation - NO improvement  
-3. ✅ Backward propagation - NO improvement
-4. ✅ bbox3 with high iterations (-n 50000 -r 64) - NO improvement
-5. ✅ Lattice from scratch - MUCH WORSE results
-6. ✅ fix_direction rotation - NO improvement (tested in loop 4)
-7. ✅ Ensemble of 30 CSVs - baseline dominates ALL N values
-
-## What Has NOT Been Tried (CRITICAL!)
-
-### 1. **[HIGHEST PRIORITY] Perturbation + Re-optimization**
-The jonathanchan kernel uses this technique:
-```cpp
-Cfg perturb(Cfg c, double strength, uint64_t seed) {
-    int numPerturb = max(1, (int)(c.n * 0.15));  // Perturb 15% of trees
-    for (int k = 0; k < numPerturb; k++) {
-        int i = ri(c.n);
-        c.x[i] += (rf() - 0.5) * strength;  // Random position shift
-        c.y[i] += (rf() - 0.5) * strength;
-        c.a[i] = fmod(c.a[i] + (rf() - 0.5) * 60 + 360, 360.0);  // Random angle
-    }
-    return c;
-}
-```
-
-**Implementation strategy:**
-1. Load baseline configuration
-2. Perturb 10-15% of trees (random position shift 0.1-0.5, angle shift 10-30°)
-3. Run SA optimization to find new local optimum
-4. If better, keep; if not, try different perturbation
-5. Repeat with population of 3 solutions
-
-### 2. **[HIGH PRIORITY] Population-Based Approach**
-Keep top 3 solutions, perturb each, re-optimize, keep best 3:
-```python
-population = [baseline]
-for generation in range(10):
-    for solution in population:
-        perturbed = perturb(solution, strength=0.1)
-        optimized = run_sa(perturbed)
-        population.append(optimized)
-    population = sorted(population, key=score)[:3]  # Keep top 3
-```
-
-### 3. **[HIGH PRIORITY] sa_v3 Optimizer**
-The jonathanchan kernel has sa_v3 with 8 move types:
-- translate, rotate, swap, squeeze, compaction, local search, fractional translation
-- More sophisticated than sa_v1
-
-**Extract and compile sa_v3 from jonathanchan kernel, run with perturbation.**
-
-### 4. **[MEDIUM PRIORITY] Much Longer Optimization**
-Top solutions run for HOURS, not minutes:
-- `-n 20000 -r 80` with multiple generations
-- Endless mode with periodic saves
-- Different random seeds
+**Key insight from web search**: "By solving the optimal layout for a small group of trees (e.g., 8) and then tiling that pattern to cover larger instances, and by applying incremental 'pocket-filling' heuristics that greedily place extra trees to exploit leftover space—often refined with local-search tweaks—top teams push their scores below 69."
 
 ## Recommended Approaches (Priority Order)
 
-1. **[HIGHEST PRIORITY]** Implement Python-based perturbation + SA optimization
-   - Perturb 15% of trees with position_delta=0.1, angle_delta=30
-   - Run SA with 10000 iterations
-   - Keep population of 3 solutions
-   - Run for 10+ generations
+### 1. **[HIGHEST PRIORITY] TILING APPROACH FOR LARGE N**
 
-2. **[HIGH PRIORITY]** Extract and compile sa_v3 from jonathanchan kernel
-   - Has more sophisticated move types
-   - Use with perturbation mechanism
-   - Run with `-n 20000 -r 80`
+The egortrushin kernel shows how to do this:
+1. Start with 2 base trees
+2. Optimize the 2-tree configuration with SA (position_delta=0.01, angle_delta=30)
+3. Translate in a grid pattern (nx × ny) to create N trees
+4. Run SA optimization for 1+ HOURS
 
-3. **[MEDIUM PRIORITY]** Try different perturbation strengths
-   - Weak: position_delta=0.05, angle_delta=15
-   - Medium: position_delta=0.1, angle_delta=30
-   - Strong: position_delta=0.2, angle_delta=60
+**Target N values for tiling**: 72, 100, 110, 144, 156, 196, 200
+- N=72: [4,9] or [6,12] or [8,9]
+- N=100: [5,10] or [10,10]
+- N=110: [5,11] or [10,11]
+- N=144: [6,12] or [12,12]
+- N=156: [6,13] or [12,13]
+- N=196: [7,14] or [14,14]
+- N=200: [7,15] or [10,20]
+
+**Implementation**:
+```python
+# From egortrushin kernel
+config = {
+    "params": {
+        "Tmax": 0.1,
+        "Tmin": 0.0001,
+        "nsteps": 15,
+        "nsteps_per_T": 500,
+        "cooling": "exponential",
+        "alpha": 0.95,
+        "position_delta": 0.01,
+        "angle_delta": 30,
+        "delta1": 0.01,
+        "random_state": 42,
+        "log_freq": 1,
+    }
+}
+```
+
+### 2. **[HIGH PRIORITY] LONG C++ OPTIMIZATION RUNS**
+
+The jonathanchan kernel runs optimization for HOURS:
+- `-n 50000 -r 200` (much higher than our `-n 15000 -r 20`)
+- Uses "endless mode" for continuous optimization
+- Population-based approach (keeps top 3 solutions)
+
+**Run the C++ optimizer for 1+ hours**:
+```bash
+./sa_v1_parallel -i submission.csv -o output.csv -n 50000 -r 200
+```
+
+### 3. **[HIGH PRIORITY] POCKET-FILLING HEURISTIC**
+
+After tiling, there may be leftover space. Use greedy placement to add extra trees:
+1. Find empty pockets in the configuration
+2. Try to place additional trees in these pockets
+3. Optimize the combined configuration
+
+### 4. **[MEDIUM PRIORITY] DIFFERENT STARTING POINTS**
+
+Instead of optimizing the current baseline:
+1. Generate random initial configurations
+2. Use lattice patterns as starting points
+3. Optimize from scratch for HOURS
+
+## Score Analysis
+
+- N=1-10: 4.33 (6.1%) - Small N, hard to improve
+- N=11-50: 14.71 (20.8%) - Medium N
+- N=51-100: 17.64 (25.0%) - Large N, good target
+- N=101-150: 17.14 (24.3%) - Large N, good target
+- N=151-200: 16.85 (23.8%) - Large N, good target
+
+**Focus on N>100**: A 5.17% improvement on N>100 alone would close the entire gap!
 
 ## What NOT to Try
-- ❌ More bbox3 runs without perturbation (already at local optimum)
-- ❌ More backward propagation (already tried, no improvement)
-- ❌ fix_direction rotation (already optimal)
-- ❌ Lattice from scratch (much worse than baseline)
-- ❌ Simple SA without perturbation (will return to same local optimum)
+
+1. ❌ Standard SA optimization on the baseline (already tried, no improvement)
+2. ❌ Fractional translation (already tried, no improvement)
+3. ❌ Backward propagation (already tried, no improvement)
+4. ❌ Small perturbations (cause collisions due to tight packing)
+5. ❌ Short optimization runs (5-10 minutes is not enough)
 
 ## SUBMISSION STRATEGY
+
 - Remaining submissions: 94
-- Submit after this experiment? **YES** - we have abundant submissions
-- Even if no improvement, LB feedback is valuable
+- **SUBMIT AFTER EVERY EXPERIMENT** - We have abundant submissions
+- LB feedback is free information - USE IT!
 
 ## Validation Notes
-- CV = LB for this problem (pure optimization)
-- Use Python Decimal precision for final submission
-- Verify no overlaps before submission
 
-## CRITICAL: The Key to Escaping Local Optima
+- CV = LB for this optimization problem (no train/test split)
+- Score is deterministic - same configuration always gives same score
+- Focus on finding different basins, not optimizing current one
 
-The baseline is at a LOCAL optimum, not GLOBAL. All standard optimization techniques converge to the same local optimum.
+## Key Files
 
-**The ONLY way to escape is PERTURBATION:**
-1. Randomly disturb the solution (shift positions, rotate angles)
-2. Re-optimize from the perturbed state
-3. The optimizer may find a DIFFERENT local optimum
-4. If better, keep it; if not, try again with different perturbation
-
-This is the technique used by top competitors. We must implement it.
+- Baseline: `/home/nonroot/snapshots/santa-2025/21116303805/code/preoptimized/santa-2025-csv/santa-2025.csv`
+- C++ optimizers: `/home/code/research/kernels/jonathanchan_santa25-ensemble-sa-fractional-translation/`
+- Tiling approach: `/home/code/research/kernels/egortrushin_santa25-simulated-annealing-with-translations/`
