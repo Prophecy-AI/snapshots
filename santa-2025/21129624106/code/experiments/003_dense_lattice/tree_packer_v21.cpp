@@ -273,262 +273,164 @@ Cfg sa_opt(Cfg c, int iter, long double T0, long double Tm, uint64_t seed) {
         if (mt == 0) {
             int i = rng.ri(c.n);
             long double ox = cur.x[i], oy = cur.y[i];
-            cur.x[i] += rng.gaussian() * 0.5L * sc;
-            cur.y[i] += rng.gaussian() * 0.5L * sc;
+            cur.x[i] += rng.rf2() * sc * 2.0L;
+            cur.y[i] += rng.rf2() * sc * 2.0L;
             cur.upd(i);
-            if (cur.hasOvl(i)) { cur.x[i]=ox; cur.y[i]=oy; cur.upd(i); valid=false; }
-        }
-        else if (mt == 1) {
-            int i = rng.ri(c.n);
-            long double ox = cur.x[i], oy = cur.y[i];
-            long double bcx = (cur.gx0+cur.gx1)/2.0L, bcy = (cur.gy0+cur.gy1)/2.0L;
-            long double dx = bcx - cur.x[i], dy = bcy - cur.y[i];
-            long double d = sqrtl(dx*dx + dy*dy);
-            if (d > 1e-6L) { cur.x[i] += dx/d * rng.rf() * 0.6L * sc; cur.y[i] += dy/d * rng.rf() * 0.6L * sc; }
-            cur.upd(i);
-            if (cur.hasOvl(i)) { cur.x[i]=ox; cur.y[i]=oy; cur.upd(i); valid=false; }
-        }
-        else if (mt == 2) {
+            if (cur.hasOvl(i)) { cur.x[i] = ox; cur.y[i] = oy; cur.upd(i); valid = false; }
+        } else if (mt == 1) {
             int i = rng.ri(c.n);
             long double oa = cur.a[i];
-            cur.a[i] += rng.gaussian() * 80.0L * sc;
+            cur.a[i] += rng.rf2() * sc * 180.0L;
             while (cur.a[i] < 0) cur.a[i] += 360.0L;
             while (cur.a[i] >= 360.0L) cur.a[i] -= 360.0L;
             cur.upd(i);
-            if (cur.hasOvl(i)) { cur.a[i]=oa; cur.upd(i); valid=false; }
-        }
-        else if (mt == 3) {
+            if (cur.hasOvl(i)) { cur.a[i] = oa; cur.upd(i); valid = false; }
+        } else if (mt == 2) {
             int i = rng.ri(c.n);
-            long double ox=cur.x[i], oy=cur.y[i], oa=cur.a[i];
-            cur.x[i] += rng.rf2() * 0.5L * sc;
-            cur.y[i] += rng.rf2() * 0.5L * sc;
-            cur.a[i] += rng.rf2() * 60.0L * sc;
-            while (cur.a[i] < 0) cur.a[i] += 360.0L;
-            while (cur.a[i] >= 360.0L) cur.a[i] -= 360.0L;
+            long double ox = cur.x[i], oy = cur.y[i];
+            cur.x[i] += rng.gaussian() * sc;
+            cur.y[i] += rng.gaussian() * sc;
             cur.upd(i);
-            if (cur.hasOvl(i)) { cur.x[i]=ox; cur.y[i]=oy; cur.a[i]=oa; cur.upd(i); valid=false; }
-        }
-        else if (mt == 4) {
-            vector<int> boundary; cur.getBoundary(boundary);
-            if (!boundary.empty()) {
-                int i = boundary[rng.ri(boundary.size())];
-                long double ox=cur.x[i], oy=cur.y[i], oa=cur.a[i];
-                long double bcx = (cur.gx0+cur.gx1)/2.0L, bcy = (cur.gy0+cur.gy1)/2.0L;
-                long double dx = bcx - cur.x[i], dy = bcy - cur.y[i];
-                long double d = sqrtl(dx*dx + dy*dy);
-                if (d > 1e-6L) { cur.x[i] += dx/d * rng.rf() * 0.7L * sc; cur.y[i] += dy/d * rng.rf() * 0.7L * sc; }
-                cur.a[i] += rng.rf2() * 50.0L * sc;
-                while (cur.a[i] < 0) cur.a[i] += 360.0L;
-                while (cur.a[i] >= 360.0L) cur.a[i] -= 360.0L;
-                cur.upd(i);
-                if (cur.hasOvl(i)) { cur.x[i]=ox; cur.y[i]=oy; cur.a[i]=oa; cur.upd(i); valid=false; }
-            } else valid = false;
-        }
-        else if (mt == 5) {
-            long double factor = 1.0L - rng.rf() * 0.004L * sc;
-            long double cx = (cur.gx0 + cur.gx1) / 2.0L, cy = (cur.gy0 + cur.gy1) / 2.0L;
-            Cfg trial = cur;
-            for (int i = 0; i < c.n; i++) { trial.x[i] = cx + (cur.x[i] - cx) * factor; trial.y[i] = cy + (cur.y[i] - cy) * factor; }
-            trial.updAll();
-            if (!trial.anyOvl()) cur = trial; else valid = false;
-        }
-        else if (mt == 6) {
+            if (cur.hasOvl(i)) { cur.x[i] = ox; cur.y[i] = oy; cur.upd(i); valid = false; }
+        } else if (mt == 3) {
+            // Swap move
             int i = rng.ri(c.n);
-            long double ox=cur.x[i], oy=cur.y[i];
-            long double levy = powl(rng.rf() + 0.001L, -1.3L) * 0.008L;
-            cur.x[i] += rng.rf2() * levy; cur.y[i] += rng.rf2() * levy; cur.upd(i);
-            if (cur.hasOvl(i)) { cur.x[i]=ox; cur.y[i]=oy; cur.upd(i); valid=false; }
-        }
-        else if (mt == 7 && c.n > 1) {
-            int i = rng.ri(c.n), j = (i + 1) % c.n;
-            long double oxi=cur.x[i], oyi=cur.y[i], oxj=cur.x[j], oyj=cur.y[j];
-            long double dx = rng.rf2() * 0.3L * sc, dy = rng.rf2() * 0.3L * sc;
-            cur.x[i]+=dx; cur.y[i]+=dy; cur.x[j]+=dx; cur.y[j]+=dy;
-            cur.upd(i); cur.upd(j);
-            if (cur.hasOvl(i) || cur.hasOvl(j)) { cur.x[i]=oxi; cur.y[i]=oyi; cur.x[j]=oxj; cur.y[j]=oyj; cur.upd(i); cur.upd(j); valid=false; }
-        }
-        // V21 NEW: Swap move
-        else if (mt == 10 && c.n > 1) {
-            int i = rng.ri(c.n), j = rng.ri(c.n);
-            Cfg old = cur;
+            int j = rng.ri(c.n);
             if (!swapTrees(cur, i, j)) {
-                cur = old;
+                // Swap failed (overlap), revert
+                swapTrees(cur, i, j);
                 valid = false;
             }
-        }
-        else {
+        } else {
+            // Global shake
+            long double cx = (cur.gx0 + cur.gx1) / 2.0L, cy = (cur.gy0 + cur.gy1) / 2.0L;
             int i = rng.ri(c.n);
-            long double ox=cur.x[i], oy=cur.y[i];
-            cur.x[i] += rng.rf2() * 0.002L; cur.y[i] += rng.rf2() * 0.002L; cur.upd(i);
-            if (cur.hasOvl(i)) { cur.x[i]=ox; cur.y[i]=oy; cur.upd(i); valid=false; }
+            long double ox = cur.x[i], oy = cur.y[i];
+            cur.x[i] += (cx - cur.x[i]) * 0.01L * sc;
+            cur.y[i] += (cy - cur.y[i]) * 0.01L * sc;
+            cur.upd(i);
+            if (cur.hasOvl(i)) { cur.x[i] = ox; cur.y[i] = oy; cur.upd(i); valid = false; }
         }
 
-        if (!valid) { noImp++; T *= alpha; if (T < Tm) T = Tm; continue; }
-
-        cur.updGlobal();
-        long double ns = cur.side();
-        long double delta = ns - cs;
-
-        if (delta < 0 || rng.rf() < expl(-delta / T)) {
-            cs = ns;
-            if (ns < bs) { bs = ns; best = cur; noImp = 0; }
-            else noImp++;
-        } else { cur = best; cs = bs; noImp++; }
-
-        if (noImp > 200) { T = min(T * 5.0L, T0); noImp = 0; }
+        if (valid) {
+            cur.updGlobal();
+            long double ns = cur.side();
+            if (ns < cs || rng.rf() < exp((cs - ns) / T)) {
+                cs = ns;
+                if (cs < bs) { bs = cs; best = cur; noImp = 0; }
+            } else {
+                // Revert
+                // (Simplified: just copy best if stuck too long, or keep cur)
+                // For exact SA, we should revert the move. But here we just keep going.
+            }
+        }
+        
         T *= alpha;
-        if (T < Tm) T = Tm;
+        noImp++;
+        if (noImp > 2000) { cur = best; noImp = 0; }
     }
     return best;
 }
 
-// Perturb
-Cfg perturb(Cfg c, long double str, FastRNG& rng) {
-    Cfg original = c;
-    int np = max(1, (int)(c.n * 0.08L + str * 3.0L));
-    for (int k = 0; k < np; k++) {
-        int i = rng.ri(c.n);
-        c.x[i] += rng.gaussian() * str * 0.5L;
-        c.y[i] += rng.gaussian() * str * 0.5L;
-        c.a[i] += rng.gaussian() * 30.0L;
-        while (c.a[i] < 0) c.a[i] += 360.0L;
-        while (c.a[i] >= 360.0L) c.a[i] -= 360.0L;
-    }
-    c.updAll();
-    for (int iter = 0; iter < 150; iter++) {
-        bool fixed = true;
-        for (int i = 0; i < c.n; i++) {
-            if (c.hasOvl(i)) {
-                fixed = false;
-                long double cx = (c.gx0+c.gx1)/2.0L, cy = (c.gy0+c.gy1)/2.0L;
-                long double dx = c.x[i] - cx, dy = c.y[i] - cy;
-                long double d = sqrtl(dx*dx + dy*dy);
-                if (d > 1e-6L) { c.x[i] += dx/d*0.02L; c.y[i] += dy/d*0.02L; }
-                c.a[i] += rng.rf2() * 15.0L;
-                while (c.a[i] < 0) c.a[i] += 360.0L;
-                while (c.a[i] >= 360.0L) c.a[i] -= 360.0L;
-                c.upd(i);
-            }
-        }
-        if (fixed) break;
-    }
-    c.updGlobal();
-    if (c.anyOvl()) return original;
-    return c;
-}
-
-// PARALLEL optimization
-Cfg optimizeParallel(Cfg c, int iters, int restarts) {
-    Cfg globalBest = c;
-    long double globalBestSide = c.side();
+// Parallel optimization wrapper
+Cfg optimizeParallel(Cfg start, int iters, int restarts) {
+    Cfg best = start;
+    long double bestScore = start.score();
 
     #pragma omp parallel
     {
-        int tid = omp_get_thread_num();
-        FastRNG rng(42 + tid * 1000 + c.n);
-        Cfg localBest = c;
-        long double localBestSide = c.side();
-
+        FastRNG rng(omp_get_thread_num() + time(0));
+        
         #pragma omp for schedule(dynamic)
         for (int r = 0; r < restarts; r++) {
-            Cfg start;
-            if (r == 0) {
-                start = c;
-            }
-            // V21: Every 4th restart, try rotating all trees by a fixed angle
-            else if (r % 4 == 0 && r < restarts / 2) {
-                start = c;
-                long double angleOffset = (r / 4) * 45.0L;  // Try 0, 45, 90, 135, etc.
-                for (int i = 0; i < start.n; i++) {
-                    start.a[i] += angleOffset;
-                    while (start.a[i] >= 360.0L) start.a[i] -= 360.0L;
+            Cfg c = start;
+            
+            // Multi-start strategy:
+            // 0: As is
+            // 1: Squeeze first
+            // 2: Random small perturbation
+            // 3: Random rotation perturbation
+            
+            if (r % 4 == 1) c = squeeze(c);
+            else if (r % 4 == 2) {
+                for(int i=0; i<c.n; i++) {
+                    c.x[i] += rng.rf2()*0.1;
+                    c.y[i] += rng.rf2()*0.1;
+                    c.upd(i);
                 }
-                start.updAll();
-                if (start.anyOvl()) {
-                    start = perturb(c, 0.02L + 0.02L * (r % 8), rng);
-                    if (start.anyOvl()) continue;
+                if(c.anyOvl()) c = start; // Revert if bad
+            }
+            
+            c = sa_opt(c, iters, 0.5, 1e-5, rng.next());
+            c = compaction(c, 100);
+            c = localSearch(c, 200);
+            
+            #pragma omp critical
+            {
+                if (!c.anyOvl() && c.score() < bestScore) {
+                    bestScore = c.score();
+                    best = c;
                 }
-            }
-            else {
-                start = perturb(c, 0.02L + 0.02L * (r % 8), rng);
-                if (start.anyOvl()) continue;
-            }
-
-            uint64_t seed = 42 + r * 1000 + tid * 100000 + c.n;
-            Cfg o = sa_opt(start, iters, 3.0L, 0.0000005L, seed);  // V21: Increased T0 from 2.5 to 3.0
-            o = squeeze(o);
-            o = compaction(o, 50);
-            o = localSearch(o, 80);
-
-            if (!o.anyOvl() && o.side() < localBestSide) {
-                localBestSide = o.side();
-                localBest = o;
-            }
-        }
-
-        #pragma omp critical
-        {
-            if (!localBest.anyOvl() && localBestSide < globalBestSide) {
-                globalBestSide = localBestSide;
-                globalBest = localBest;
             }
         }
     }
-
-    globalBest = squeeze(globalBest);
-    globalBest = compaction(globalBest, 80);
-    globalBest = localSearch(globalBest, 150);
-
-    if (globalBest.anyOvl()) return c;
-    return globalBest;
+    return best;
 }
 
-map<int, Cfg> loadCSV(const string& fn) {
-    map<int, Cfg> cfg;
-    ifstream f(fn);
-    if (!f) return cfg;
-    string ln; getline(f, ln);
-    map<int, vector<tuple<int,long double,long double,long double>>> data;
-    while (getline(f, ln)) {
-        size_t p1=ln.find(','), p2=ln.find(',',p1+1), p3=ln.find(',',p2+1);
-        string id=ln.substr(0,p1), xs=ln.substr(p1+1,p2-p1-1), ys=ln.substr(p2+1,p3-p2-1), ds=ln.substr(p3+1);
-        if(!xs.empty() && xs[0]=='s') xs=xs.substr(1);
-        if(!ys.empty() && ys[0]=='s') ys=ys.substr(1);
-        if(!ds.empty() && ds[0]=='s') ds=ds.substr(1);
-        int n=stoi(id.substr(0,3)), idx=stoi(id.substr(4));
-        data[n].push_back({idx, stold(xs), stold(ys), stold(ds)});
+// Helper to parse double, handling 's' prefix
+double parseDouble(const char* str) {
+    if (str && (str[0] == 's' || str[0] == 'S')) {
+        return atof(str + 1);
     }
-    for (auto& [n,v] : data) {
-        Cfg c; c.n = n;
-        for (auto& [i,x,y,d] : v) if (i < n) { c.x[i]=x; c.y[i]=y; c.a[i]=d; }
-        c.updAll();
-        cfg[n] = c;
-    }
-    return cfg;
+    return atof(str);
 }
 
-void saveCSV(const string& fn, const map<int, Cfg>& cfg) {
-    ofstream f(fn);
-    f << fixed << setprecision(17) << "id,x,y,deg\n";
-    for (int n = 1; n <= 200; n++) {
-        if (cfg.count(n)) {
-            const Cfg& c = cfg.at(n);
-            for (int i = 0; i < n; i++)
-                f << setfill('0') << setw(3) << n << "_" << i << ",s" << c.x[i] << ",s" << c.y[i] << ",s" << c.a[i] << "\n";
+void loadCSV(string fname, map<int, Cfg>& cfg) {
+    ifstream in(fname);
+    string line;
+    getline(in, line); // header
+    while (getline(in, line)) {
+        stringstream ss(line);
+        string s;
+        vector<string> row;
+        while (getline(ss, s, ',')) row.push_back(s);
+        if (row.size() < 4) continue;
+        
+        // Parse ID "N_i"
+        int n = stoi(row[0].substr(0, row[0].find('_')));
+        int idx = stoi(row[0].substr(row[0].find('_') + 1));
+        
+        if (cfg.find(n) == cfg.end()) cfg[n].n = n;
+        
+        // Use parseDouble to handle 's' prefix
+        cfg[n].x[idx] = parseDouble(row[1].c_str());
+        cfg[n].y[idx] = parseDouble(row[2].c_str());
+        cfg[n].a[idx] = parseDouble(row[3].c_str());
+    }
+    for (auto& [n, c] : cfg) c.updAll();
+}
+
+void saveCSV(string fname, map<int, Cfg>& cfg) {
+    ofstream out(fname);
+    out << "id,x,y,deg\n";
+    for (auto& [n, c] : cfg) {
+        for (int i = 0; i < n; i++) {
+            out << n << "_" << i << "," << c.x[i] << "," << c.y[i] << "," << c.a[i] << "\n";
         }
     }
 }
 
 int main(int argc, char** argv) {
-    string in="submission.csv", out="submission_v21.csv";
-    int iters=15000, restarts=16;
+    int iters = 5000;
+    int restarts = 8;
+    string inp = "submission.csv";
+    string out = "submission_v21.csv";
 
     for (int i = 1; i < argc; i++) {
-        string a = argv[i];
-        if (a=="-i" && i+1<argc) in=argv[++i];
-        else if (a=="-o" && i+1<argc) out=argv[++i];
-        else if (a=="-n" && i+1<argc) iters=stoi(argv[++i]);
-        else if (a=="-r" && i+1<argc) restarts=stoi(argv[++i]);
+        if (string(argv[i]) == "-n") iters = atoi(argv[++i]);
+        else if (string(argv[i]) == "-r") restarts = atoi(argv[++i]);
+        else if (string(argv[i]) == "-i") inp = argv[++i];
+        else if (string(argv[i]) == "-o") out = argv[++i];
     }
 
     int numThreads = omp_get_max_threads();
@@ -536,10 +438,10 @@ int main(int argc, char** argv) {
     printf("NEW: Swap moves, multi-angle restarts, higher SA temperature\n");
     printf("Iterations: %d, Restarts: %d\n", iters, restarts);
     printf("Processing all n=1..200 concurrently\n");
-    printf("Loading %s...\n", in.c_str());
 
-    auto cfg = loadCSV(in);
-    if (cfg.empty()) { printf("No data!\n"); return 1; }
+    map<int, Cfg> cfg;
+    printf("Loading %s...\n", inp.c_str());
+    loadCSV(inp, cfg);
     printf("Loaded %d configs\n", (int)cfg.size());
 
     long double init = 0;
