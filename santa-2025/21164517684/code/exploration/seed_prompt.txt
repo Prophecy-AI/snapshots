@@ -13,6 +13,12 @@ Pack 1-200 Christmas tree shapes into the smallest square bounding box for each 
 - Trunk: 0.15 wide, 0.2 tall
 - Total height: 1.0
 
+Vertex coordinates (from center):
+```python
+TX = [0, 0.125, 0.0625, 0.2, 0.1, 0.35, 0.075, 0.075, -0.075, -0.075, -0.35, -0.1, -0.2, -0.0625, -0.125]
+TY = [0.8, 0.5, 0.5, 0.25, 0.25, 0, 0, -0.2, -0.2, 0, 0, 0.25, 0.25, 0.5, 0.5]
+```
+
 ## Submission Format
 CSV with columns: id, x, y, deg
 - id format: NNN_T (e.g., "001_0" for N=1, tree 0)
@@ -26,25 +32,27 @@ Located in `/home/nonroot/snapshots/santa-2025/21116303805/code/preoptimized/`:
 - `telegram/` - Solutions at 71.97 and 72.49
 - `bbox3` - Pre-compiled optimizer binary
 
-## Key Optimization Techniques
+## Key Optimization Techniques (Priority Order)
 
 ### 1. C++ Optimizer (tree_packer_v21) - HIGHEST PRIORITY
 From `../research/kernels/smartmanoj_santa-claude/santa-claude.ipynb`:
 ```bash
-g++ -O3 -march=native -std=c++17 -fopenmp -o tree_packer_v21.exe a.cpp
+g++ -O3 -march=native -std=c++17 -fopenmp -o tree_packer_v21.exe tree_packer.cpp
+export OMP_NUM_THREADS=$(nproc)
 ./tree_packer_v21.exe -n 20000 -r 256
 ```
 Key operations:
-- Squeeze: Scale all trees toward center
-- Compaction: Move trees toward center in small steps
-- Local search: Try small moves in 8 directions + rotations
-- Simulated annealing: Accept worse moves with decreasing probability
-- Swap moves: Exchange positions of two trees
-- Multi-start: Try different initial angles
+- **Squeeze**: Scale all trees toward center (scale 0.9995 to 0.98)
+- **Compaction**: Move trees toward center in small steps (0.02, 0.008, 0.003, 0.001, 0.0004)
+- **Local search**: Try small moves in 8 directions + rotations
+- **Simulated annealing**: Accept worse moves with decreasing probability
+- **Swap moves**: Exchange positions of two trees
+- **Multi-start**: Try different initial angles
 
 ### 2. bbox3 Binary Optimizer
 From `../research/kernels/yongsukprasertsuk_santa-2025-best-keeping-bbox3-runner/`:
 ```bash
+chmod +x ./bbox3
 ./bbox3 -n 2000 -r 96
 ```
 Multi-phase approach:
@@ -54,37 +62,72 @@ Multi-phase approach:
 
 ### 3. Rotation Tightening (fix_direction)
 After placing trees, rotate entire configuration to minimize bounding box:
-- Use convex hull of all tree vertices
-- Optimize rotation angle 0-90 degrees using scipy.minimize_scalar
-- Can improve score significantly
+```python
+from scipy.spatial import ConvexHull
+from scipy.optimize import minimize_scalar
+
+def optimize_rotation(trees):
+    all_points = []
+    for tree in trees:
+        all_points.extend(list(tree.polygon.exterior.coords))
+    points_np = np.array(all_points)
+    hull_points = points_np[ConvexHull(points_np).vertices]
+    
+    res = minimize_scalar(
+        lambda a: calculate_bbox_side_at_angle(a, hull_points),
+        bounds=(0.001, 89.999), method='bounded'
+    )
+    return res.x, res.fun
+```
 
 ### 4. Backward Propagation
 Start from N=200, work down to N=2:
-- For each N, try removing each boundary-touching tree
-- If resulting (N-1) config is better than stored, save it
-- Greedy deletion of trees that reduce bounding box most
+```cpp
+for (int n = 200; n >= 2; n--) {
+    // Get trees touching boundary
+    vector<int> boundary_trees = get_bbox_touching_tree_indices(configs[n]);
+    
+    // Try removing each boundary tree
+    for (int tree_idx : boundary_trees) {
+        Cfg candidate = configs[n].removeTree(tree_idx);
+        if (candidate.side() < best_sides[n-1]) {
+            configs[n-1] = candidate;
+            best_sides[n-1] = candidate.side();
+        }
+    }
+}
+```
 
 ### 5. Ensemble Approach
 Collect best configurations from multiple sources:
-- Public kernels and datasets
-- Multiple optimization runs with different seeds
-- Select best configuration per N value
+```python
+def ensemble_best_per_n(csv_files):
+    best_configs = {}
+    for n in range(1, 201):
+        best_side = float('inf')
+        for csv_file in csv_files:
+            trees = load_config(csv_file, n)
+            side = get_side_length(trees)
+            if side < best_side:
+                best_side = side
+                best_configs[n] = trees
+    return best_configs
+```
 
 ## Recommended Workflow
 
 ### Step 1: Start from Pre-Optimized Solution
 ```python
-# Copy best available solution
 import shutil
 shutil.copy('/home/nonroot/snapshots/santa-2025/21116303805/code/preoptimized/santa-2025.csv', 'submission.csv')
 ```
 
 ### Step 2: Compile and Run C++ Optimizer
 ```bash
-# Compile tree_packer_v21
-g++ -O3 -march=native -std=c++17 -fopenmp -o tree_packer_v21.exe tree_packer_v21.cpp
+# Compile tree_packer_v21 (copy from smartmanoj kernel)
+g++ -O3 -march=native -std=c++17 -fopenmp -o tree_packer_v21.exe tree_packer.cpp
 
-# Run with high iterations (use all available threads)
+# Run with high iterations
 export OMP_NUM_THREADS=$(nproc)
 ./tree_packer_v21.exe -n 20000 -r 256
 ```
@@ -95,18 +138,45 @@ g++ -O3 -std=c++17 -o bp.exe bp.cpp
 ./bp.exe submission.csv submission.csv
 ```
 
-### Step 4: Iterate
-Run tree_packer → backward_propagation → tree_packer loop until convergence.
+### Step 4: Iterate Until Convergence
+```python
+while True:
+    old_score = calculate_score('submission.csv')
+    run_tree_packer()
+    run_backward_propagation()
+    new_score = calculate_score('submission.csv')
+    if abs(new_score - old_score) < 1e-9:
+        break
+```
 
 ### Step 5: Ensemble Best Configurations
 For each N, select the configuration with smallest bounding box from all runs.
 
 ## Critical Implementation Notes
 
-### Overlap Detection
-- Use ZERO tolerance for overlaps
-- Check: `poly_i.intersects(poly_j) and not poly_i.touches(poly_j)`
-- Kaggle rejects submissions with ANY overlap
+### Overlap Detection (ZERO TOLERANCE)
+```python
+def has_overlap(trees):
+    for i in range(len(trees)):
+        for j in range(i+1, len(trees)):
+            if trees[i].intersects(trees[j]) and not trees[i].touches(trees[j]):
+                return True
+    return False
+```
+Kaggle rejects submissions with ANY overlap!
+
+### Overlap Repair
+If optimization creates overlaps, replace invalid groups:
+```python
+def replace_group(target_file, donor_file, group_id, output_file):
+    # Load both files
+    header_t, groups_t = load_groups(target_file)
+    header_d, groups_d = load_groups(donor_file)
+    # Replace the invalid group
+    groups_t[group_id] = groups_d[group_id]
+    # Save result
+    save_groups(output_file, header_t, groups_t)
+```
 
 ### Precision
 - Use `long double` in C++ for maximum precision
@@ -115,19 +185,18 @@ For each N, select the configuration with smallest bounding box from all runs.
 
 ### Validation Before Submission
 ```python
-from shapely.geometry import Polygon
-from shapely.ops import unary_union
-
-def validate_no_overlaps(trees):
-    for i in range(len(trees)):
-        for j in range(i+1, len(trees)):
-            if trees[i].intersects(trees[j]) and not trees[i].touches(trees[j]):
-                return False
-    return True
+def validate_submission(file_path, max_n=200):
+    df = pd.read_csv(file_path)
+    for n in range(1, max_n + 1):
+        trees = load_configuration_from_df(n, df)
+        if has_overlap(trees):
+            return False, n
+    return True, None
 ```
 
 ## Score Breakdown by N
-- N=1 to 10: ~0.5-1.0 each (highest impact due to 1/n weighting)
+- N=1: ~0.66 (single tree at 45° rotation is optimal)
+- N=2 to 10: ~0.45-0.55 each (highest impact due to 1/n weighting)
 - N=11 to 50: ~0.3-0.5 each
 - N=51 to 100: ~0.25-0.35 each
 - N=101 to 200: ~0.2-0.3 each
@@ -138,6 +207,23 @@ def validate_no_overlaps(trees):
 - Short optimization runs (need hours, not minutes)
 - Lenient overlap thresholds (Kaggle uses strict validation)
 - Single random seed (use multiple starts)
+- Micro-optimizing pre-optimized solutions with same approach (already at local optimum)
+
+## Key Insights from Past Experiments
+1. The pre-optimized santa-2025.csv is already at a tight local optimum (~70.68)
+2. Standard optimization approaches (short SA runs, simple local search) cannot improve it
+3. Need fundamentally different approaches:
+   - Much longer optimization runs (hours, not minutes)
+   - Lattice-based approaches for large N (N >= 58)
+   - Ensemble from multiple independent optimization runs
+   - Focus on small N values (highest score contribution)
+
+## Discussion Insights
+- Symmetric solutions may be optimal for some N values
+- Asymmetric solutions often beat symmetric for large N
+- Tessellation/lattice patterns work well for N >= 58
+- Small N (1-10) contribute most to score - focus here first
+- N=1 optimal: 45° rotation minimizes bounding box
 
 ## Expected Progression
 1. Pre-optimized baseline: ~70.68
@@ -145,15 +231,18 @@ def validate_no_overlaps(trees):
 3. After backward propagation: ~68.5-69
 4. After ensemble + long runs: Target ~68.92
 
-## Key Insight from Past Experiments
-The pre-optimized santa-2025.csv is already at a tight local optimum. Standard optimization approaches (short SA runs, simple local search) cannot improve it. Need:
-1. Much longer optimization runs (hours, not minutes)
-2. Lattice-based approaches for large N
-3. Ensemble from multiple independent optimization runs
-4. Focus on small N values (highest score contribution)
+## C++ Code Structure (tree_packer_v21)
+Key functions:
+- `getPoly()`: Convert tree position/angle to polygon vertices
+- `overlap()`: Check if two polygons overlap (AABB + point-in-polygon + edge intersection)
+- `squeeze()`: Scale all trees toward center
+- `compaction()`: Move individual trees toward center
+- `localSearch()`: Try small moves and rotations
+- `simulatedAnnealing()`: Global optimization with temperature schedule
+- `backwardProp()`: Transfer solutions from N to N-1
 
-## Discussion Insights
-- Symmetric solutions may be optimal for some N values
-- Asymmetric solutions often beat symmetric for large N
-- Tessellation/lattice patterns work well for N >= 58
-- Small N (1-10) contribute most to score - focus here first
+## Kernel References
+- `../research/kernels/smartmanoj_santa-claude/` - C++ optimizer with tree_packer_v21 and bp.cpp
+- `../research/kernels/yongsukprasertsuk_santa-2025-best-keeping-bbox3-runner/` - bbox3 multi-phase runner
+- `../research/kernels/saspav_santa-submission/` - fix_direction and overlap repair
+- `../research/kernels/inversion_santa-2025-getting-started/` - Basic greedy placement
