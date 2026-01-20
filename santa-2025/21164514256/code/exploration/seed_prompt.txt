@@ -11,6 +11,7 @@ Pack N Christmas trees (N=1 to 200) into the smallest possible square bounding b
 - Best public kernels achieve ~70.66
 - Pre-optimized submissions available in snapshots
 - CV = LB exactly (pure optimization, no distribution shift)
+- The gap of 1.74 points requires NOVEL approaches beyond public kernels
 
 ## Pre-Optimized Solutions Available
 Copy the best submission from snapshots:
@@ -25,8 +26,20 @@ From `tree_packer_v21.cpp` and `bbox3`:
 - Temperature schedule with exponential cooling
 - Move operators: translate, rotate, swap positions
 - Accept worse solutions with probability exp(-delta/T)
-- Run with high iterations: -n 15000+ -r 80+
+- Run with high iterations: -n 50000+ -r 128+
 - Use OpenMP for parallelization (26 threads available)
+
+Key SA parameters:
+```cpp
+// Temperature schedule
+T_start = 0.1 * initial_side
+T_end = 1e-8
+cooling_rate = 0.9999
+
+// Move sizes (adaptive)
+translate_step = 0.01 to 0.0001
+rotate_step = 5.0 to 0.1 degrees
+```
 
 ### 2. Backward Propagation (BP)
 Transfer solutions from N to N-1:
@@ -35,15 +48,50 @@ Transfer solutions from N to N-1:
 - Keep if resulting (N-1) config is better than stored
 - Iterate: SA → BP → SA → BP
 
+```python
+for n in range(200, 1, -1):
+    for tree_to_remove in get_bbox_touching_trees(config[n]):
+        candidate = remove_tree(config[n], tree_to_remove)
+        if score(candidate) < score(config[n-1]):
+            config[n-1] = candidate
+```
+
 ### 3. Squeeze and Compaction
-- Squeeze: Scale all trees towards center until overlap
-- Compaction: Move individual trees towards center
-- Local search: 8-directional moves + rotation adjustments
+- **Squeeze**: Scale all trees towards center until overlap
+  ```cpp
+  for (scale = 0.9995; scale >= 0.98; scale -= 0.0005) {
+      trial = scale_towards_center(config, scale);
+      if (!has_overlap(trial)) config = trial;
+      else break;
+  }
+  ```
+- **Compaction**: Move individual trees towards center
+- **Local search**: 8-directional moves + rotation adjustments
 
 ### 4. Fix Direction (Rotation Tightening)
 - Rotate entire configuration to minimize bounding box
 - Use scipy.optimize.minimize_scalar on convex hull
 - Apply after SA optimization
+```python
+from scipy.optimize import minimize_scalar
+from scipy.spatial import ConvexHull
+
+def optimize_rotation(trees):
+    hull_points = get_convex_hull_points(trees)
+    res = minimize_scalar(
+        lambda angle: bbox_side_at_angle(angle, hull_points),
+        bounds=(0.001, 89.999), method='bounded'
+    )
+    return res.x, res.fun
+```
+
+### 5. Advanced bbox3 Features
+- Complex number vector coordination for moves
+- Fluid dynamics simulation for tree flow
+- Hinge pivot moves for boundary trees
+- Density gradient flow towards center
+- Global boundary tension
+- Aggressive overlap repair with separation vectors
 
 ## Critical Insights from Discussions
 
@@ -51,15 +99,24 @@ Transfer solutions from N to N-1:
 - N=1 contributes 0.66 to score (highest single contribution)
 - Efficiency for small N: 0.37-0.59 vs 0.74 for large N
 - Focus optimization effort here
+- For N=1: optimal angle is 45° (minimizes bounding box)
 
 ### Asymmetric Solutions Outperform Symmetric
 - Top teams use asymmetric configurations
 - Don't assume symmetry is optimal
+- Try random perturbations to break symmetry
 
 ### Tessellations/Lattice for Large N
 - For N > 100, consider grid-based placement
 - Start with 2 base trees, translate in x/y directions
 - Can achieve tighter bounds than random optimization
+```python
+# Lattice approach for N=144 (12x12 grid)
+base_trees = [tree1, tree2]  # Optimized pair
+for i in range(12):
+    for j in range(12):
+        place_tree(base_trees[i%2], x=i*dx, y=j*dy)
+```
 
 ## Recommended Experiment Strategy
 
@@ -70,25 +127,29 @@ Transfer solutions from N to N-1:
 
 ### Experiment 2: Extended SA Optimization
 1. Compile tree_packer_v21.cpp with OpenMP
-2. Run with high parameters: -n 50000 -r 128
-3. Use all 26 threads
-4. Run for several hours
+2. Run with high parameters: -n 100000 -r 256
+3. Use all 26 threads: `export OMP_NUM_THREADS=26`
+4. Run for several hours (4-8 hours)
+5. Apply fix_direction after each major improvement
 
-### Experiment 3: Focus on Small N
+### Experiment 3: Focus on Small N (1-20)
 1. Extract N=1-20 configurations
 2. Run exhaustive angle search for N=1 (0° to 360° in 0.001° steps)
-3. Use constraint programming for N=2-5
-4. Apply longer SA runs specifically for N=1-20
+3. For N=2-5: try all angle combinations in 1° increments
+4. Apply much longer SA runs specifically for N=1-20
+5. Use constraint programming (OR-Tools) for N=2-5
 
 ### Experiment 4: Lattice Approach for Large N
 1. For N=100, 144, 196, 200 try grid-based placement
 2. Optimize base configuration and translation vectors
 3. Compare with SA results
+4. Hybrid: use lattice as starting point, then SA
 
 ### Experiment 5: Novel Approaches
-- Tabu search with diversification
-- Differential evolution
-- Genetic algorithm with topology crossover
+- **Tabu search**: Maintain list of recently visited solutions to force exploration
+- **Differential evolution**: Population-based optimization
+- **Genetic algorithm**: Crossover of tree positions/angles between good solutions
+- **Basin hopping**: Random perturbation + local optimization
 
 ## Technical Implementation Notes
 
@@ -96,28 +157,47 @@ Transfer solutions from N to N-1:
 ```bash
 g++ -O3 -march=native -std=c++17 -fopenmp -o tree_packer tree_packer.cpp
 export OMP_NUM_THREADS=26
+./tree_packer -n 100000 -r 256
 ```
 
 ### Submission Format
-- Values prefixed with 's': `s0.123456`
+- Values prefixed with 's': `s0.123456789012345678`
 - Columns: id, x, y, deg
 - id format: `NNN_T` where NNN is tree count (001-200), T is tree index
+
+### Tree Geometry (15 vertices)
+```python
+TX = [0, 0.125, 0.0625, 0.2, 0.1, 0.35, 0.075, 0.075, -0.075, -0.075, -0.35, -0.1, -0.2, -0.0625, -0.125]
+TY = [0.8, 0.5, 0.5, 0.25, 0.25, 0, 0, -0.2, -0.2, 0, 0, 0.25, 0.25, 0.5, 0.5]
+```
 
 ### Overlap Detection
 - Use Shapely for Python, custom polygon intersection for C++
 - Check both point-in-polygon and edge intersection
 - Bounding box pre-filter for efficiency
+- Use STRtree for O(n log n) overlap checking
 
 ### Precision
 - Use Decimal or long double for coordinates
 - Scale factor: 1e15 for Decimal operations
-- Round to 12+ decimal places
+- Round to 15+ decimal places
+- Avoid floating-point accumulation errors
+
+### Overlap Repair
+When overlaps detected after optimization:
+```python
+def repair_overlaps(submission, donor_file):
+    for n in range(1, 201):
+        if has_overlap(submission, n):
+            replace_config(submission, donor_file, n)
+```
 
 ## What NOT to Try
 - Short optimization runs (< 1 hour) - won't escape local optima
 - Simple ensemble of existing solutions - one source dominates
 - Micro-optimizing already-optimized submissions
 - Assuming symmetry is optimal
+- Python-based optimization (too slow, use C++)
 
 ## Validation
 - Calculate score locally before submission
@@ -129,3 +209,12 @@ export OMP_NUM_THREADS=26
 - Sample submission: /home/data/sample_submission.csv
 - Best snapshot: /home/nonroot/snapshots/santa-2025/21156851249/
 - Kernels: ../research/kernels/
+
+## Score Breakdown Analysis
+To close the 1.74 point gap:
+- Required uniform score reduction: 2.46%
+- Required uniform side reduction: 1.24%
+- Alternative: 21.6% reduction in N=1-20 only
+- Or: 9.14% reduction in N=1-50 only
+
+Focus on small N values for maximum impact!
