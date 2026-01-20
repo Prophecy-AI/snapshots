@@ -299,12 +299,13 @@ double calculateScore(const map<int, vector<Tree>>& solutions) {
 }
 
 int main(int argc, char* argv[]) {
-    string baseline_file = "/home/code/exploration/datasets/santa-2025.csv";
+    // Use the best submission as baseline
+    string baseline_file = "/home/submission/submission.csv";
     string output_file = "/home/code/experiments/012_crystalline_lattice/improved.csv";
     int min_n = 58;  // Start from N=58 (large N where lattice should work better)
     int max_n = 200;
-    int num_lattice_configs = 50;  // Number of different lattice configurations to try
-    int local_opt_iters = 5000;
+    int num_lattice_configs = 100;  // Number of different lattice configurations to try
+    int local_opt_iters = 10000;
     
     cout << "=== Crystalline Lattice Packing ===" << endl;
     cout << "Target N range: " << min_n << " to " << max_n << endl;
@@ -338,7 +339,7 @@ int main(int argc, char* argv[]) {
             // The key is to find vectors that tile the plane efficiently
             
             // Base lattice vector magnitudes (related to tree size)
-            double base_mag = 0.6 + dist(rng) * 0.2;  // Around 0.4 to 0.8
+            double base_mag = 0.5 + dist(rng) * 0.3;  // Around 0.2 to 0.8
             
             // First lattice vector
             double angle1 = angle_dist(rng);
@@ -384,7 +385,7 @@ int main(int argc, char* argv[]) {
         
         // Also try optimizing the baseline with lattice-inspired moves
         // (shift all trees by lattice vector, then optimize)
-        for (int config = 0; config < 10; config++) {
+        for (int config = 0; config < 20; config++) {
             vector<Tree> trees = baseline[N];
             
             // Apply small lattice-like shift to all trees
