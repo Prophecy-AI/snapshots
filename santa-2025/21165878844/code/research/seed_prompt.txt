@@ -1,141 +1,98 @@
 ## Current Status
-- Best CV score: 71.81259 from exp_006 (007_refine_valid_ensemble)
-- Best LB score: 71.8126 (perfect CV-LB calibration!)
-- Target: 68.919154 | Gap to target: 2.89 points (4.2%)
+- Best CV score: 70.659436 from exp_007 (008_tessellation_gap)
+- Best LB score: 71.812590 (from exp_006, but exp_007 not yet submitted)
+- Target: 68.919154 | Gap to target: 1.74 points (2.53%)
 
-## Critical Analysis
-
-### The Problem
-1. **Valid ensemble (71.81)** is 2.89 points from target
-2. **Touching ensemble (70.68)** is 1.76 points from target
-3. Even if we could perfectly convert touching→valid (impossible), we'd still be 1.76 points short
-4. **We need FUNDAMENTALLY BETTER solutions**, not just valid versions of existing ones
-
-### Why Previous Approaches Failed
-- 7 experiments, 5 fell back to baseline
-- All approaches tried to "refine existing solutions" - this family is EXHAUSTED
-- The valid ensemble is at a LOCAL OPTIMUM for the "refine" approach
-- SA refinement gave only 0.000189 improvement - negligible
-
-### Key Insight from Research
-Top competitors use:
-1. **Crystalline/Tessellation packing** for large N (>50-58)
-2. **Chaotic SA packing** for small N (<50)
-3. **No-Fit Polygon (NFP)** for collision detection with gap buffer
-4. **Partition + local search** approach (Shadoks team won CG:SHOP 2024)
+## CV-LB Relationship Analysis
+- exp_001: CV=71.812779, LB=71.812779 (PERFECT MATCH)
+- exp_006: CV=71.81259, LB=71.81259 (PERFECT MATCH)
+- **CV = LB exactly** - we can trust local scores completely
 
 ## Response to Evaluator
 
-The evaluator correctly identified that the "refine existing solutions" approach family is EXHAUSTED. I agree completely.
+**AGREE with evaluator's top priority:** Submit the current best (70.659436) to verify LB score before further optimization. With 89 submissions remaining, this is low-risk and provides critical feedback.
 
-**Key points from evaluator:**
-1. ✅ AGREE: Need to pivot to tessellation/translation approach
-2. ✅ AGREE: Focus on large N (51-200) where tessellation is most effective
-3. ✅ AGREE: Use backward propagation to improve smaller N values
-4. ✅ AGREE: The gap-constrained optimizer implementation is correct and valuable
+**AGREE with evaluator's concern:** Tessellation from scratch was 2.7-3.5x worse than existing solutions. This confirms that simple constructive approaches cannot compete with pre-optimized solutions.
 
-**My synthesis:**
-The evaluator's recommendation to implement tessellation with gap constraints is the RIGHT approach. The key difference from public kernels is that we must enforce distance > 0 from the START, not try to convert touching solutions afterward.
+**PARTIALLY AGREE on backward propagation:** The evaluator suggests implementing backward propagation with gap constraints. However, the crodoc kernel's backward propagation simply drops trees from larger N configs - it doesn't guarantee non-touching. We need to modify it to:
+1. Check if the adapted config is valid (non-touching)
+2. If not, try different tree removal strategies
+3. Only accept if both valid AND better score
+
+**KEY INSIGHT from experiment 008:** Found a better valid ensemble in snapshots (70.659436) that was 1.15 points better than our previous best. This suggests there may be MORE undiscovered valid solutions in snapshots. We should systematically scan ALL snapshot CSVs for valid configurations.
+
+## Key Findings from This Loop
+
+1. **Tessellation from scratch FAILS:** 2.7-3.5x worse than existing solutions
+2. **Better valid ensemble EXISTS:** Found 70.659436 in snapshots (was 71.81)
+3. **Gap analysis:** Valid (70.66) vs Touching (70.56) = only 0.10 points difference now
+4. **The 70.559 ensemble has 82 touching N values** - if we could convert these, we'd gain ~0.10 points
 
 ## Recommended Approaches (Priority Order)
 
-### 1. **[HIGHEST PRIORITY] Tessellation with Gap Constraints**
+### 1. **[HIGHEST PRIORITY] SUBMIT exp_007 (70.659436) to verify LB**
+- This is our new best valid submission
+- CV-LB has been perfect so far, expect LB = 70.659436
+- Uses 1 of 89 remaining submissions - low risk, high value
 
-Implement the egortrushin tessellation approach BUT with gap constraints built in:
+### 2. **[HIGH PRIORITY] Systematic snapshot scan for better valid solutions**
+There are 1322 CSVs in snapshots. We found 70.659436 by luck. Systematically scan ALL of them:
+- For each CSV, check if all 200 N values are valid (distance > 0)
+- Track the best valid score for each N
+- Create optimal valid ensemble from best-of-breed
 
 ```python
-# Key parameters for tessellation:
-# N=72: [6,6], N=100: [5,10], N=144: [6,12], N=200: [7,15]
+# Scan all snapshots for valid configurations
+import glob
+csv_files = glob.glob('/home/nonroot/snapshots/**/*.csv', recursive=True)
+best_valid_per_n = {}  # n -> (score, csv_path, config)
 
-# CRITICAL: Modify collision check to require distance > MIN_GAP
-def has_collision_with_gap(tree1, tree2, min_gap=1e-9):
-    if tree1.polygon.distance(tree2.polygon) < min_gap:
-        return True
-    return False
+for csv_path in csv_files:
+    df = pd.read_csv(csv_path)
+    if df.shape[0] != 20100:
+        continue
+    for n in range(1, 201):
+        trees = load_trees_for_n(df, n)
+        if is_valid(trees):  # distance > 0
+            score = get_contribution(trees, n)
+            if n not in best_valid_per_n or score < best_valid_per_n[n][0]:
+                best_valid_per_n[n] = (score, csv_path, trees)
 ```
 
-**Implementation steps:**
-1. Start with 2 base trees at different angles
-2. Translate in x/y directions to create grid pattern
-3. Use SA to optimize dx, dy, angle1, angle2 with gap constraints
-4. Focus on N=51-200 first (contributes 52.6 points to total score)
+### 3. **[MEDIUM PRIORITY] Hybrid ensemble from 70.559 + valid ensemble**
+The 70.559 ensemble has 118 valid N values and 82 touching. For the 118 valid ones, check if they're better than our current valid ensemble. Create hybrid:
+- For N where 70.559 is valid AND better: use 70.559
+- For N where 70.559 is touching: use current valid ensemble
 
-### 2. **[HIGH PRIORITY] Backward Propagation with Gap Constraints**
+### 4. **[MEDIUM PRIORITY] Gap-constrained backward propagation**
+Implement backward propagation that maintains non-touching:
+```python
+for n in range(200, 1, -1):
+    # Get best config for N+1
+    next_config = best_configs[n+1]
+    
+    # Try removing each tree
+    for i in range(n+1):
+        candidate = remove_tree(next_config, i)
+        if is_valid(candidate) and score(candidate) < score(best_configs[n]):
+            best_configs[n] = candidate
+```
 
-After tessellation, use backward propagation to improve smaller N:
-1. Start from N=200, work backward to N=1
-2. For each N, try removing each tree from N+1 config
-3. Keep the best valid (non-touching) configuration
-4. This propagates good patterns while maintaining validity
-
-### 3. **[MEDIUM PRIORITY] Hybrid Approach**
-
-Combine:
-- Tessellation for large N (>50)
-- Backward propagation for medium N (20-50)
-- SA with gap constraints for small N (<20)
-- Keep whichever is better for each N
+### 5. **[LOWER PRIORITY] Per-N gap analysis and targeted optimization**
+Identify which N values have the largest gap between our valid ensemble and the theoretical best. Focus optimization effort there.
 
 ## What NOT to Try
-- ❌ More SA refinement of valid ensemble (EXHAUSTED)
-- ❌ Micro-separation of touching trees (EXHAUSTED)
-- ❌ Scaling approaches (EXHAUSTED)
-- ❌ Searching for more valid configs in existing CSVs (EXHAUSTED)
-
-## Implementation Details
-
-### Tessellation SA Parameters (from egortrushin kernel)
-```python
-config = {
-    "params": {
-        "Tmax": 1.0,
-        "Tmin": 0.0001,
-        "nsteps": 100000,
-        "nsteps_per_T": 10,
-        "cooling": "exponential",
-        "alpha": 0.99,
-        "position_delta": 0.1,
-        "angle_delta": 5.0,
-        "delta1": 0.01,
-        "log_freq": 10000,
-    }
-}
-```
-
-### Gap Constraint Implementation
-```cpp
-// In C++ optimizer, modify hasOvl() to:
-bool hasGapViolation(const Poly& a, const Poly& b, double min_gap = 1e-9) {
-    if (overlap(a, b)) return true;
-    double dist = minPolyDist(a, b);
-    return dist < min_gap;
-}
-```
-
-## Expected Outcomes
-
-1. **Tessellation for large N**: May find fundamentally better solutions
-   - Even 0.01 improvement per N for N=51-200 = 1.5 points improvement
-   - Target: Beat touching ensemble (70.68) for large N values
-
-2. **Backward propagation**: Propagate good patterns to smaller N
-   - Maintain validity while improving scores
-
-3. **Combined approach**: Best of both worlds
-   - Use tessellation where it's better
-   - Use existing valid ensemble where it's better
-
-## SUBMISSION STRATEGY
-- Remaining submissions: 89 (ABUNDANT!)
-- Submit after EVERY experiment to get LB feedback
-- LB feedback is FREE information - use it!
+- ❌ Tessellation from scratch (proven 2.7-3.5x worse)
+- ❌ Simple SA refinement (only gave 0.000189 improvement)
+- ❌ Scaling/micro-separation (already exhausted)
+- ❌ Random initialization (produces much worse results)
 
 ## Validation Notes
-- CV = LB (perfect calibration confirmed)
-- All submissions must have distance > 0 for all tree pairs
-- Use Python verification before submission
+- CV = LB exactly (perfect calibration)
+- All 200 N values must have distance > 0 for Kaggle acceptance
+- Minimum gap can be as small as 1e-17 (essentially touching but technically valid)
 
-## Success Criteria
-- Beat 68.919154 on LB
-- This requires ~3% improvement from touching ensemble or ~5% from valid ensemble
-- Focus on large N values where improvements have biggest impact
+## SUBMISSION STRATEGY
+- Remaining submissions: 89
+- **SUBMIT exp_007 NOW** - we have abundant submissions and need LB feedback
+- After LB confirmation, continue with systematic snapshot scan
