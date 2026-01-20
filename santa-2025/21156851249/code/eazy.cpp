@@ -1,4 +1,3 @@
-%%writefile eazy.cpp
 #include <iostream>
 #include <fstream>
 #include <sstream>
