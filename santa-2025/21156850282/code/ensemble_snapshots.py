@@ -61,16 +61,19 @@ def get_n_score(df, n):
     if len(n_rows) != n:
         return float('inf'), None
     
-    trees = []
-    for _, row in n_rows.iterrows():
-        x = parse_value(row['x'])
-        y = parse_value(row['y'])
-        deg = parse_value(row['deg'])
-        trees.append(create_tree(x, y, deg))
-    
-    side = get_bounding_box_side(trees)
-    score = side**2 / n
-    return score, n_rows
+    try:
+        trees = []
+        for _, row in n_rows.iterrows():
+            x = parse_value(row['x'])
+            y = parse_value(row['y'])
+            deg = parse_value(row['deg'])
+            trees.append(create_tree(x, y, deg))
+        
+        side = get_bounding_box_side(trees)
+        score = side**2 / n
+        return score, n_rows
+    except Exception as e:
+        return float('inf'), None
 
 def load_all_snapshots():
     """Load all snapshot submissions."""
@@ -83,8 +86,12 @@ def load_all_snapshots():
             if submission_path.exists():
                 try:
                     df = pd.read_csv(submission_path)
-                    snapshots[snapshot_path.name] = df
-                    print(f"Loaded {snapshot_path.name}")
+                    # Check required columns
+                    if all(col in df.columns for col in ['id', 'x', 'y', 'deg']):
+                        snapshots[snapshot_path.name] = df
+                        print(f"Loaded {snapshot_path.name} ({len(df)} rows)")
+                    else:
+                        print(f"Skipping {snapshot_path.name}: missing columns")
                 except Exception as e:
                     print(f"Failed to load {snapshot_path.name}: {e}")
     
