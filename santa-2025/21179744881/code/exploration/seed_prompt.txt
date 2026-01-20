@@ -1,0 +1,271 @@
+# Santa 2025 - Christmas Tree Packing Optimization
+
+## Problem Overview
+This is a 2D polygon packing optimization problem. Pack Christmas tree shapes (15-vertex polygons) into the smallest possible square bounding box for each configuration of N trees (N=1 to 200).
+
+**Scoring:** score = Σ(s_n² / n) for n=1 to 200, where s_n is the side length of the bounding square for n trees. **Lower is better.**
+
+**Target Score:** Beat 68.919154
+**Current Best:** ~70.676 (pre-optimized santa-2025.csv)
+**Gap:** ~1.76 points (2.5%)
+
+## Tree Geometry
+Each Christmas tree is a 15-vertex polygon:
+- Trunk: width 0.15, height 0.2
+- Base tier: width 0.7
+- Middle tier: width 0.4
+- Top tier: width 0.25
+- Tip at y=0.8
+- Total height: 1.0 (from trunk bottom at -0.2 to tip at 0.8)
+
+The tree can be positioned (x, y) and rotated by angle (deg).
+
+## CRITICAL INSIGHT: Local Optimum Problem
+**Previous experiments found that the pre-optimized santa-2025.csv is at a very tight local optimum.**
+- Running bbox3, tree_packer_v21, sa_v1_parallel for hours found NO improvements
+- Backward propagation found NO improvements
+- "My Journey with Claude Code: 7,850 Rounds of Optimization, 0 Improvements" confirms this
+
+**Standard optimization approaches WILL NOT close the 1.76 point gap!**
+
+## Top Approaches from Public Kernels
+
+### 1. bbox3 C++ Optimizer (Primary Engine)
+**Source:** `../research/kernels/jazivxt_why-not/why-not.ipynb`
+
+Features:
+- Complex Number Vector Coordination for position calculations
+- Fluid Dynamics simulation for tree movement
+- Hinge Pivot mechanism for rotation optimization
+- Density Gradient Flow for compaction
+- Global Boundary Tension for edge optimization
+- OpenMP parallelization
+
+**Key Parameters:**
+- `-n <iterations>`: Number of optimization iterations (5000-20000)
+- `-r <rounds>`: Number of rounds (16-256)
+
+**Usage:**
+```bash
+g++ -O3 -march=native -std=c++17 -fopenmp -o bbox3 bbox3.cpp
+./bbox3 -n 10000 -r 64
+```
+
+### 2. tree_packer_v21 (Alternative Optimizer)
+**Source:** `../research/kernels/smartmanoj_santa-claude/santa-claude.ipynb`
+
+Features:
+- Swap moves between trees
+- Multi-angle restarts
+- Higher temperature simulated annealing
+- Squeeze, compaction, and local search phases
+- Uses long double precision for accuracy
+
+### 3. fix_direction Post-Processing
+**Source:** `../research/kernels/saspav_santa-submission/santa-submission.ipynb`
+
+Rotate entire configuration to minimize bounding box:
+```python
+def optimize_rotation(trees):
+    # Get convex hull of all tree vertices
+    all_points = []
+    for tree in trees:
+        all_points.extend(list(tree.polygon.exterior.coords))
+    hull_points = points_np[ConvexHull(points_np).vertices]
+    
+    # Find optimal rotation angle
+    res = minimize_scalar(
+        lambda a: calculate_bbox_side_at_angle(a, hull_points),
+        bounds=(0.001, 89.999), method='bounded'
+    )
+    return res.x, res.fun
+```
+
+### 4. Backward Propagation (bp.cpp)
+**Source:** `../research/kernels/smartmanoj_santa-claude/santa-claude.ipynb`
+
+Improves smaller N configurations by removing trees from larger ones:
+- Start from N=200, work down to N=2
+- For each config, try removing boundary-touching trees
+- If resulting (N-1) config is better than stored, save it
+
+## STRATEGIES TO BEAT TARGET (Priority Order)
+
+### 1. **[HIGHEST PRIORITY]** Lattice/Grid-Based Approach for Large N
+The egortrushin kernel uses a fundamentally different approach for large N:
+- Start with 2 trees in a specific configuration
+- Translate them in x and y directions to create a grid pattern
+- Use simulated annealing to optimize the base configuration
+- This can achieve tighter bounds than random optimization for large N (N >= 58)
+
+**Implementation:**
+```python
+# For N >= 58, try crystalline packing
+# Start with 2 base trees, translate to create grid
+# nt = [rows, cols] such that rows * cols >= N
+# Optimize the base configuration and translation vectors
+```
+
+### 2. **[HIGH PRIORITY]** Focus on Small N Values (1-10)
+These have the lowest efficiency and highest score contribution:
+- N=1: side=0.813, contributes 0.66 to score (highest single contribution!)
+- N=2: side=0.950, contributes 0.45 to score
+- Try exhaustive search for optimal rotation angles
+- The tree has 15 vertices - try all 360 degrees in 0.001 increments
+
+### 3. **[HIGH PRIORITY]** Per-N Specialization
+Different strategies for different N ranges:
+- N=1-10: Exhaustive angle search
+- N=11-50: Intensive SA with many restarts
+- N=51-100: Hybrid lattice + SA
+- N>100: Pure lattice-based approach
+
+### 4. **[MEDIUM PRIORITY]** Asymmetric Solutions
+Discussion "Why the winning solutions will be Asymmetric" (34 votes) suggests:
+- Symmetric solutions may be optimal for small N
+- Asymmetric solutions outperform for large N
+- Try breaking symmetry in lattice patterns
+
+### 5. **[MEDIUM PRIORITY]** Much Longer Optimization Runs
+Top solutions run for HOURS, not minutes:
+- `-n 100000` or more iterations
+- `-r 100` or more rounds
+- Different random seeds
+- Multiple generations with perturbation
+
+### 6. **[MEDIUM PRIORITY]** Different Starting Configurations
+Instead of optimizing the pre-optimized submission:
+- Generate new random configurations
+- Use lattice-based initial placement
+- Try different angle distributions (0°, 90°, 180°, 270° patterns)
+
+## Submission Format
+```csv
+id,x,y,deg
+001_0,s0.0,s0.0,s90.0
+002_0,s0.0,s0.0,s90.0
+002_1,s0.202736,s-0.511271,s90.0
+...
+```
+- id: `{n:03d}_{tree_index}` (e.g., 001_0, 002_0, 002_1)
+- x, y, deg: prefixed with 's' to preserve precision
+- Total rows: 20100 (1+2+3+...+200)
+
+## Validation Checklist
+1. No overlapping trees (use has_overlap function)
+2. All coordinates within [-100, 100]
+3. All 200 configurations present (20100 rows)
+4. Values prefixed with 's' in submission
+
+## Key Implementation Details
+
+### ChristmasTree Class
+```python
+class ChristmasTree:
+    def __init__(self, center_x='0', center_y='0', angle='0'):
+        self.center_x = Decimal(center_x)
+        self.center_y = Decimal(center_y)
+        self.angle = Decimal(angle)
+        
+        # 15-vertex polygon definition
+        initial_polygon = Polygon([
+            (0.0, 0.8),      # Tip
+            (0.125, 0.5),    # Right top tier
+            (0.0625, 0.5),
+            (0.2, 0.25),     # Right mid tier
+            (0.1, 0.25),
+            (0.35, 0.0),     # Right base
+            (0.075, 0.0),    # Right trunk
+            (0.075, -0.2),
+            (-0.075, -0.2),  # Left trunk
+            (-0.075, 0.0),
+            (-0.35, 0.0),    # Left base
+            (-0.1, 0.25),    # Left mid tier
+            (-0.2, 0.25),
+            (-0.0625, 0.5),  # Left top tier
+            (-0.125, 0.5),
+        ])
+        rotated = affinity.rotate(initial_polygon, float(self.angle), origin=(0, 0))
+        self.polygon = affinity.translate(rotated, xoff=float(self.center_x), yoff=float(self.center_y))
+```
+
+### Overlap Detection
+```python
+from shapely.strtree import STRtree
+
+def has_overlap(trees):
+    polygons = [t.polygon for t in trees]
+    tree_index = STRtree(polygons)
+    
+    for i, poly in enumerate(polygons):
+        indices = tree_index.query(poly)
+        for idx in indices:
+            if idx != i and poly.intersects(polygons[idx]) and not poly.touches(polygons[idx]):
+                return True
+    return False
+```
+
+### Scoring Function
+```python
+def get_total_score(submission_df):
+    total = 0
+    for n in range(1, 201):
+        trees = load_trees_for_n(submission_df, n)
+        xys = np.concatenate([np.asarray(t.polygon.exterior.xy).T for t in trees])
+        side = max(xys.max(axis=0) - xys.min(axis=0))
+        total += side**2 / n
+    return total
+```
+
+## External Datasets
+Top kernels use pre-optimized submissions as starting points:
+- "santa-2025-csv" - contains bbox3 binary and optimized CSV
+- "bucket-of-chump" - another optimized starting point
+- Download these to use as baseline
+
+## What NOT to Try
+- Simple ensemble (santa-2025.csv dominates all N values)
+- Short optimization runs (local optimum is too tight)
+- fix_direction alone (causes precision loss and overlaps)
+- More iterations on same starting point (won't escape local optimum)
+
+## Recommended Experiment Pipeline
+
+### Phase 1: Establish Baseline (~70.67)
+1. Copy pre-optimized santa-2025.csv
+2. Validate no overlaps
+3. Submit to verify baseline score
+
+### Phase 2: Try Novel Approaches
+1. **Lattice approach for large N (N >= 58)**
+   - Implement grid-based packing
+   - Optimize base configuration
+   
+2. **Exhaustive search for small N (N=1-10)**
+   - Try all angles in 0.001 degree increments
+   - Focus on N=1 (contributes 0.66 to score)
+
+3. **Per-N specialization**
+   - Identify worst-performing N values
+   - Apply targeted optimization
+
+### Phase 3: Combine Best Results
+1. For each N, keep whichever approach gives smallest bounding box
+2. Apply fix_direction to final combined result
+3. Validate thoroughly before submission
+
+## Key Insights from Discussions
+1. "Symmetric solutions that are apparently optimal" (42 votes) - symmetry works for some N
+2. "Why the winning solutions will be Asymmetric" (34 votes) - asymmetry wins for large N
+3. "My Journey with Claude Code: 7,850 Rounds of Optimization, 0 Improvements" - confirms local optimum problem
+4. Focus optimization effort on N values with worst efficiency
+5. Lattice-like patterns emerge in well-optimized configurations
+6. Trees tend to interlock with alternating orientations (0°, 90°, 180°, 270°)
+
+## Strategy to Beat Target
+1. **Don't optimize the pre-optimized submission** - it's at local optimum
+2. **Implement lattice-based approach** for N >= 58
+3. **Exhaustive search** for N=1-10
+4. **Combine best results** from different approaches
+5. **Focus on worst N values** - small improvements on bad N values help more
+6. **Validate thoroughly** before each submission
