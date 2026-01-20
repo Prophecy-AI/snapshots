@@ -1,0 +1,324 @@
+# Santa 2025 - Christmas Tree Packing Optimization
+
+## Problem Overview
+This is a 2D polygon packing optimization problem. Pack Christmas tree shapes (15-vertex polygons) into the smallest possible square bounding box for N=1 to 200 trees.
+
+**Scoring:** score = Σ(s_n² / n) for n=1 to 200, where s_n is the side length of the bounding square for n trees. **Lower is better.**
+
+**Target Score:** Beat 68.919154
+
+## Tree Geometry
+Each Christmas tree is a 15-vertex polygon:
+- Trunk: width 0.15, height 0.2
+- Base tier: width 0.7
+- Middle tier: width 0.4
+- Top tier: width 0.25
+- Tip at y=0.8, trunk bottom at y=-0.2
+- Total height: 1.0
+
+The tree can be positioned (x, y) and rotated by angle (deg).
+
+## CRITICAL INSIGHT FROM PREVIOUS EXPERIMENTS
+Previous runs achieved 70.676102 but could NOT improve further because:
+1. Pre-optimized submissions are at LOCAL OPTIMUM for local search methods
+2. Running SA/bbox3 optimizer on pre-optimized CSV = NO improvements
+3. Backward propagation on pre-optimized = NO improvements
+4. "More iterations" and "different parameters" DO NOT HELP
+
+**THE GAP TO TARGET IS 1.75 POINTS (2.54%) - REQUIRES FUNDAMENTALLY DIFFERENT APPROACH**
+
+## Top Approaches from Public Kernels
+
+### 1. bbox3 C++ Optimizer
+**Source:** `../research/kernels/jazivxt_why-not/why-not.ipynb`
+
+Core features:
+- Complex Number Vector Coordination
+- Fluid Dynamics simulation for tree movement
+- Hinge Pivot mechanism for rotation
+- Density Gradient Flow for compaction
+- Global Boundary Tension
+- OpenMP parallelization
+
+**Key Parameters:**
+- `-n <iterations>`: Number of iterations (5000-20000)
+- `-r <rounds>`: Number of rounds (16-256)
+
+```bash
+g++ -O3 -march=native -std=c++17 -fopenmp -o bbox3 bbox3.cpp
+./bbox3 -n 10000 -r 64
+```
+
+### 2. tree_packer_v21 (Alternative Optimizer)
+**Source:** `../research/kernels/smartmanoj_santa-claude/santa-claude.ipynb`
+
+Features:
+- Swap moves between trees
+- Multi-angle restarts
+- Higher temperature simulated annealing
+- Squeeze, compaction, and local search phases
+- Uses long double precision
+
+### 3. fix_direction Post-Processing (CRITICAL)
+**Source:** `../research/kernels/saspav_santa-submission/santa-submission.ipynb`
+
+Rotate entire configuration to minimize bounding box:
+```python
+from scipy.optimize import minimize_scalar
+from scipy.spatial import ConvexHull
+
+def optimize_rotation(trees):
+    all_points = []
+    for tree in trees:
+        all_points.extend(list(tree.polygon.exterior.coords))
+    points_np = np.array(all_points)
+    hull_points = points_np[ConvexHull(points_np).vertices]
+    
+    res = minimize_scalar(
+        lambda a: calculate_bbox_side_at_angle(a, hull_points),
+        bounds=(0.001, 89.999), method='bounded'
+    )
+    return res.x, res.fun
+```
+
+### 4. Backward Propagation (bp.cpp)
+**Source:** `../research/kernels/smartmanoj_santa-claude/santa-claude.ipynb`
+
+Improve smaller N by removing trees from larger N:
+- Start from N=200, work down to N=2
+- For each config, try removing boundary-touching trees
+- If resulting (N-1) config is better than stored, save it
+
+## APPROACHES THAT MUST BE TRIED (Priority Order)
+
+### 1. **[HIGHEST PRIORITY] Greedy Backtracking with Beam Search**
+Build solutions tree-by-tree from scratch instead of optimizing existing:
+- Use beam search to explore multiple paths
+- Parameters: BEAM=10, DEPTH=10, MAX_STATES=4000
+- This is FUNDAMENTALLY DIFFERENT from optimizing existing solutions
+
+```python
+def greedy_backtracking(n, beam_width=10):
+    # Start with empty configuration
+    states = [empty_config()]
+    
+    for tree_idx in range(n):
+        candidates = []
+        for state in states:
+            # Try multiple placements for next tree
+            for angle in [0, 45, 90, 135, 180, 225, 270, 315]:
+                for placement in find_valid_placements(state, angle):
+                    new_state = add_tree(state, placement)
+                    candidates.append((score(new_state), new_state))
+        
+        # Keep top beam_width candidates
+        candidates.sort(key=lambda x: x[0])
+        states = [c[1] for c in candidates[:beam_width]]
+    
+    return min(states, key=score)
+```
+
+### 2. **[HIGH PRIORITY] Random Initialization + Optimization**
+Generate completely new starting configurations:
+- Don't start from pre-optimized CSV
+- Use random tree placements with collision avoidance
+- Then apply bbox3/SA optimization to the random starting point
+
+```python
+def random_initialization(n):
+    trees = []
+    for i in range(n):
+        while True:
+            x = random.uniform(-5, 5)
+            y = random.uniform(-5, 5)
+            angle = random.uniform(0, 360)
+            tree = ChristmasTree(x, y, angle)
+            if not overlaps_any(tree, trees):
+                trees.append(tree)
+                break
+    return trees
+```
+
+### 3. **[HIGH PRIORITY] Lattice-Based Approach for Large N**
+For N >= 58, use grid-based placement:
+- Start with 2 base trees in specific configuration
+- Translate them in x and y directions to create grid
+- Parameters: nt = [rows, cols] such that rows * cols >= N
+- Optimize base configuration and translation vectors
+
+```python
+def lattice_packing(n):
+    # Find grid dimensions
+    rows = int(np.sqrt(n))
+    cols = (n + rows - 1) // rows
+    
+    # Base configuration: 2 trees that interlock well
+    base_tree1 = ChristmasTree(0, 0, 0)
+    base_tree2 = ChristmasTree(dx, dy, 180)  # Inverted
+    
+    # Translate to create grid
+    trees = []
+    for i in range(rows):
+        for j in range(cols):
+            if len(trees) < n:
+                trees.append(translate(base_tree1, i*tx, j*ty))
+            if len(trees) < n:
+                trees.append(translate(base_tree2, i*tx + ox, j*ty + oy))
+    
+    return trees[:n]
+```
+
+### 4. **[MEDIUM PRIORITY] Focus on Small N Values (1-10)**
+These have highest score contribution:
+- N=1: side=0.813, contributes 0.66 to score
+- N=2: side=0.950, contributes 0.45 to score
+- Try exhaustive search for optimal rotation angles
+- Try all 360 degrees in 0.001 increments
+
+### 5. **[MEDIUM PRIORITY] Per-N Optimization**
+Calculate score contribution for each N and focus on worst:
+```python
+for n in range(1, 201):
+    contribution = side[n]**2 / n
+    efficiency = n / side[n]**2  # trees per unit area
+    if efficiency < threshold:
+        # Re-optimize this N specifically
+        optimize_n(n, iterations=100000)
+```
+
+## Key Implementation Details
+
+### ChristmasTree Class
+```python
+from decimal import Decimal, getcontext
+from shapely import affinity
+from shapely.geometry import Polygon
+
+getcontext().prec = 30
+
+class ChristmasTree:
+    def __init__(self, center_x='0', center_y='0', angle='0'):
+        self.center_x = Decimal(str(center_x))
+        self.center_y = Decimal(str(center_y))
+        self.angle = Decimal(str(angle))
+        
+        # 15-vertex polygon
+        initial_polygon = Polygon([
+            (0.0, 0.8),      # Tip
+            (0.125, 0.5), (0.0625, 0.5),  # Right top tier
+            (0.2, 0.25), (0.1, 0.25),     # Right mid tier
+            (0.35, 0.0),                   # Right base
+            (0.075, 0.0), (0.075, -0.2),  # Right trunk
+            (-0.075, -0.2), (-0.075, 0.0), # Left trunk
+            (-0.35, 0.0),                  # Left base
+            (-0.1, 0.25), (-0.2, 0.25),   # Left mid tier
+            (-0.0625, 0.5), (-0.125, 0.5), # Left top tier
+        ])
+        rotated = affinity.rotate(initial_polygon, float(self.angle), origin=(0, 0))
+        self.polygon = affinity.translate(rotated, 
+            xoff=float(self.center_x), yoff=float(self.center_y))
+```
+
+### Overlap Detection
+```python
+from shapely.strtree import STRtree
+
+def has_overlap(trees):
+    polygons = [t.polygon for t in trees]
+    tree_index = STRtree(polygons)
+    
+    for i, poly in enumerate(polygons):
+        indices = tree_index.query(poly)
+        for idx in indices:
+            if idx != i and poly.intersects(polygons[idx]) and not poly.touches(polygons[idx]):
+                return True
+    return False
+```
+
+### Scoring Function
+```python
+def get_total_score(dict_of_side_length):
+    score = 0
+    for n, side in dict_of_side_length.items():
+        score += side**2 / int(n)
+    return score
+```
+
+## Submission Format
+```csv
+id,x,y,deg
+001_0,s0.0,s0.0,s90.0
+002_0,s0.0,s0.0,s90.0
+002_1,s0.202736,s-0.511271,s90.0
+...
+```
+- id: `{n:03d}_{tree_index}` (e.g., 001_0, 002_0, 002_1)
+- x, y, deg: prefixed with 's' to preserve precision
+- Total rows: 20100 (1+2+3+...+200)
+
+## Validation Checklist
+1. No overlapping trees (use has_overlap function)
+2. All coordinates within [-100, 100]
+3. All 200 configurations present (20100 rows)
+4. Values prefixed with 's' in submission
+
+## External Datasets
+Top kernels use pre-optimized submissions as starting points:
+- Download from Kaggle datasets: "santa-2025-csv", "bucket-of-chump"
+- Use as baseline, but remember they're at local optimum
+
+## Recommended Experiment Pipeline
+
+### Experiment 1: Baseline from Pre-optimized
+1. Download best available pre-optimized submission
+2. Run fix_direction on it
+3. Validate no overlaps
+4. Submit to establish baseline (~70.68)
+
+### Experiment 2: Extended Optimization
+1. Compile bbox3.cpp with OpenMP
+2. Run with higher iterations: `./bbox3 -n 20000 -r 256`
+3. Apply fix_direction post-processing
+4. Run backward propagation
+5. Submit (likely same score ~70.68)
+
+### Experiment 3: Greedy Backtracking (CRITICAL)
+1. Implement greedy_backtracking with beam search
+2. Build solutions from scratch for each N
+3. Compare with pre-optimized
+4. Keep better result for each N
+5. Submit
+
+### Experiment 4: Lattice-Based for Large N
+1. Implement lattice_packing for N >= 58
+2. Optimize base configuration
+3. Combine with greedy results for small N
+4. Submit
+
+### Experiment 5: Random Restart + Optimization
+1. Generate 100 random initial configurations
+2. Run bbox3 on each
+3. Keep best result for each N
+4. Ensemble with previous results
+5. Submit
+
+## Key Insights from Discussions
+1. Asymmetric solutions outperform symmetric for large N
+2. Trees tend to interlock with alternating orientations (0°, 90°, 180°, 270°)
+3. Lattice-like patterns emerge in well-optimized configurations
+4. Focus optimization on N values with worst efficiency
+5. The winning solutions use extensive compute time and multiple approaches
+
+## WHAT NOT TO DO
+- Don't just run more iterations on pre-optimized CSV (local optimum)
+- Don't expect backward propagation alone to close the gap
+- Don't rely solely on SA/local search methods
+- Don't skip validation (overlaps cause rejection)
+
+## Strategy to Beat Target (68.919154)
+1. **MUST use constructive approaches** (greedy backtracking, lattice)
+2. Generate new configurations from scratch
+3. Ensemble results from multiple fundamentally different methods
+4. Focus on worst-performing N values
+5. Fine-tune with micro-adjustments after construction
+6. Validate thoroughly before each submission
