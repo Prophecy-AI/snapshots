@@ -6,6 +6,7 @@
 #include <fstream>
 #include <sstream>
 #include <vector>
+#include <map>
 #include <cmath>
 #include <algorithm>
 #include <random>
@@ -168,7 +169,7 @@ vector<Tree> generateLatticePacking(int N, double ux, double uy, double vx, doub
     
     // Select N trees that don't overlap
     for (const auto& cand : candidates) {
-        if (trees.size() >= N) break;
+        if ((int)trees.size() >= N) break;
         
         // Check overlap with existing trees
         auto cand_verts = getTransformedVertices(cand);
@@ -360,7 +361,7 @@ int main(int argc, char* argv[]) {
             // Generate lattice packing
             auto trees = generateLatticePacking(N, ux, uy, vx, vy, base_angle, offset_x, offset_y);
             
-            if (trees.size() < N) continue;  // Couldn't place all trees
+            if ((int)trees.size() < N) continue;  // Couldn't place all trees
             
             // Center and optimize
             centerTrees(trees);
@@ -439,7 +440,7 @@ int main(int argc, char* argv[]) {
     
     for (int N = 1; N <= 200; N++) {
         const auto& trees = improved[N];
-        for (int i = 0; i < trees.size(); i++) {
+        for (size_t i = 0; i < trees.size(); i++) {
             out << setfill('0') << setw(3) << N << "_" << i << ",";
             out << "s" << trees[i].x << ",";
             out << "s" << trees[i].y << ",";
