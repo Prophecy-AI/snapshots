@@ -1,4 +1,3 @@
-%%writefile a.cpp
 // Tree Packer v18 - PARALLEL + AGGRESSIVE BACK PROPAGATION
 // + Free-area & Protrusion removal & reinsertion heuristic
 // + Edge-based slide compaction (outline-aware)
