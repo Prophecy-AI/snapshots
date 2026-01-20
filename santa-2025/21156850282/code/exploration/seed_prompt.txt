@@ -8,40 +8,54 @@ This is a 2D geometric packing optimization problem. The goal is to pack Christm
 **Best snapshot:** 70.659944 (gap: 1.74 points)
 
 ## Tree Geometry
-Each tree is a 15-vertex polygon with:
-- Tip at (0, 0.8)
-- Three tiers of branches at y=0.5, 0.25, 0
-- Trunk from y=0 to y=-0.2
+Each tree is a 15-vertex polygon with vertices:
+```python
+TX = [0, 0.125, 0.0625, 0.2, 0.1, 0.35, 0.075, 0.075, -0.075, -0.075, -0.35, -0.1, -0.2, -0.0625, -0.125]
+TY = [0.8, 0.5, 0.5, 0.25, 0.25, 0, 0, -0.2, -0.2, 0, 0, 0.25, 0.25, 0.5, 0.5]
+```
+- Tip at (0, 0.8), trunk bottom at (±0.075, -0.2)
 - Width: 0.7 at base, 0.4 mid, 0.25 top
 - Trees can be rotated (angle in degrees)
 
 ## CRITICAL INSIGHT: Pre-optimized Solutions are at Local Optimum
 
-**WARNING:** Previous experiments show that local search methods (SA, bbox3, backward propagation) CANNOT improve pre-optimized solutions. The best public CSVs are already at strong local optima.
+**WARNING:** Previous experiments show that local search methods CANNOT improve pre-optimized solutions. The best public CSVs are already at strong local optima.
 
-Approaches that FAILED to improve:
+Approaches that FAILED to improve (from 48 snapshots):
 - Simulated Annealing (SA) with various parameters
-- bbox3 C++ optimizer (even with 50000 iterations)
+- bbox3 C++ optimizer (even with 50000 iterations, 256 restarts)
 - Backward propagation
-- Corner extraction (minimal improvement)
+- Corner extraction (minimal improvement: 0.0006 points)
 - Grid-based initialization (converges to worse optimum)
+- tree_packer_v21 with swap moves, multi-start
 
 ## Recommended Approaches (Priority Order)
 
 ### 1. GREEDY BACKTRACKING WITH BEAM SEARCH (HIGHEST PRIORITY)
 Build solutions from scratch using constructive methods:
-```
+```python
 BEAM_WIDTH = 10-20
-MAX_DEPTH = 10
 MAX_STATES = 4000
 
-For each N from 1 to 200:
-    1. Start with empty configuration
-    2. For each tree to place:
-        - Generate multiple candidate positions (beam search)
-        - Score each partial configuration
-        - Keep top BEAM_WIDTH configurations
-    3. Select best final configuration
+def greedy_backtracking(N, beam_width=15):
+    """Build N-tree configuration from scratch using beam search"""
+    states = [EmptyConfig()]
+    
+    for tree_idx in range(N):
+        candidates = []
+        for state in states:
+            # Try multiple positions and angles
+            for angle in [0, 45, 90, 135, 180, 225, 270, 315]:
+                for pos in generate_candidate_positions(state, angle):
+                    new_state = state.add_tree(pos, angle)
+                    if not new_state.has_overlap():
+                        candidates.append(new_state)
+        
+        # Keep top beam_width by bounding box side
+        candidates.sort(key=lambda s: s.bounding_box_side())
+        states = candidates[:beam_width]
+    
+    return min(states, key=lambda s: s.score())
 ```
 
 This is FUNDAMENTALLY DIFFERENT from optimizing existing solutions.
@@ -51,35 +65,88 @@ The best solutions show crystalline/lattice patterns:
 - Trees alternate between "up" (0-90°, 270-360°) and "down" (90-270°) orientations
 - Regular spacing patterns emerge for larger N
 - Try hexagonal, square, and triangular lattice arrangements
-- Optimize lattice parameters (spacing, rotation) per N
+
+```python
+def lattice_construction(N, lattice_type='hexagonal'):
+    """Build configuration using regular lattice pattern"""
+    # Generate lattice points
+    if lattice_type == 'hexagonal':
+        points = generate_hexagonal_lattice(N)
+    elif lattice_type == 'square':
+        points = generate_square_lattice(N)
+    
+    # Assign alternating orientations
+    trees = []
+    for i, (x, y) in enumerate(points):
+        angle = 0 if i % 2 == 0 else 180  # Alternating up/down
+        trees.append((x, y, angle))
+    
+    # Optimize lattice parameters (spacing, rotation)
+    best = optimize_lattice_params(trees)
+    return best
+```
 
 ### 3. RANDOM INITIALIZATION + OPTIMIZATION
 Instead of starting from pre-optimized CSV:
 ```python
-for trial in range(NUM_TRIALS):
-    # Generate random starting configuration
-    config = random_placement(N)
-    # Apply optimization
-    optimized = optimize(config)
-    # Keep best
+def multi_start_optimization(N, num_starts=100):
+    """Try multiple random starting points"""
+    best = None
+    best_score = float('inf')
+    
+    for _ in range(num_starts):
+        # Random initial placement
+        config = random_placement(N)
+        
+        # Apply squeeze + compaction + local search
+        config = squeeze(config)
+        config = compaction(config, iters=50)
+        config = local_search(config, max_iter=100)
+        
+        score = config.score()
+        if score < best_score:
+            best = config
+            best_score = score
+    
+    return best
 ```
 
 ### 4. CORNER EXTRACTION
 Extract smaller configurations from corners of larger ones:
-- For N=k, check if any corner of N=m (m>k) contains exactly k trees
-- This can find better local optima for specific N values
+```python
+def corner_extraction(target_N, source_configs):
+    """Find N-tree config from corner of larger config"""
+    best = None
+    best_score = float('inf')
+    
+    for source_N in range(target_N + 1, 201):
+        source = source_configs[source_N]
+        # Try each corner region
+        for corner in ['top-left', 'top-right', 'bottom-left', 'bottom-right']:
+            trees_in_corner = get_trees_in_corner(source, corner, target_N)
+            if len(trees_in_corner) == target_N:
+                score = calculate_score(trees_in_corner, target_N)
+                if score < best_score:
+                    best = trees_in_corner
+                    best_score = score
+    
+    return best
+```
 
 ### 5. ENSEMBLE FROM MULTIPLE SOURCES
 Combine best N from different solution sources:
 ```python
-for N in range(1, 201):
-    best_score = inf
-    for source in sources:
-        score = get_score(source, N)
-        if score < best_score:
-            best_N = source[N]
-            best_score = score
-    final[N] = best_N
+def create_ensemble(sources):
+    """Take best N from each source"""
+    final = {}
+    for N in range(1, 201):
+        best_score = float('inf')
+        for source in sources:
+            score = get_score(source, N)
+            if score < best_score:
+                final[N] = source[N]
+                best_score = score
+    return final
 ```
 
 ## Key Kernels and Techniques
@@ -89,20 +156,30 @@ for N in range(1, 201):
 - Pre-optimized santa-2025.csv as baseline
 - Overlap repair by replacing invalid groups
 
-### From jazivxt/why-not:
-- bbox3.cpp with complex number vector coordination
+### From jazivxt/why-not (bbox3.cpp):
+- Complex number vector coordination
 - Fluid dynamics simulation for tree movement
 - Hinge pivot and density gradient flow
 - Global boundary tension optimization
+- Aggressive overlap repair with separation vectors
+
+### From smartmanoj/santa-claude (tree_packer_v21.cpp):
+- Swap moves between trees
+- Multi-angle restarts
+- Higher temperature SA
+- Squeeze: scale all trees toward center
+- Compaction: move each tree toward center
+- Local search: 8-directional moves + rotation
+- Backward propagation: remove trees from larger configs
 
 ### From inversion/getting-started:
 - Greedy placement with weighted angle generation
 - Trees placed at random angles, moved toward center until collision
-- Weighted angles favor diagonal orientations (sin(2*angle))
+- Weighted angles favor diagonal orientations: `abs(sin(2*angle))`
 
 ### From yongsukprasertsuk/bbox3-runner:
 - 3-phase optimization: short runs → medium runs → long runs
-- fix_direction rotation optimization
+- fix_direction rotation optimization (minimize bounding box by rotating entire config)
 - Overlap repair using donor CSV
 
 ## Implementation Strategy
@@ -117,71 +194,29 @@ python score_submission.py submission.csv
 Expected score: ~70.66
 
 ### Experiment 2: Greedy Backtracking Construction
-```python
-def greedy_backtracking(N, beam_width=10):
-    """Build N-tree configuration from scratch using beam search"""
-    states = [EmptyConfig()]
-    
-    for tree_idx in range(N):
-        candidates = []
-        for state in states:
-            # Try multiple positions and angles
-            for angle in np.linspace(0, 360, 36):
-                for pos in generate_candidate_positions(state, angle):
-                    new_state = state.add_tree(pos, angle)
-                    if not new_state.has_overlap():
-                        candidates.append(new_state)
-        
-        # Keep top beam_width by score
-        candidates.sort(key=lambda s: s.bounding_box_side())
-        states = candidates[:beam_width]
-    
-    return min(states, key=lambda s: s.score())
-```
+Implement beam search construction from scratch for each N.
+Focus on N values where current solution is weakest.
 
 ### Experiment 3: Lattice Construction
-```python
-def lattice_construction(N, lattice_type='hexagonal'):
-    """Build configuration using regular lattice pattern"""
-    # Generate lattice points
-    points = generate_lattice(N, lattice_type)
-    
-    # Assign alternating orientations
-    trees = []
-    for i, (x, y) in enumerate(points):
-        angle = 0 if i % 2 == 0 else 180  # Alternating up/down
-        trees.append((x, y, angle))
-    
-    # Optimize lattice parameters
-    best = optimize_lattice_params(trees)
-    return best
-```
+Try different lattice types (hexagonal, square, triangular).
+Optimize lattice parameters per N.
 
 ### Experiment 4: Multi-Start Random Optimization
-```python
-def multi_start_optimization(N, num_starts=100):
-    """Try multiple random starting points"""
-    best = None
-    best_score = float('inf')
-    
-    for _ in range(num_starts):
-        # Random initial placement
-        config = random_placement(N)
-        
-        # Local optimization
-        optimized = local_search(config)
-        
-        score = optimized.score()
-        if score < best_score:
-            best = optimized
-            best_score = score
-    
-    return best
-```
+Generate 100+ random starting configurations per N.
+Apply full optimization pipeline to each.
+
+### Experiment 5: Hybrid Approach
+1. Use lattice construction for initial placement
+2. Apply greedy backtracking refinement
+3. Finish with local search optimization
 
 ## Validation and Scoring
 
 ```python
+from shapely.geometry import Polygon
+from shapely import affinity
+from shapely.strtree import STRtree
+
 def score_submission(csv_path):
     """Calculate total score and check for overlaps"""
     df = pd.read_csv(csv_path)
@@ -196,6 +231,19 @@ def score_submission(csv_path):
             print(f"OVERLAP at N={n}")
     
     return total_score
+
+def has_overlap(trees):
+    """Check if any two trees overlap"""
+    polygons = [t.polygon for t in trees]
+    tree_index = STRtree(polygons)
+    
+    for i, poly in enumerate(polygons):
+        indices = tree_index.query(poly)
+        for idx in indices:
+            if idx != i:
+                if poly.intersects(polygons[idx]) and not poly.touches(polygons[idx]):
+                    return True
+    return False
 ```
 
 ## Key Parameters
@@ -210,15 +258,30 @@ def score_submission(csv_path):
 - Sample submission: /home/data/sample_submission.csv
 - Best snapshot: /home/nonroot/snapshots/santa-2025/21145965159/submission/submission.csv
 - Kernels: ../research/kernels/
-- bbox3 optimizer: Available in kernel datasets
+- bbox3 optimizer: Available in kernel datasets (saspav, jazivxt)
 
 ## DO NOT WASTE TIME ON:
 - Running more SA/bbox3 on pre-optimized solutions (they're at local optimum)
 - Small parameter tweaks to existing optimizers
 - Longer optimization runs on same starting point
+- Backward propagation on pre-optimized solutions
 
 ## FOCUS ON:
 - Constructive approaches (greedy backtracking, beam search)
 - Different starting configurations (random, lattice)
 - Per-N optimization with fresh starts
 - Ensemble from multiple construction methods
+- Hybrid approaches combining construction + optimization
+
+## Per-N Analysis
+The score contribution varies by N:
+- Small N (1-20): Each improvement has high impact (score = side²/N)
+- Large N (150-200): Many trees, harder to optimize but lower per-N impact
+- Focus on finding improvements across all N values
+
+## Discussion Insights
+Key discussions mention:
+- Asymmetric solutions may outperform symmetric ones
+- Lattice/crystalline patterns are common in good solutions
+- Trees alternate between "up" and "down" orientations
+- Efficient tessellations are key for larger N
