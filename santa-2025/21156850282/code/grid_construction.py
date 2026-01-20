@@ -1,27 +1,18 @@
 """
-Grid-based construction approach - based on zaburo kernel.
-Try different grid configurations to find better solutions.
+Translation-based Grid Construction for tree packing.
+Based on egortrushin kernel approach - place trees in a grid pattern
+with alternating angles.
 """
 import numpy as np
-import pandas as pd
-import math
-from decimal import Decimal, getcontext
 from shapely.geometry import Polygon
 from shapely import affinity
-
-getcontext().prec = 25
-scale_factor = Decimal('1e15')
+import pandas as pd
+import math
+import itertools
 
 TX = np.array([0, 0.125, 0.0625, 0.2, 0.1, 0.35, 0.075, 0.075, -0.075, -0.075, -0.35, -0.1, -0.2, -0.0625, -0.125])
 TY = np.array([0.8, 0.5, 0.5, 0.25, 0.25, 0, 0, -0.2, -0.2, 0, 0, 0.25, 0.25, 0.5, 0.5])
 BASE_TREE = Polygon(zip(TX, TY))
-
-def parse_value(val):
-    if isinstance(val, str):
-        if val.startswith('s'):
-            return float(val[1:])
-        return float(val)
-    return float(val)
 
 def create_tree(x, y, deg):
     tree = affinity.rotate(BASE_TREE, deg, origin=(0, 0))
@@ -50,104 +41,157 @@ def check_any_overlap(trees, tolerance=1e-9):
                     return True
     return False
 
-def grid_construction(n, x_spacing=0.7, y_spacing=1.0, angle_offset=0):
-    """
-    Construct N trees in a grid pattern with alternating orientations.
-    """
-    trees = []
-    positions = []
-    
-    # Calculate grid dimensions
-    cols = int(math.ceil(math.sqrt(n * y_spacing / x_spacing)))
-    rows = int(math.ceil(n / cols))
-    
-    count = 0
-    for row in range(rows):
-        for col in range(cols):
-            if count >= n:
-                break
-            
-            # Alternating pattern
-            if row % 2 == 0:
-                angle = angle_offset
-                x = col * x_spacing
-            else:
-                angle = (angle_offset + 180) % 360
-                x = col * x_spacing + x_spacing / 2
-            
-            y = row * y_spacing
-            
-            tree = create_tree(x, y, angle)
-            trees.append(tree)
-            positions.append((x, y, angle))
-            count += 1
-        
-        if count >= n:
-            break
-    
-    return trees, positions
+def get_factors(n):
+    """Get all factor pairs (nx, ny) where nx * ny = n."""
+    factors = []
+    for i in range(1, int(math.sqrt(n)) + 1):
+        if n % i == 0:
+            factors.append((i, n // i))
+            if i != n // i:
+                factors.append((n // i, i))
+    return factors
 
-def find_best_grid(n, verbose=False):
-    """Try different grid configurations and return the best one."""
+def create_grid_config(nx, ny, dx, dy, angle1, angle2, offset_x=0, offset_y=0):
+    """Create a grid of nx*ny trees with alternating angles."""
+    configs = []
+    for i in range(nx):
+        for j in range(ny):
+            x = i * dx + offset_x
+            y = j * dy + offset_y
+            angle = angle1 if (i + j) % 2 == 0 else angle2
+            configs.append((x, y, angle))
+    return configs
+
+def try_grid_config(configs):
+    """Try a grid configuration and return score if valid."""
+    trees = [create_tree(x, y, deg) for x, y, deg in configs]
+    
+    if check_any_overlap(trees):
+        return None, float('inf')
+    
+    # Center the configuration
+    min_x = min(t.bounds[0] for t in trees)
+    min_y = min(t.bounds[1] for t in trees)
+    max_x = max(t.bounds[2] for t in trees)
+    max_y = max(t.bounds[3] for t in trees)
+    
+    cx = (min_x + max_x) / 2
+    cy = (min_y + max_y) / 2
+    
+    centered_configs = [(x - cx, y - cy, deg) for x, y, deg in configs]
+    
+    side = get_side(trees)
+    n = len(configs)
+    score = side**2 / n
+    
+    return centered_configs, score
+
+def optimize_grid_for_n(n, verbose=False):
+    """Find the best grid configuration for N trees."""
+    factors = get_factors(n)
+    
+    # Angle patterns to try
+    angle_patterns = [
+        (68, 248),   # Current baseline pattern
+        (45, 225),   # Diagonal
+        (0, 180),    # Vertical
+        (90, 270),   # Horizontal
+        (22.5, 202.5),
+        (67.5, 247.5),
+        (112.5, 292.5),
+    ]
+    
+    # Spacing values to try
+    spacings = [0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8]
+    
+    best_config = None
     best_score = float('inf')
-    best_positions = None
     
-    # Try different spacings and angles
-    for x_spacing in [0.65, 0.68, 0.7, 0.72, 0.75]:
-        for y_spacing in [0.9, 0.95, 1.0, 1.05, 1.1]:
-            for angle in [0, 45, 68, 90, 135, 180, 248]:
-                trees, positions = grid_construction(n, x_spacing, y_spacing, angle)
-                
-                if check_any_overlap(trees):
-                    continue
-                
-                side = get_side(trees)
-                score = side**2 / n
-                
-                if score < best_score:
-                    best_score = score
-                    best_positions = positions
-                    if verbose:
-                        print(f"  N={n}: x={x_spacing}, y={y_spacing}, angle={angle} -> score={score:.6f}")
+    for nx, ny in factors:
+        for dx in spacings:
+            for dy in spacings:
+                for angle1, angle2 in angle_patterns:
+                    configs = create_grid_config(nx, ny, dx, dy, angle1, angle2)
+                    result, score = try_grid_config(configs)
+                    
+                    if result is not None and score < best_score:
+                        best_config = result
+                        best_score = score
+                        if verbose:
+                            print(f"    New best: {nx}x{ny}, dx={dx}, dy={dy}, angles=({angle1},{angle2}), score={score:.6f}")
     
-    return best_score, best_positions
+    return best_config, best_score
 
-# Load current submission for comparison
-current_df = pd.read_csv('/home/submission/submission.csv')
+def parse_value(val):
+    if isinstance(val, str):
+        if val.startswith('s'):
+            return float(val[1:])
+        return float(val)
+    return float(val)
 
-print("Grid Construction Approach")
-print("=" * 70)
+def ensure_s_prefix(val):
+    if isinstance(val, str):
+        if val.startswith('s'):
+            return val
+        return f's{val}'
+    return f's{val}'
 
-improvements = []
-total_improvement = 0
-
-for n in range(1, 201):
-    # Get current score
-    prefix = f"{n:03d}_"
-    n_rows = current_df[current_df['id'].str.startswith(prefix)]
-    current_trees = []
-    for _, row in n_rows.iterrows():
-        x = parse_value(row['x'])
-        y = parse_value(row['y'])
-        deg = parse_value(row['deg'])
-        current_trees.append(create_tree(x, y, deg))
-    current_side = get_side(current_trees)
-    current_score = current_side**2 / n
+def main():
+    print("Grid Construction Optimization")
+    print("=" * 60)
     
-    # Try grid construction
-    grid_score, grid_positions = find_best_grid(n)
+    # Load baseline
+    baseline_df = pd.read_csv('/home/submission/submission.csv')
     
-    if grid_score < current_score - 0.0001:
-        improvement = current_score - grid_score
-        improvements.append((n, improvement, current_score, grid_score))
-        total_improvement += improvement
-        print(f"N={n}: IMPROVED! {current_score:.6f} -> {grid_score:.6f} (diff: {improvement:.6f})")
+    improvements = {}
+    total_improvement = 0
+    
+    # Focus on N values with nice factor decompositions
+    # and small N values (worst efficiency)
+    test_ns = list(range(2, 21)) + [25, 36, 49, 64, 72, 81, 100, 110, 121, 144, 156, 169, 196, 200]
+    test_ns = sorted(set(test_ns))
+    
+    for n in test_ns:
+        # Get baseline score
+        prefix = f"{n:03d}_"
+        n_rows = baseline_df[baseline_df['id'].str.startswith(prefix)]
+        baseline_trees = []
+        for _, row in n_rows.iterrows():
+            x = parse_value(row['x'])
+            y = parse_value(row['y'])
+            deg = parse_value(row['deg'])
+            baseline_trees.append(create_tree(x, y, deg))
+        baseline_score = get_side(baseline_trees)**2 / n
+        
+        # Try grid construction
+        grid_config, grid_score = optimize_grid_for_n(n, verbose=False)
+        
+        if grid_config is not None:
+            improvement = baseline_score - grid_score
+            
+            status = "✓ BETTER" if improvement > 0.0001 else "= same" if abs(improvement) < 0.0001 else "✗ worse"
+            print(f"N={n:3d}: baseline={baseline_score:.6f}, grid={grid_score:.6f}, diff={improvement:+.6f} {status}")
+            
+            if improvement > 0.0001:
+                improvements[n] = {
+                    'config': grid_config,
+                    'score': grid_score,
+                    'improvement': improvement
+                }
+                total_improvement += improvement
+        else:
+            print(f"N={n:3d}: baseline={baseline_score:.6f}, grid=NO VALID CONFIG")
+    
+    print(f"\n{'=' * 60}")
+    print(f"Total improvements found: {len(improvements)}")
+    print(f"Total improvement: {total_improvement:+.6f}")
+    
+    if improvements:
+        print("\nImproved N values:")
+        for n, data in sorted(improvements.items()):
+            print(f"  N={n}: improvement={data['improvement']:.6f}")
+    
+    return improvements
 
-print(f"\nTotal improvements: {len(improvements)}")
-print(f"Total improvement: {total_improvement:.6f}")
-
-if improvements:
-    print("\nTop 10 improvements:")
-    improvements.sort(key=lambda x: -x[1])
-    for n, diff, old, new in improvements[:10]:
-        print(f"  N={n}: {old:.6f} -> {new:.6f} (diff: {diff:.6f})")
+if __name__ == "__main__":
+    improvements = main()
