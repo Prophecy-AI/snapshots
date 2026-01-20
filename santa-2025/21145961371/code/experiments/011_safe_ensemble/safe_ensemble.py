@@ -70,41 +70,54 @@ def load_trees_for_n(df, n):
     subset = df[df['id'].str.startswith(prefix)]
     trees = []
     for _, row in subset.iterrows():
-        x = str(row['x']).lstrip('s')
-        y = str(row['y']).lstrip('s')
-        deg = str(row['deg']).lstrip('s')
-        trees.append(ChristmasTree(x, y, deg))
+        try:
+            x = str(row['x']).lstrip('s')
+            y = str(row['y']).lstrip('s')
+            deg = str(row['deg']).lstrip('s')
+            # Validate values
+            float(x)
+            float(y)
+            float(deg)
+            trees.append(ChristmasTree(x, y, deg))
+        except:
+            return []  # Return empty if any tree is invalid
     return trees
 
 def has_overlap_strict(trees):
     """Strict overlap detection matching Kaggle's implementation."""
     if len(trees) <= 1:
         return False
-    polygons = [t.polygon for t in trees]
-    tree_index = STRtree(polygons)
-    
-    for i, poly in enumerate(polygons):
-        indices = tree_index.query(poly)
-        for idx in indices:
-            if idx != i:
-                if poly.intersects(polygons[idx]) and not poly.touches(polygons[idx]):
-                    intersection = poly.intersection(polygons[idx])
-                    if intersection.area > 1e-12:
-                        return True
-    return False
+    try:
+        polygons = [t.polygon for t in trees]
+        tree_index = STRtree(polygons)
+        
+        for i, poly in enumerate(polygons):
+            indices = tree_index.query(poly)
+            for idx in indices:
+                if idx != i:
+                    if poly.intersects(polygons[idx]) and not poly.touches(polygons[idx]):
+                        intersection = poly.intersection(polygons[idx])
+                        if intersection.area > 1e-12:
+                            return True
+        return False
+    except:
+        return True  # Assume overlap if error
 
 def get_bounding_box_side(trees):
     """Calculate bounding box side length."""
     if not trees:
-        return 0
-    all_coords = []
-    for tree in trees:
-        coords = np.array(tree.polygon.exterior.coords)
-        all_coords.append(coords)
-    all_coords = np.vstack(all_coords)
-    x_range = all_coords[:, 0].max() - all_coords[:, 0].min()
-    y_range = all_coords[:, 1].max() - all_coords[:, 1].min()
-    return max(x_range, y_range)
+        return float('inf')
+    try:
+        all_coords = []
+        for tree in trees:
+            coords = np.array(tree.polygon.exterior.coords)
+            all_coords.append(coords)
+        all_coords = np.vstack(all_coords)
+        x_range = all_coords[:, 0].max() - all_coords[:, 0].min()
+        y_range = all_coords[:, 1].max() - all_coords[:, 1].min()
+        return max(x_range, y_range)
+    except:
+        return float('inf')
 
 def get_raw_config(trees):
     """Extract raw string values from trees."""
@@ -165,23 +178,29 @@ def main():
         
         # Check each N value
         for n in range(1, 201):
-            trees = load_trees_for_n(df, n)
-            if len(trees) != n:
+            try:
+                trees = load_trees_for_n(df, n)
+                if len(trees) != n:
+                    continue
+                
+                # Calculate score
+                side = get_bounding_box_side(trees)
+                if side == float('inf'):
+                    continue
+                    
+                score = (side ** 2) / n
+                
+                # Only consider if strictly better
+                if score < best_scores[n] - 1e-10:
+                    # Check for overlaps with strict detection
+                    if not has_overlap_strict(trees):
+                        improvement = best_scores[n] - score
+                        improvements.append((n, improvement, filepath))
+                        best_scores[n] = score
+                        best_configs[n] = get_raw_config(trees)
+                        print(f"  N={n}: Improved by {improvement:.6f} from {os.path.basename(filepath)}")
+            except Exception as e:
                 continue
-            
-            # Calculate score
-            side = get_bounding_box_side(trees)
-            score = (side ** 2) / n
-            
-            # Only consider if strictly better
-            if score < best_scores[n] - 1e-10:
-                # Check for overlaps with strict detection
-                if not has_overlap_strict(trees):
-                    improvement = best_scores[n] - score
-                    improvements.append((n, improvement, filepath))
-                    best_scores[n] = score
-                    best_configs[n] = get_raw_config(trees)
-                    print(f"  N={n}: Improved by {improvement:.6f} from {os.path.basename(filepath)}")
     
     print(f"\nProcessed {valid_files} valid CSV files")
     print(f"Total improvements found: {len(improvements)}")
@@ -201,11 +220,17 @@ def main():
     all_valid = True
     for n in range(1, 201):
         config = best_configs[n]
-        trees = [ChristmasTree(x, y, deg) for x, y, deg in config]
-        if has_overlap_strict(trees):
-            print(f"  ERROR: N={n} has overlaps!")
+        try:
+            trees = [ChristmasTree(x, y, deg) for x, y, deg in config]
+            if has_overlap_strict(trees):
+                print(f"  ERROR: N={n} has overlaps!")
+                all_valid = False
+                # Revert to baseline
+                best_configs[n] = list(baseline_configs[n])
+                best_scores[n] = baseline_scores[n]
+        except:
+            print(f"  ERROR: N={n} has invalid config!")
             all_valid = False
-            # Revert to baseline
             best_configs[n] = list(baseline_configs[n])
             best_scores[n] = baseline_scores[n]
     
