@@ -18,106 +18,106 @@ using namespace std;
 
 const double PI = 3.14159265358979323846;
 
-// Tree polygon vertices (centered at origin)
-const vector<pair<double, double>> TREE_VERTICES = {
-    {0.0, 0.5}, {-0.25, 0.0}, {-0.1, 0.0}, {-0.1, -0.5}, {0.1, -0.5}, {0.1, 0.0}, {0.25, 0.0}
+// CORRECT Tree polygon vertices (15 points) - Christmas tree with multiple tiers
+const int NV = 15;
+const double TX[NV] = {0, 0.125, 0.0625, 0.2, 0.1, 0.35, 0.075, 0.075, -0.075, -0.075, -0.35, -0.1, -0.2, -0.0625, -0.125};
+const double TY[NV] = {0.8, 0.5, 0.5, 0.25, 0.25, 0, 0, -0.2, -0.2, 0, 0, 0.25, 0.25, 0.5, 0.5};
+
+struct Point {
+    double x, y;
+};
+
+struct Poly {
+    Point p[NV];
+    double x0, x1, y0, y1;  // bounding box
+    
+    void bbox() {
+        x0 = y0 = 1e18;
+        x1 = y1 = -1e18;
+        for (int i = 0; i < NV; i++) {
+            x0 = min(x0, p[i].x);
+            x1 = max(x1, p[i].x);
+            y0 = min(y0, p[i].y);
+            y1 = max(y1, p[i].y);
+        }
+    }
 };
 
 struct Tree {
     double x, y, angle;
+    Poly poly;
 };
 
-// Rotate a point around origin
-pair<double, double> rotatePoint(double px, double py, double angle_deg) {
-    double angle_rad = angle_deg * PI / 180.0;
-    double cos_a = cos(angle_rad);
-    double sin_a = sin(angle_rad);
-    return {px * cos_a - py * sin_a, px * sin_a + py * cos_a};
+// Get polygon for a tree at position (cx, cy) with rotation deg
+Poly getPoly(double cx, double cy, double deg) {
+    Poly q;
+    double r = deg * PI / 180.0, c = cos(r), s = sin(r);
+    for (int i = 0; i < NV; i++) {
+        q.p[i].x = TX[i] * c - TY[i] * s + cx;
+        q.p[i].y = TX[i] * s + TY[i] * c + cy;
+    }
+    q.bbox();
+    return q;
 }
 
-// Get rotated and translated polygon vertices
-vector<pair<double, double>> getTransformedVertices(const Tree& tree) {
-    vector<pair<double, double>> result;
-    for (const auto& v : TREE_VERTICES) {
-        auto rotated = rotatePoint(v.first, v.second, tree.angle);
-        result.push_back({rotated.first + tree.x, rotated.second + tree.y});
+// Cross product
+double cross(double ax, double ay, double bx, double by) {
+    return ax * by - ay * bx;
+}
+
+// Check if point is inside polygon using ray casting
+bool contains(const Poly& poly, Point pt) {
+    int cnt = 0;
+    for (int i = 0; i < NV; i++) {
+        int j = (i + 1) % NV;
+        double y1 = poly.p[i].y, y2 = poly.p[j].y;
+        double x1 = poly.p[i].x, x2 = poly.p[j].x;
+        if ((y1 <= pt.y && pt.y < y2) || (y2 <= pt.y && pt.y < y1)) {
+            double x_int = x1 + (pt.y - y1) / (y2 - y1) * (x2 - x1);
+            if (pt.x < x_int) cnt++;
+        }
     }
-    return result;
+    return cnt % 2 == 1;
 }
 
 // Check if two line segments intersect
-bool segmentsIntersect(double x1, double y1, double x2, double y2,
-                       double x3, double y3, double x4, double y4) {
-    auto cross = [](double ax, double ay, double bx, double by) {
-        return ax * by - ay * bx;
-    };
-    
-    double d1 = cross(x4-x3, y4-y3, x1-x3, y1-y3);
-    double d2 = cross(x4-x3, y4-y3, x2-x3, y2-y3);
-    double d3 = cross(x2-x1, y2-y1, x3-x1, y3-y1);
-    double d4 = cross(x2-x1, y2-y1, x4-x1, y4-y1);
+bool segIntersect(Point a, Point b, Point c, Point d) {
+    double d1 = cross(d.x-c.x, d.y-c.y, a.x-c.x, a.y-c.y);
+    double d2 = cross(d.x-c.x, d.y-c.y, b.x-c.x, b.y-c.y);
+    double d3 = cross(b.x-a.x, b.y-a.y, c.x-a.x, c.y-a.y);
+    double d4 = cross(b.x-a.x, b.y-a.y, d.x-a.x, d.y-a.y);
     
     if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
         ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) {
         return true;
     }
-    
     return false;
 }
 
-// Point in polygon test
-bool pointInPolygon(double px, double py, const vector<pair<double, double>>& poly) {
-    int n = poly.size();
-    int count = 0;
-    for (int i = 0; i < n; i++) {
-        int j = (i + 1) % n;
-        double x1 = poly[i].first, y1 = poly[i].second;
-        double x2 = poly[j].first, y2 = poly[j].second;
-        
-        if ((y1 <= py && py < y2) || (y2 <= py && py < y1)) {
-            double x_intersect = x1 + (py - y1) / (y2 - y1) * (x2 - x1);
-            if (px < x_intersect) count++;
-        }
-    }
-    return count % 2 == 1;
-}
-
 // Check if two polygons overlap
-bool polygonsOverlap(const vector<pair<double, double>>& poly1,
-                     const vector<pair<double, double>>& poly2) {
+bool overlap(const Poly& a, const Poly& b) {
+    // Quick bounding box check
+    if (a.x1 < b.x0 || b.x1 < a.x0 || a.y1 < b.y0 || b.y1 < a.y0) return false;
+    
     // Check edge intersections
-    int n1 = poly1.size(), n2 = poly2.size();
-    for (int i = 0; i < n1; i++) {
-        int i_next = (i + 1) % n1;
-        for (int j = 0; j < n2; j++) {
-            int j_next = (j + 1) % n2;
-            if (segmentsIntersect(poly1[i].first, poly1[i].second,
-                                  poly1[i_next].first, poly1[i_next].second,
-                                  poly2[j].first, poly2[j].second,
-                                  poly2[j_next].first, poly2[j_next].second)) {
-                return true;
-            }
+    for (int i = 0; i < NV; i++) {
+        int i2 = (i + 1) % NV;
+        for (int j = 0; j < NV; j++) {
+            int j2 = (j + 1) % NV;
+            if (segIntersect(a.p[i], a.p[i2], b.p[j], b.p[j2])) return true;
         }
     }
     
     // Check if one polygon is inside the other
-    if (pointInPolygon(poly1[0].first, poly1[0].second, poly2)) return true;
-    if (pointInPolygon(poly2[0].first, poly2[0].second, poly1)) return true;
-    
-    return false;
+    return contains(a, b.p[0]) || contains(b, a.p[0]);
 }
 
 // Check if any trees overlap
 bool hasOverlap(const vector<Tree>& trees) {
     int n = trees.size();
-    vector<vector<pair<double, double>>> polys(n);
-    for (int i = 0; i < n; i++) {
-        polys[i] = getTransformedVertices(trees[i]);
-    }
-    
     for (int i = 0; i < n; i++) {
         for (int j = i + 1; j < n; j++) {
-            if (polygonsOverlap(polys[i], polys[j])) {
+            if (overlap(trees[i].poly, trees[j].poly)) {
                 return true;
             }
         }
@@ -127,17 +127,19 @@ bool hasOverlap(const vector<Tree>& trees) {
 
 // Calculate bounding box side length
 double calculateSide(const vector<Tree>& trees) {
-    double minX = 1e9, maxX = -1e9, minY = 1e9, maxY = -1e9;
+    double minX = 1e18, maxX = -1e18, minY = 1e18, maxY = -1e18;
     for (const auto& tree : trees) {
-        auto verts = getTransformedVertices(tree);
-        for (const auto& v : verts) {
-            minX = min(minX, v.first);
-            maxX = max(maxX, v.first);
-            minY = min(minY, v.second);
-            maxY = max(maxY, v.second);
-        }
+        minX = min(minX, tree.poly.x0);
+        maxX = max(maxX, tree.poly.x1);
+        minY = min(minY, tree.poly.y0);
+        maxY = max(maxY, tree.poly.y1);
     }
     return max(maxX - minX, maxY - minY);
+}
+
+// Update polygon for a tree
+void updatePoly(Tree& tree) {
+    tree.poly = getPoly(tree.x, tree.y, tree.angle);
 }
 
 // Generate lattice packing with given vectors u and v
@@ -147,7 +149,7 @@ vector<Tree> generateLatticePacking(int N, double ux, double uy, double vx, doub
     vector<Tree> trees;
     
     // Estimate grid size needed
-    int grid_size = (int)ceil(sqrt(N * 2.0)) + 2;
+    int grid_size = (int)ceil(sqrt(N * 2.0)) + 3;
     
     // Generate all lattice positions
     vector<Tree> candidates;
@@ -158,6 +160,7 @@ vector<Tree> generateLatticePacking(int N, double ux, double uy, double vx, doub
             t.y = i * uy + j * vy + offset_y;
             // Alternating angles (0 and 180 degrees apart)
             t.angle = base_angle + ((i + j) % 2 == 0 ? 0.0 : 180.0);
+            updatePoly(t);
             candidates.push_back(t);
         }
     }
@@ -172,11 +175,9 @@ vector<Tree> generateLatticePacking(int N, double ux, double uy, double vx, doub
         if ((int)trees.size() >= N) break;
         
         // Check overlap with existing trees
-        auto cand_verts = getTransformedVertices(cand);
         bool overlaps = false;
         for (const auto& existing : trees) {
-            auto existing_verts = getTransformedVertices(existing);
-            if (polygonsOverlap(cand_verts, existing_verts)) {
+            if (overlap(cand.poly, existing.poly)) {
                 overlaps = true;
                 break;
             }
@@ -194,15 +195,12 @@ vector<Tree> generateLatticePacking(int N, double ux, double uy, double vx, doub
 void centerTrees(vector<Tree>& trees) {
     if (trees.empty()) return;
     
-    double minX = 1e9, maxX = -1e9, minY = 1e9, maxY = -1e9;
+    double minX = 1e18, maxX = -1e18, minY = 1e18, maxY = -1e18;
     for (const auto& tree : trees) {
-        auto verts = getTransformedVertices(tree);
-        for (const auto& v : verts) {
-            minX = min(minX, v.first);
-            maxX = max(maxX, v.first);
-            minY = min(minY, v.second);
-            maxY = max(maxY, v.second);
-        }
+        minX = min(minX, tree.poly.x0);
+        maxX = max(maxX, tree.poly.x1);
+        minY = min(minY, tree.poly.y0);
+        maxY = max(maxY, tree.poly.y1);
     }
     
     double cx = (minX + maxX) / 2.0;
@@ -211,6 +209,7 @@ void centerTrees(vector<Tree>& trees) {
     for (auto& tree : trees) {
         tree.x -= cx;
         tree.y -= cy;
+        updatePoly(tree);
     }
 }
 
@@ -237,8 +236,18 @@ void localOptimize(vector<Tree>& trees, int iterations, mt19937& rng) {
         trees[idx].x += (dist01(rng) - 0.5) * scale;
         trees[idx].y += (dist01(rng) - 0.5) * scale;
         trees[idx].angle += (dist01(rng) - 0.5) * scale * 10;
+        updatePoly(trees[idx]);
         
-        if (hasOverlap(trees)) {
+        // Check for overlaps
+        bool has_overlap = false;
+        for (int j = 0; j < (int)trees.size(); j++) {
+            if (j != idx && overlap(trees[idx].poly, trees[j].poly)) {
+                has_overlap = true;
+                break;
+            }
+        }
+        
+        if (has_overlap) {
             trees[idx] = old_tree;
         } else {
             double new_side = calculateSide(trees);
@@ -282,7 +291,13 @@ map<int, vector<Tree>> readBaseline(const string& filename) {
         double y = stod(y_str.substr(1));
         double deg = stod(deg_str.substr(1));
         
-        solutions[N].push_back({x, y, deg});
+        Tree t;
+        t.x = x;
+        t.y = y;
+        t.angle = deg;
+        updatePoly(t);
+        
+        solutions[N].push_back(t);
     }
     
     return solutions;
@@ -394,6 +409,7 @@ int main(int argc, char* argv[]) {
             for (auto& t : trees) {
                 t.x += shift_x;
                 t.y += shift_y;
+                updatePoly(t);
             }
             
             centerTrees(trees);
