@@ -299,7 +299,7 @@ def save_submission(solutions, output_path):
 
 if __name__ == "__main__":
     # Load baseline
-    baseline_path = "/home/nonroot/snapshots/21337353543.csv"  # Valid baseline
+    baseline_path = "/home/nonroot/snapshots/santa-2025/21337353543/submission/submission.csv"  # Valid baseline
     print(f"Loading baseline from {baseline_path}")
     baseline_solutions = load_baseline(baseline_path)
     
