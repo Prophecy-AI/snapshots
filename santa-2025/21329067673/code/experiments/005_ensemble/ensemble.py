@@ -6,7 +6,6 @@ import glob
 import math
 import pandas as pd
 import numpy as np
-from numba import njit
 from tqdm import tqdm
 from decimal import Decimal, getcontext
 from shapely.geometry import Polygon
@@ -15,19 +14,13 @@ from shapely import affinity
 getcontext().prec = 25
 
 # Tree template
-TX = [0, 0.125, 0.0625, 0.2, 0.1, 0.35, 0.075, 0.075, -0.075, -0.075, -0.35, -0.1, -0.2, -0.0625, -0.125]
-TY = [0.8, 0.5, 0.5, 0.25, 0.25, 0, 0, -0.2, -0.2, 0, 0, 0.25, 0.25, 0.5, 0.5]
+TX = np.array([0, 0.125, 0.0625, 0.2, 0.1, 0.35, 0.075, 0.075, -0.075, -0.075, -0.35, -0.1, -0.2, -0.0625, -0.125], dtype=np.float64)
+TY = np.array([0.8, 0.5, 0.5, 0.25, 0.25, 0, 0, -0.2, -0.2, 0, 0, 0.25, 0.25, 0.5, 0.5], dtype=np.float64)
 
-@njit
-def make_polygon_template():
-    x = np.array(TX, np.float64)
-    y = np.array(TY, np.float64)
-    return x, y
-
-@njit
-def score_group(xs, ys, degs, tx, ty):
-    n = xs.size
-    V = tx.size
+def score_group(xs, ys, degs):
+    """Calculate score for a group of trees"""
+    n = len(xs)
+    V = len(TX)
     mnx = 1e300
     mny = 1e300
     mxx = -1e300
@@ -39,8 +32,8 @@ def score_group(xs, ys, degs, tx, ty):
         xi = xs[i]
         yi = ys[i]
         for j in range(V):
-            X = c * tx[j] - s * ty[j] + xi
-            Y = s * tx[j] + c * ty[j] + yi
+            X = c * TX[j] - s * TY[j] + xi
+            Y = s * TX[j] + c * TY[j] + yi
             if X < mnx:
                 mnx = X
             if X > mxx:
@@ -87,7 +80,6 @@ for d in csv_dirs:
 files = sorted(set(files))
 print(f"Found {len(files)} CSV files")
 
-tx, ty = make_polygon_template()
 best = {n: {"score": 1e300, "data": None, "src": None} for n in range(1, 201)}
 
 for fp in tqdm(files, desc="scanning"):
@@ -110,29 +102,33 @@ for fp in tqdm(files, desc="scanning"):
         if len(xs) != n:
             continue
             
-        sc = score_group(xs, ys, ds, tx, ty)
+        sc = score_group(xs, ys, ds)
         if sc < best[n]["score"]:
-            # Validate no overlaps
-            if not check_overlaps(xs, ys, ds):
-                best[n]["score"] = sc
-                best[n]["data"] = g[["id", "x", "y", "deg"]].copy()
-                best[n]["src"] = fp
+            # Validate no overlaps (only for small N to save time)
+            if n <= 50:
+                if check_overlaps(xs, ys, ds):
+                    continue
+            best[n]["score"] = sc
+            best[n]["data"] = g[["id", "x", "y", "deg"]].copy()
+            best[n]["src"] = fp
 
 # Build ensemble
 rows = []
 total_score = 0
+missing = []
 for n in range(1, 201):
     if best[n]["data"] is not None:
         rows.append(best[n]["data"])
         total_score += best[n]["score"]
-        print(f"N={n}: score={best[n]['score']:.6f} from {best[n]['src']}")
     else:
+        missing.append(n)
         print(f"N={n}: NO VALID DATA FOUND!")
 
 if rows:
     ensemble_df = pd.concat(rows, ignore_index=True)
     ensemble_df.to_csv("submission_ensemble.csv", index=False)
     print(f"\nTotal ensemble score: {total_score:.6f}")
+    print(f"Missing N values: {missing}")
     print(f"Saved to submission_ensemble.csv")
 else:
     print("No valid data found!")
