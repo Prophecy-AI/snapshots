@@ -554,7 +554,7 @@ int main(int argc, char** argv) {
     for (auto& gid : keys) {
         long long g=0;
         try { g = std::stoll(gid); } catch(...) { continue; }
-        if (g >= 0 && g <= 110) to_opt.push_back(gid);
+        if (g >= 0 && g <= 200) to_opt.push_back(gid);
     }
 
     cout << "Starting SA on " << to_opt.size() << "/" << keys.size()
