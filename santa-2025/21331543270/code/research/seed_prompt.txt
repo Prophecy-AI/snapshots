@@ -1,93 +1,124 @@
-# Santa 2025 - Christmas Tree Packing Challenge - Loop 7 Strategy
+# Santa 2025 - Christmas Tree Packing Challenge - Loop 8 Strategy
 
 ## Current Status
-- Best CV score: 70.615788 from exp_005 (ensemble)
-- Best LB score: 70.676102 (baseline only - all ensemble submissions FAILED)
+- Best CV score: 70.676102 from exp_000 (baseline)
+- Best LB score: 70.676102 (ONLY submission that passed Kaggle validation!)
 - Target: 68.888293 | Gap to target: 1.79 points (2.6%)
-- Submissions remaining: 93/100
+- Submissions used: 5/100 (93 remaining - ABUNDANT!)
 
-## ⚠️ CRITICAL ISSUE: ENSEMBLE APPROACH IS BROKEN ⚠️
+## ⚠️ CRITICAL PROBLEM IDENTIFIED
 
-**5 consecutive ensemble submissions have failed Kaggle validation with overlap errors:**
-- exp_001: "Overlapping trees in group 002"
-- exp_002: "Overlapping trees in group 003"
-- exp_004: "Overlapping trees in group 060"
-- exp_005: "Overlapping trees in group 126"
+**The ensemble approach is BROKEN:**
+- 4 consecutive ensemble submissions FAILED Kaggle validation (exp_001, exp_002, exp_004, exp_005)
+- All failed with "Overlapping trees in group XXX" errors
+- Local overlap detection CANNOT match Kaggle's validation (uses Decimal with scale_factor=1e18)
+- The baseline (70.676102) is the ONLY submission that passed Kaggle
 
-**Root cause:** Our local overlap detection doesn't match Kaggle's exactly. Even using Kaggle's exact code (from the metric notebook), we find overlaps in the BASELINE that Kaggle accepts. There's some numerical precision issue we can't resolve.
+**WRONG STRATEGY (what we've been doing):**
+- Trying to DETECT overlaps perfectly → IMPOSSIBLE due to floating-point precision differences
 
-**CONCLUSION:** The ensemble approach is a dead end. We cannot reliably validate submissions locally.
+**CORRECT STRATEGY (what we should do):**
+- REPAIR overlaps by replacing questionable N values with baseline configurations
+- The baseline is KNOWN to pass Kaggle, so any N from baseline is guaranteed valid
 
 ## Response to Evaluator
 
-The evaluator correctly identified that exp_005 needed to be submitted. It was submitted and FAILED with "Overlapping trees in group 126". The evaluator's suggestions about fix_direction and multi-phase bbox3 are valid, but we have a more fundamental problem: we cannot create valid ensemble submissions.
+The evaluator correctly identified that:
+1. We've been spinning on overlap detection for 4 experiments with no valid improvement
+2. The `repair_overlaps_in_place()` function from bbox3 runner kernel is the correct approach
+3. `fix_direction` rotation optimization hasn't been tried on baseline
+4. Multi-phase bbox3 with different (n, r) parameters hasn't been tried
 
-The evaluator's key insight is correct: "The gap to target (1.727 points) is still substantial, but we haven't exhausted the standard techniques yet." However, the standard ensemble technique is broken for us.
-
-## Strategy Pivot Required
-
-**STOP trying to fix the ensemble approach. It's a dead end.**
-
-The only submission that passes Kaggle validation is the baseline (70.676102). We need to:
-1. Accept that we can only submit configurations that are IDENTICAL to known-good sources
-2. Find better source configurations from snapshots/kernels
-3. OR implement a fundamentally different optimization approach
+**I AGREE with all these points.** The strategy must change from "detect overlaps" to "repair overlaps conservatively".
 
 ## Recommended Approaches (Priority Order)
 
-### 1. **[HIGHEST PRIORITY] Find Better Snapshot Sources**
-The baseline came from a snapshot. There may be better snapshots we haven't found.
+### 1. **[HIGHEST PRIORITY] Apply fix_direction to baseline**
+This is a QUICK WIN that could improve baseline by 0.01-0.05 points with ZERO risk of overlap issues.
 
+**Implementation:**
 ```python
-# Search ALL snapshots for the best per-N configurations
-# But ONLY use configurations that are IDENTICAL to their source
-# (no mixing configurations from different sources for the same N)
+# From bbox3 runner kernel - optimize rotation angle for each N
+from scipy.optimize import minimize_scalar
+from scipy.spatial import ConvexHull
 
-import os
-import glob
-
-snapshot_dir = '/home/nonroot/snapshots/santa-2025/'
-all_csvs = glob.glob(f'{snapshot_dir}/**/*.csv', recursive=True)
-
-# For each snapshot, calculate its total score
-# Find the snapshot with the best total score
-# Use that ENTIRE snapshot as our submission (no mixing)
+def optimize_rotation(trees, angle_max=89.999, epsilon=1e-7):
+    # Get all polygon points
+    all_points = []
+    for tree in trees:
+        all_points.extend(list(tree.polygon.exterior.coords))
+    points_np = np.array(all_points)
+    
+    # Use convex hull for efficiency
+    hull_points = points_np[ConvexHull(points_np).vertices]
+    
+    # Find optimal rotation angle
+    res = minimize_scalar(
+        lambda a: calculate_bbox_side_at_angle(a, hull_points),
+        bounds=(0.001, angle_max),
+        method="bounded",
+    )
+    return res.x, res.fun
 ```
 
-### 2. **[HIGH PRIORITY] Run bbox3 on Baseline to Generate New Configurations**
-Instead of mixing configurations, run bbox3 on the baseline to generate a NEW complete solution.
+**Expected outcome:** 0.01-0.05 point improvement, guaranteed valid (no overlap changes)
 
-```bash
-# Run bbox3 with aggressive parameters
-./bbox3 -i baseline.csv -o optimized.csv -n 100000 -r 100
+### 2. **[HIGH PRIORITY] Implement repair_overlaps_in_place strategy**
+For any ensemble/optimization that produces overlaps, replace those N values with baseline.
 
-# This generates a complete new solution that should be internally consistent
-# No mixing = no overlap issues from different sources
+**Implementation:**
+```python
+def repair_overlaps_in_place(submission_df, baseline_df):
+    """Replace any N with overlaps with baseline configuration."""
+    for n in range(1, 201):
+        if has_any_overlap(submission_df, n):
+            # Replace with baseline (KNOWN to pass Kaggle)
+            replace_n_with_baseline(submission_df, baseline_df, n)
+    return submission_df
 ```
 
-### 3. **[MEDIUM PRIORITY] Implement fix_direction Post-Processing**
-The bbox3 runner kernel shows fix_direction as a standard post-processing step:
-- Uses scipy.optimize.minimize_scalar to find optimal rotation angle
-- Applies rotation to minimize bounding box
-- Can provide 0.01-0.05 point improvements
+**Key insight:** This GUARANTEES validity because baseline passed Kaggle.
 
-### 4. **[LOWER PRIORITY] Research Fundamentally Different Approaches**
-If the above don't work, research:
-- Tessellation patterns for large N
-- Asymmetric solutions (discussion says winning solutions will be asymmetric)
-- Genetic algorithms with custom operators
+### 3. **[MEDIUM PRIORITY] Run multi-phase bbox3 with repair**
+The bbox3 runner kernel shows running with multiple parameter combinations:
+- Phase A: n=[1000,1200,1500,1800,2000], r=[30,60,90], timeout=2min
+- Phase B: top candidates, timeout=10min
+- Phase C: best few, timeout=20min
 
-## What NOT to Try
-- ❌ Ensemble approach (mixing configurations from different sources)
-- ❌ Any approach that requires local overlap validation
-- ❌ Micro-optimizations (gap is too large)
+After each run, apply repair_overlaps_in_place to guarantee validity.
+
+### 4. **[RESEARCH] Investigate asymmetric solutions**
+Discussion "Why the winning solutions will be Asymmetric" (39 votes) suggests asymmetric solutions can beat symmetric ones. This is a fundamentally different approach that could escape local optima.
+
+## ⛔ BLOCKED APPROACHES (DO NOT USE)
+
+- ❌ Ensemble submissions without repair strategy - FAILED 4 TIMES
+- ❌ Local overlap detection to validate submissions - DOESN'T MATCH KAGGLE
+- ❌ Any approach that produces overlaps and tries to "fix" detection - WRONG STRATEGY
+
+## Experiment Plan for exp_007
+
+**Goal:** Apply fix_direction to baseline and submit to get LB feedback
+
+**Steps:**
+1. Load baseline submission (70.676102)
+2. Implement fix_direction from bbox3 runner kernel
+3. Apply to all N values (1-200)
+4. Calculate new score
+5. Submit to Kaggle (we have 93 submissions - use them!)
+
+**Expected outcome:**
+- Score improvement: 0.01-0.05 points
+- Validity: GUARANTEED (no overlap changes, just rotation)
+- LB feedback: Confirms fix_direction works
 
 ## Validation Notes
-- ONLY submit configurations that are IDENTICAL to known-good sources
-- OR submit complete solutions generated by a single optimizer run
-- DO NOT mix configurations from different sources
+- DO NOT trust local overlap detection for ensemble submissions
+- ONLY trust baseline configurations (known to pass Kaggle)
+- Use repair strategy: if in doubt, use baseline for that N
+- Submit frequently - we have 93 submissions remaining!
 
-## Submission Strategy
+## SUBMISSION STRATEGY
 - Remaining submissions: 93
-- Submit after finding a better complete snapshot
-- OR after running bbox3 to generate a new complete solution
+- Submit after this experiment? **YES** - we need LB feedback on fix_direction
+- Even small improvements are progress toward the target
