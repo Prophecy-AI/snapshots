@@ -1,0 +1,193 @@
+"""
+Fine-tuning optimization - very small perturbations to escape local optima.
+
+The baseline is highly optimized. We need VERY small moves to find improvements.
+"""
+
+import numpy as np
+import pandas as pd
+import math
+import random
+from shapely import Polygon
+from shapely.affinity import rotate, translate
+from decimal import Decimal, getcontext
+import time
+import json
+
+getcontext().prec = 30
+
+# Tree polygon vertices
+TX = [0, 0.125, 0.0625, 0.2, 0.1, 0.35, 0.075, 0.075, -0.075, -0.075, -0.35, -0.1, -0.2, -0.0625, -0.125]
+TY = [0.8, 0.5, 0.5, 0.25, 0.25, 0, 0, -0.2, -0.2, 0, 0, 0.25, 0.25, 0.5, 0.5]
+TREE_COORDS = list(zip(TX, TY))
+
+def get_tree_polygon(x, y, angle):
+    poly = Polygon(TREE_COORDS)
+    poly = rotate(poly, angle, origin=(0, 0))
+    poly = translate(poly, x, y)
+    return poly
+
+def calculate_bounding_box(trees):
+    all_coords = []
+    for x, y, angle in trees:
+        poly = get_tree_polygon(x, y, angle)
+        all_coords.extend(poly.exterior.coords)
+    
+    xs = [c[0] for c in all_coords]
+    ys = [c[1] for c in all_coords]
+    
+    return max(max(xs) - min(xs), max(ys) - min(ys))
+
+def has_overlap_fast(trees, changed_idx):
+    n = len(trees)
+    if n <= 1:
+        return False
+    
+    changed_poly = get_tree_polygon(*trees[changed_idx])
+    
+    for i in range(n):
+        if i == changed_idx:
+            continue
+        other_poly = get_tree_polygon(*trees[i])
+        if changed_poly.intersects(other_poly) and not changed_poly.touches(other_poly):
+            intersection = changed_poly.intersection(other_poly)
+            if intersection.area > 1e-15:
+                return True
+    return False
+
+def fine_tune_sa(trees, n, max_iter=50000, verbose=False):
+    """
+    Fine-tuning SA with VERY small perturbations.
+    
+    Key: Use much smaller moves than standard SA.
+    """
+    current = [list(t) for t in trees]
+    current_side = calculate_bounding_box(current)
+    best = [list(t) for t in current]
+    best_side = current_side
+    
+    # Very conservative temperature schedule
+    T = 0.1  # Low starting temperature
+    T_min = 1e-10
+    cooling = 0.99995  # Very slow cooling
+    
+    # Very small perturbation sizes
+    max_dx = 0.01  # Max 0.01 units
+    max_dy = 0.01
+    max_da = 1.0   # Max 1 degree
+    
+    accepted = 0
+    improved = 0
+    
+    for iteration in range(max_iter):
+        idx = random.randint(0, n - 1)
+        x, y, angle = current[idx]
+        
+        # Very small perturbations
+        dx = random.uniform(-max_dx, max_dx)
+        dy = random.uniform(-max_dy, max_dy)
+        da = random.uniform(-max_da, max_da)
+        
+        new_trees = [list(t) for t in current]
+        new_trees[idx] = [x + dx, y + dy, angle + da]
+        
+        if not has_overlap_fast(new_trees, idx):
+            new_side = calculate_bounding_box(new_trees)
+            delta = new_side - current_side
+            
+            if delta < 0 or random.random() < math.exp(-delta / max(T, 1e-10)):
+                current = new_trees
+                current_side = new_side
+                accepted += 1
+                
+                if new_side < best_side:
+                    best_side = new_side
+                    best = [list(t) for t in new_trees]
+                    improved += 1
+                    if verbose:
+                        print(f"  Iter {iteration}: New best = {best_side:.8f} (improvement: {calculate_bounding_box(trees) - best_side:.10f})")
+        
+        T = max(T * cooling, T_min)
+        
+        if verbose and iteration % 10000 == 0:
+            print(f"  Iter {iteration}: T={T:.8f}, best={best_side:.8f}")
+    
+    return best, best_side, accepted, improved
+
+def load_baseline(csv_path):
+    df = pd.read_csv(csv_path)
+    
+    solutions = {}
+    for n in range(1, 201):
+        n_df = df[df['id'].str.startswith(f'{n:03d}_')]
+        trees = []
+        for _, row in n_df.iterrows():
+            x = float(str(row['x']).replace('s', ''))
+            y = float(str(row['y']).replace('s', ''))
+            angle = float(str(row['deg']).replace('s', ''))
+            trees.append([x, y, angle])
+        solutions[n] = trees
+    
+    return solutions
+
+def test_fine_tuning(baseline_solutions, test_ns=[10, 20, 30, 50], max_iter=50000):
+    """Test fine-tuning on selected N values."""
+    print("=" * 60)
+    print("TESTING FINE-TUNING SA")
+    print("=" * 60)
+    
+    results = {}
+    
+    for n in test_ns:
+        print(f"\nN={n}:")
+        trees = baseline_solutions[n]
+        baseline_side = calculate_bounding_box(trees)
+        baseline_score = (baseline_side ** 2) / n
+        
+        start_time = time.time()
+        improved_trees, improved_side, accepted, improved_count = fine_tune_sa(
+            trees, n, max_iter=max_iter, verbose=True
+        )
+        elapsed = time.time() - start_time
+        
+        improved_score = (improved_side ** 2) / n
+        improvement = baseline_score - improved_score
+        
+        results[n] = {
+            'baseline_side': baseline_side,
+            'baseline_score': baseline_score,
+            'improved_side': improved_side,
+            'improved_score': improved_score,
+            'improvement': improvement,
+            'accepted': accepted,
+            'improved_count': improved_count,
+            'time': elapsed
+        }
+        
+        print(f"  Baseline: side={baseline_side:.8f}, score={baseline_score:.8f}")
+        print(f"  Improved: side={improved_side:.8f}, score={improved_score:.8f}")
+        print(f"  Improvement: {improvement:.10f}")
+        print(f"  Accepted: {accepted}/{max_iter}, Improved: {improved_count}")
+        print(f"  Time: {elapsed:.2f}s")
+    
+    print("\n" + "=" * 60)
+    print("SUMMARY")
+    print("=" * 60)
+    total_improvement = sum(r['improvement'] for r in results.values())
+    print(f"Total improvement: {total_improvement:.10f}")
+    
+    return results
+
+if __name__ == "__main__":
+    baseline_path = "/home/nonroot/snapshots/santa-2025/21337353543/submission/submission.csv"
+    print(f"Loading baseline from {baseline_path}")
+    baseline_solutions = load_baseline(baseline_path)
+    
+    # Test fine-tuning
+    test_results = test_fine_tuning(baseline_solutions, test_ns=[10, 20, 30], max_iter=30000)
+    
+    # Save results
+    with open('/home/code/experiments/008_simulated_annealing/fine_tuning_results.json', 'w') as f:
+        json.dump(test_results, f, indent=2)
+    
+    print("\nResults saved to fine_tuning_results.json")
