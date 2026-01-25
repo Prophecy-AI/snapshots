@@ -49,17 +49,23 @@ g++ -O3 -march=native -fopenmp -std=c++17 bbox3.cpp -o bbox3
 # Example: ./bbox3 -n 10000 -r 128
 ```
 
-### 2. fix_direction Rotation Optimization
+### 2. tree_packer C++ Optimizers
+From jonathanchan/smartmanoj kernels:
+- tree_packer_v3.cpp: Corner tree targeting, population-based search, basin hopping
+- tree_packer_v18.cpp: Parallel + aggressive back propagation, free-area heuristic
+- tree_packer_v21.cpp: Swap moves, multi-angle restarts, higher temperature SA
+
+**Usage:**
+```bash
+g++ -fopenmp -O3 -march=native -std=c++17 -o tree_packer tree_packer_v18.cpp
+./tree_packer -i input.csv -o output.csv -n 150000 -r 32
+```
+
+### 3. fix_direction Rotation Optimization
 Optimizes the rotation angle of the entire configuration to minimize bounding box:
 - Uses scipy.optimize.minimize_scalar
 - Searches angles 0-90 degrees
 - Can reduce side length by finding optimal rotation
-
-### 3. Simulated Annealing with Fractional Translation
-Fine-tuning with micro-adjustments:
-- Step sizes: 0.001, 0.0005, 0.0002, 0.0001
-- Move operators: translation, rotation, swap
-- Temperature schedule: geometric cooling
 
 ### 4. Squeeze/Compaction
 - Scale all trees toward centroid
@@ -89,20 +95,39 @@ id,x,y,deg
 - Values must be prefixed with 's'
 - Coordinates constrained to -100 ≤ x, y ≤ 100
 - Use high-precision Decimal arithmetic (25+ digits)
+- scale_factor = 1e15 for Decimal precision
 
 ## Recommended Approaches (Priority Order)
 
-### 1. **[HIGHEST PRIORITY]** Ensemble from Multiple Sources
-- Collect submissions from all available snapshots
-- For each N, keep the configuration with smallest side length
-- Run bbox3 optimization on the ensemble result
-- Previous ensemble found 87 improvements totaling 0.006 points
+### 1. **[HIGHEST PRIORITY]** Ensemble from ALL Available Sources
+The jonathanchan kernel approach:
+1. Collect submissions from ALL available sources:
+   - `/home/nonroot/snapshots/santa-2025/*/submission/*.csv`
+   - `/home/nonroot/snapshots/santa-2025/*/code/submission_candidates/*.csv`
+   - All experiment outputs
+2. For each N (1-200), keep the configuration with smallest side length
+3. Override N=1 with fixed 45° rotation (theoretical minimum)
+4. Run tree_packer optimization on ensemble result with LONG runs:
+   ```bash
+   ./tree_packer -i ensemble.csv -o output.csv -n 150000 -r 32
+   ```
 
-### 2. **[HIGH PRIORITY]** Long Optimization Runs
+**Sources to ensemble from (jonathanchan list):**
+- bucket-of-chump
+- why-not
+- santa25-improved-sa-with-translations
+- santa-submission
+- santa25-simulated-annealing-with-translations
+- telegram-public-shared-solution
+- santa-claude
+- All snapshot submissions
+
+### 2. **[HIGH PRIORITY]** Very Long Optimization Runs
 Top solutions run for HOURS, not minutes:
-- `-n 20000` iterations or more
-- `-r 100` restarts or more
+- `-n 150000` iterations (not 1000)
+- `-r 32` or more restarts
 - Multiple generations with perturbation to escape local optima
+- Use OMP_NUM_THREADS=32 for parallelization
 
 ### 3. **[HIGH PRIORITY]** Lattice/Grid-Based Approach for Large N
 For N >= 58, use crystalline packing:
@@ -123,8 +148,8 @@ for n in range(200, 1, -1):
 
 ### 5. **[MEDIUM PRIORITY]** Focus on Small N Values (1-10)
 - These have lowest efficiency and highest score contribution
-- Try exhaustive search for optimal rotation angles
-- N=1 should be at 45° rotation (theoretical minimum)
+- N=1 MUST be at 45° rotation (theoretical minimum: side=0.813)
+- Try exhaustive search for optimal rotation angles for N=2-10
 
 ### 6. **[NEW - NOT TRIED]** Guided Local Search (GLS)
 - Penalize features of local optima to escape them
@@ -148,12 +173,47 @@ for n in range(200, 1, -1):
 - Getting Started: `../research/kernels/inversion_santa-2025-getting-started/`
 - bbox3 Runner: `../research/kernels/yongsukprasertsuk_santa-2025-best-keeping-bbox3-runner/`
 - Advanced bbox3: `../research/kernels/jazivxt_why-not/` (HAS ADVANCED FEATURES)
-- SA + Fractional Translation: `../research/kernels/smartmanoj_santa-claude/`
+- SA + Fractional Translation: `../research/kernels/jonathanchan_santa25-ensemble-sa-fractional-translation/`
+- Tree Packer: `../research/kernels/smartmanoj_santa-claude/`
 
 ## Pre-optimized Solutions Available
 - Best snapshots in `/home/nonroot/snapshots/santa-2025/`
+- Best submission: `/home/nonroot/snapshots/santa-2025/21322576451/submission/submission.csv`
 - Look for submission.csv files with scores ~70.62
 - Use as starting point for further optimization
+
+## Scoring Function (Python)
+```python
+from numba import njit
+import math
+import numpy as np
+
+@njit
+def make_polygon_template():
+    tw=0.15; th=0.2; bw=0.7; mw=0.4; ow=0.25
+    tip=0.8; t1=0.5; t2=0.25; base=0.0; tbot=-th
+    x=np.array([0,ow/2,ow/4,mw/2,mw/4,bw/2,tw/2,tw/2,-tw/2,-tw/2,-bw/2,-mw/4,-mw/2,-ow/4,-ow/2],np.float64)
+    y=np.array([tip,t1,t1,t2,t2,base,base,tbot,tbot,base,base,t2,t2,t1,t1],np.float64)
+    return x,y
+
+@njit
+def score_group(xs,ys,degs,tx,ty):
+    n=xs.size; V=tx.size
+    mnx=1e300; mny=1e300; mxx=-1e300; mxy=-1e300
+    for i in range(n):
+        r=degs[i]*math.pi/180.0
+        c=math.cos(r); s=math.sin(r)
+        xi=xs[i]; yi=ys[i]
+        for j in range(V):
+            X=c*tx[j]-s*ty[j]+xi
+            Y=s*tx[j]+c*ty[j]+yi
+            if X<mnx: mnx=X
+            if X>mxx: mxx=X
+            if Y<mny: mny=Y
+            if Y>mxy: mxy=Y
+    side=max(mxx-mnx,mxy-mny)
+    return side*side/n
+```
 
 ## Validation Checklist
 1. ✅ Check for overlaps with buffer=0.001
@@ -169,14 +229,15 @@ for n in range(200, 1, -1):
 4. **1.23% reduction in all side lengths needed** - This is the uniform improvement target
 5. **Advanced bbox3 has untried features** - Global tension, density gradient, hinge pivot
 6. **Academic techniques not tried** - GLS, L-BFGS, VNS, Tabu Search, Partitioning
+7. **jonathanchan kernel achieves sub-68** - Uses ensemble + very long SA runs (150000 iterations)
 
 ## CRITICAL PATH TO TARGET
 The gap (1.73 points) requires ~1.23% reduction in ALL side lengths uniformly.
 This is NOT achievable by fixing individual N values - it requires GLOBAL improvement.
 
 **Approaches that could achieve this:**
-1. Advanced bbox3 with global tension features + LONG runs (hours)
-2. Ensemble from ALL available sources + optimization
+1. Ensemble from ALL available sources + VERY LONG optimization runs (hours)
+2. Advanced bbox3 with global tension features + LONG runs (hours)
 3. Lattice-based approach for large N values
 4. Guided Local Search to escape current local optimum
 5. Variable Neighborhood Search for systematic exploration
