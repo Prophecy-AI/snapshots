@@ -1,62 +1,98 @@
-# Christmas Tree Packing Optimization - Loop 6 Strategy
+# Christmas Tree Packing - Loop 6 Strategy
 
 ## Current Status
-- Best CV score: 70.615744 from exp_004 (ensemble)
+- Best CV score: 70.615106 from exp_005 (strict_ensemble)
 - Best LB score: 70.647327 from exp_002/exp_003 (valid baseline)
-- Target: 68.887226 | Gap to target: 1.76 points (2.5%)
-- Submissions used: 5/100 (95 remaining)
+- Target: 68.887226 | Gap to target: 1.76 points (2.6%)
+- Submissions remaining: 91/100
 
-## CRITICAL ISSUE: OVERLAP VALIDATION MISMATCH
+## CRITICAL BUG IDENTIFIED - MUST FIX FIRST
 
-**exp_004 (CV=70.615744) FAILED on Kaggle with "Overlapping trees in group 002"**
+**exp_004 and exp_005 both failed with "Overlapping trees in group 002"**
 
-Analysis shows:
-- N=2 solution has intersection area of 7e-13 (tiny but non-zero)
-- Our local validation threshold (1e-10) is too lenient
-- Kaggle uses stricter floating-point validation
+Root cause discovered in exploration/evolver_loop6_analysis.ipynb:
+- The ensemble code was TRUNCATING coordinate precision
+- Valid baseline: `s0.1540970696213643` (full precision)
+- Our submission: `s0.154097069621` (truncated)
+- Difference: ~1e-13 but causes overlaps with area ~1e-24
 
-**SOLUTION: Use stricter overlap validation**
-```python
-# STRICT overlap check - use 1e-15 threshold
-def check_overlaps_strict(xs, ys, degs):
-    polys = [get_tree_polygon(xs[i], ys[i], degs[i]) for i in range(len(xs))]
-    for i in range(len(polys)):
-        for j in range(i+1, len(polys)):
-            if polys[i].intersects(polys[j]) and not polys[i].touches(polys[j]):
-                inter = polys[i].intersection(polys[j])
-                if inter.area > 1e-15:  # STRICT threshold
-                    return True, f"Trees {i} and {j} overlap (area={inter.area})"
-    return False, "OK"
-```
+**FIX REQUIRED:** Preserve ORIGINAL string values from source CSVs exactly.
+Do NOT parse floats and re-format them. Copy the exact string values.
 
 ## Response to Evaluator
 
-The evaluator correctly identified:
-1. ✅ Ensemble approach is correct (0.032 improvement validates this)
-2. ✅ Limited by source diversity (only 3 snapshots contributed)
-3. ✅ Need fractional translation post-processing
-4. ✅ Need more diverse solution sources
+The evaluator correctly identified that:
+1. exp_005 needs to be submitted to verify strict overlap validation works
+2. Fractional translation should be implemented as post-processing
+3. More diverse solution sources are needed
 
-**Key insight I'm adding:** The overlap validation mismatch is the IMMEDIATE blocker. We can't submit improved ensembles until we fix the validation.
+However, the evaluator missed the ROOT CAUSE of the overlap failures:
+- It's not about the overlap threshold (1e-15 vs 1e-10)
+- It's about COORDINATE PRECISION being lost during ensemble
+- The fix is to preserve original string values, not use stricter thresholds
 
-## Recommended Approaches (Priority Order)
+## Experiment 006: Fixed Ensemble with Preserved Precision
 
-### 1. **[HIGHEST PRIORITY] Fix Overlap Validation + Resubmit Ensemble**
+### STEP 1: Create fixed ensemble that preserves exact coordinates
 
-Create experiment: `experiments/005_strict_ensemble/`
+```python
+# CRITICAL: Preserve original string values exactly
+# DO NOT do: x_str = f's{float_value}'  # This truncates!
+# DO: x_str = original_df['x'].values[i]  # Preserve exact string
 
-Steps:
-1. Use STRICT overlap threshold (1e-15 instead of 1e-10)
-2. Re-scan all 500+ CSV files from snapshots
-3. For each N, find best solution that passes STRICT validation
-4. If no valid improvement exists, use baseline solution for that N
-5. Validate entire submission before saving
+def load_submission_preserve_strings(path):
+    """Load CSV and keep original string values."""
+    df = pd.read_csv(path, dtype=str)  # Load as strings!
+    df['x_float'] = df['x'].apply(parse_s)  # For scoring only
+    df['y_float'] = df['y'].apply(parse_s)
+    df['deg_float'] = df['deg'].apply(parse_s)
+    df['n'] = df['id'].apply(lambda x: int(x.split('_')[0]))
+    return df
 
-Expected outcome: Valid ensemble with score ~70.62-70.64
+# When building ensemble, copy ORIGINAL strings:
+best_per_n[n] = {
+    'score': score,
+    'x_strs': source_df['x'].values.tolist(),  # Original strings!
+    'y_strs': source_df['y'].values.tolist(),
+    'deg_strs': source_df['deg'].values.tolist(),
+}
+```
 
-### 2. **[HIGH PRIORITY] Implement Fractional Translation**
+### STEP 2: Use ONLY the valid baseline (21328309254) as fallback
 
-After creating valid ensemble, apply fractional translation:
+The valid baseline from snapshot 21328309254 has PASSED Kaggle validation.
+For any N where we can't find a strictly better valid solution, use this baseline.
+
+### STEP 3: Validate with ZERO tolerance
+
+```python
+def check_overlaps_zero_tolerance(polygons):
+    """Check for ANY overlap, no matter how small."""
+    for i in range(len(polygons)):
+        for j in range(i+1, len(polygons)):
+            if polygons[i].intersects(polygons[j]):
+                if not polygons[i].touches(polygons[j]):
+                    return True, f"Trees {i},{j} overlap"
+    return False, None
+```
+
+## ⛔ BLOCKED APPROACHES (DO NOT USE)
+
+- Running bbox3/sa_fast with "more iterations" - already at local optimum
+- Changing overlap threshold - the issue is precision, not threshold
+- Ensemble variations without fixing the precision bug
+
+## Expected Outcome
+
+After fixing the precision bug:
+- exp_006 should pass Kaggle validation
+- Score should be ~70.615 (same as exp_005 CV)
+- This establishes a valid ensemble baseline
+
+## After exp_006 Succeeds: Fractional Translation
+
+Once we have a valid ensemble, implement fractional translation:
+
 ```python
 frac_steps = [0.001, 0.0005, 0.0002, 0.0001, 0.00005, 0.00002, 0.00001]
 directions = [(0,1), (0,-1), (1,0), (-1,0), (1,1), (1,-1), (-1,1), (-1,-1)]
@@ -69,59 +105,19 @@ for n in range(1, 201):
                 # Keep if: no overlap AND score improves
 ```
 
-Expected improvement: 0.01-0.1 points
+Expected improvement: 0.01-0.1 points from fractional translation.
 
-### 3. **[MEDIUM PRIORITY] Generate New Diverse Solutions**
+## Longer-term Strategy
 
-The jonathanchan kernel uses 19+ sources. We only have ~3 contributing sources.
+Gap to target is 1.76 points. Ensemble + fractional translation might give ~0.1 points.
+To close the remaining ~1.66 point gap, we need:
 
-Options:
-a) Run bbox3/sa_fast with DIFFERENT random seeds to generate diverse solutions
-b) Implement genetic algorithm to evolve new solutions
-c) Try different optimization algorithms (constraint programming, branch-and-bound for small N)
-
-### 4. **[LOWER PRIORITY] Per-N Specialization**
-
-Different algorithms for different N ranges:
-- N=1-10: Exhaustive rotation search (test every 0.1° rotation)
-- N=11-50: Branch-and-bound or custom constructive heuristic
-- N=51-100: SA with custom move operators
-- N=100+: Tessellation-based with local refinement
-
-## What NOT to Try
-
-1. ❌ Submitting without strict overlap validation (will fail on Kaggle)
-2. ❌ Running more bbox3/sa_fast iterations on same solutions (already at local optimum)
-3. ❌ Ignoring the overlap validation issue
+1. **More diverse solution sources** - The jonathanchan kernel uses 19+ sources
+2. **Novel algorithms** - Constructive approaches like zaburo kernel's grid-based method
+3. **Per-N specialization** - Different algorithms for different N ranges
 
 ## Validation Notes
 
-**MANDATORY before ANY submission:**
-```python
-# Validate EVERY N value with strict threshold
-for n in range(1, 201):
-    has_overlap, msg = check_overlaps_strict(xs, ys, ds)
-    if has_overlap:
-        raise ValueError(f"N={n}: {msg}")
-```
-
-## Submission Strategy
-
-- We have 95 submissions remaining - ABUNDANT!
-- Submit after EVERY experiment that produces a valid submission
-- LB feedback is FREE information - use it!
-- Even if score doesn't improve, we learn what works/doesn't work
-
-## Key Files
-
-- Valid baseline: `/home/nonroot/snapshots/santa-2025/21328309254/submission/submission.csv` (score 70.647327, passed Kaggle)
-- Snapshot CSVs: 3437 files in `/home/nonroot/snapshots/santa-2025/`
-- jonathanchan kernel: `/home/code/research/kernels/jonathanchan_santa25-ensemble-sa-fractional-translation/`
-
-## Summary
-
-The ensemble approach is CORRECT but we have two blockers:
-1. **Overlap validation** - our threshold is too lenient, causing Kaggle rejections
-2. **Source diversity** - only 3 snapshots contribute valid improvements
-
-Fix #1 first (strict validation), then work on #2 (more sources + fractional translation).
+- CV = LB perfectly for this problem (confirmed from exp_002/exp_003)
+- Local validation must use ZERO tolerance for overlaps
+- Coordinates must preserve FULL precision from source files
