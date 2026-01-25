@@ -27,12 +27,14 @@ TY = [0.8, 0.5, 0.5, 0.25, 0.25, 0, 0, -0.2, -0.2, 0, 0, 0.25, 0.25, 0.5, 0.5]
 1. **Asymmetric vs Symmetric**: Discussion "Why the winning solutions will be Asymmetric" (38 votes) suggests asymmetric packings outperform symmetric ones for most N values
 2. **Symmetric solutions**: Discussion "Symmetric solutions that are apparently optimal" (43 votes) shows some N values have provably optimal symmetric solutions
 3. **Lattice/Tessellation approach**: For large N (N>=58), grid-based placement using 2 base trees translated in x/y directions achieves tighter bounds
+4. **Per-N optimization**: Different N values may require fundamentally different approaches
 
 ### From Kernels
 1. **bbox3 optimizer**: C++ simulated annealing with complex number vector coordination, fluid dynamics, hinge pivot, density gradient flow
 2. **shake_public**: Post-processing optimizer for fine-tuning
 3. **fix_direction**: Rotation optimization using ConvexHull + minimize_scalar to find optimal bounding box angle
 4. **Fractional translation**: Fine-grained optimization with steps [0.001, 0.0005, 0.0002, 0.0001, 0.00005, 0.00002, 0.00001] in 8 directions
+5. **jiweiliu kernel**: Claims ~0.15 improvement in 2 minutes using tessellation + SA + deletion cascade + Numba acceleration
 
 ### From Academic Research
 1. **No-fit polygon (NFP)**: Precompute feasible relative positions for O(1) overlap checks
@@ -45,21 +47,36 @@ TY = [0.8, 0.5, 0.5, 0.25, 0.25, 0, 0, -0.2, -0.2, 0, 0, 0.25, 0.25, 0.5, 0.5]
 1. **High precision arithmetic**: Use Decimal with 20+ decimal places to avoid overlap detection failures
 2. **Overlap detection**: Use Shapely with STRtree for efficient collision detection
 3. **Validation**: Always check for overlaps before submission - Kaggle rejects overlapping trees
+4. **Coordinate format**: Prefix with 's' (e.g., "s0.123456789012345678901234")
 
 ## Recommended Approaches (Priority Order)
 
 ### 1. [HIGHEST PRIORITY] Tessellation/Lattice Approach for Large N (N >= 58)
-The egortrushin kernel uses a fundamentally different approach:
-- Start with 2 base trees in a specific configuration
-- Translate them in x and y directions to create a grid pattern
-- Use SA to optimize the base configuration and translation vectors
-- Target specific N values: 72, 100, 110, 144, 156, 196, 200
+The egortrushin/jiweiliu kernels use a fundamentally different approach:
+- Start with 2 base trees in a specific configuration (one "blue" pointing up, one "pink" pointing down)
+- Define translation vectors (dx, dy) to create a grid pattern
+- For N trees, use grid of size ceil(sqrt(N)) x ceil(sqrt(N))
+- Use SA to optimize: base tree positions, rotation angles, translation vectors
 
 ```python
-# For N >= 58, try crystalline packing
-# nt = [rows, cols] such that rows * cols >= N
-# Optimize: base tree positions, rotation angles, translation vectors
+# Tessellation approach pseudocode
+def tessellation_pack(N, base_config, dx, dy):
+    trees = []
+    rows = cols = ceil(sqrt(N))
+    for i in range(rows):
+        for j in range(cols):
+            if len(trees) >= N:
+                break
+            # Alternate between "blue" and "pink" trees
+            tree_type = (i + j) % 2
+            x = base_config[tree_type].x + i * dx
+            y = base_config[tree_type].y + j * dy
+            angle = base_config[tree_type].angle
+            trees.append(ChristmasTree(x, y, angle))
+    return trees
 ```
+
+Target N values for tessellation: 72, 100, 110, 144, 156, 196, 200
 
 ### 2. [HIGH PRIORITY] Long-Running Simulated Annealing
 Top solutions run for HOURS, not minutes:
@@ -68,12 +85,18 @@ Top solutions run for HOURS, not minutes:
 - Multiple generations with perturbation to escape local optima
 - Use OpenMP parallelization (26 threads available)
 
-### 3. [HIGH PRIORITY] Backward Propagation
+Key SA parameters:
+- Temperature schedule: exponential cooling
+- Move types: translation, rotation, swap
+- Perturbation: randomly perturb best solution to escape local optima
+
+### 3. [HIGH PRIORITY] Backward Propagation (Deletion Cascade)
 Start from N=200, work down to N=2:
 ```python
 for n in range(200, 1, -1):
     for tree_to_remove in range(n):
         candidate = remove_tree(config[n], tree_to_remove)
+        # Optionally re-optimize the (n-1) config
         if score(candidate) < score(config[n-1]):
             config[n-1] = candidate
 ```
@@ -82,18 +105,20 @@ for n in range(200, 1, -1):
 These have lowest efficiency and highest score contribution:
 - N=1: side=0.813, contributes 0.66 to score (already optimal at 45°)
 - N=2: side=0.950, contributes 0.45 to score
-- Try exhaustive search for optimal rotation angles
+- Try exhaustive search for optimal rotation angles (0.001° increments)
 
 ### 5. [MEDIUM PRIORITY] Ensemble from Multiple Sources
 Combine best configurations from different optimization runs:
 - For each N, take the configuration with smallest side length
 - Validate for overlaps before combining
+- Use per-N comparison, not aggregate score
 
 ## What NOT to Try (Already Failed)
 1. Short optimization runs (< 10 minutes) - local optimum too tight
 2. Simple ensemble without validation - overlaps cause rejection
 3. fix_direction without precision handling - causes precision loss
 4. Backward propagation alone - doesn't escape local optima
+5. Standard SA on pre-optimized solutions - already at tight local optimum
 
 ## Implementation Notes
 
@@ -111,7 +136,25 @@ class ChristmasTree:
         self.center_x = Decimal(center_x)
         self.center_y = Decimal(center_y)
         self.angle = Decimal(angle)
-        # Build polygon with rotation and translation
+        
+        # Tree dimensions
+        trunk_w, trunk_h = Decimal('0.15'), Decimal('0.2')
+        base_w, mid_w, top_w = Decimal('0.7'), Decimal('0.4'), Decimal('0.25')
+        
+        # Build polygon vertices
+        initial_polygon = Polygon([
+            (0, 0.8),  # tip
+            (0.125, 0.5), (0.0625, 0.5),  # top tier right
+            (0.2, 0.25), (0.1, 0.25),  # mid tier right
+            (0.35, 0), (0.075, 0), (0.075, -0.2),  # base + trunk right
+            (-0.075, -0.2), (-0.075, 0), (-0.35, 0),  # trunk + base left
+            (-0.1, 0.25), (-0.2, 0.25),  # mid tier left
+            (-0.0625, 0.5), (-0.125, 0.5)  # top tier left
+        ])
+        
+        rotated = affinity.rotate(initial_polygon, float(self.angle), origin=(0, 0))
+        self.polygon = affinity.translate(rotated, 
+            xoff=float(self.center_x), yoff=float(self.center_y))
 ```
 
 ### Overlap Detection
@@ -119,6 +162,8 @@ class ChristmasTree:
 from shapely.strtree import STRtree
 
 def has_overlap(trees):
+    if len(trees) <= 1:
+        return False
     polygons = [t.polygon for t in trees]
     tree_index = STRtree(polygons)
     for i, poly in enumerate(polygons):
@@ -136,6 +181,12 @@ def calculate_score(dict_of_side_length):
     for n, side in dict_of_side_length.items():
         score += side ** 2 / Decimal(str(n))
     return score
+
+def get_side_length(trees):
+    from shapely.ops import unary_union
+    all_polygons = [t.polygon for t in trees]
+    bounds = unary_union(all_polygons).bounds
+    return max(bounds[2] - bounds[0], bounds[3] - bounds[1])
 ```
 
 ## Submission Format
@@ -148,6 +199,7 @@ id,x,y,deg
 ```
 - Coordinates prefixed with 's' to preserve precision
 - Use 20+ decimal places for coordinates
+- ID format: `{N:03d}_{tree_index}`
 
 ## Available Resources
 - Pre-optimized submissions in `/home/nonroot/snapshots/santa-2025/`
@@ -159,3 +211,11 @@ id,x,y,deg
 - CV = LB (perfect correlation for this optimization problem)
 - Always validate for overlaps locally before submission
 - Use high-precision Decimal arithmetic throughout
+- Test on small N first before full optimization
+
+## Gap Analysis
+- Current: 70.647306
+- Target: 68.894234
+- Gap: 1.753 points (2.5%)
+- Need to improve packing efficiency from ~69.5% to ~71.3%
+- Focus on: tessellation for large N, exhaustive search for small N
