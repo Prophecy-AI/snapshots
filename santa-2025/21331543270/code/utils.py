@@ -1,6 +1,8 @@
 """
 Santa 2025 - Christmas Tree Packing Utilities
 Reusable code for tree geometry, scoring, collision detection, and submission I/O.
+
+IMPORTANT: Use tolerance=1e-15 for overlap detection! Kaggle's validation is strict.
 """
 
 import pandas as pd
@@ -13,6 +15,10 @@ from typing import List, Tuple, Dict, Optional
 import os
 
 getcontext().prec = 30
+
+# CRITICAL: Kaggle uses very strict overlap detection
+DEFAULT_OVERLAP_TOLERANCE = 1e-15
+
 
 class ChristmasTree:
     """Christmas tree polygon with 15 vertices."""
@@ -89,8 +95,13 @@ def get_trees_data_for_n(df: pd.DataFrame, n: int) -> pd.DataFrame:
     return df[df['id'].str.startswith(prefix)].copy()
 
 
-def has_overlap(trees: List[ChristmasTree], tolerance: float = 1e-12) -> Tuple[bool, List]:
-    """Check if any trees overlap."""
+def has_overlap(trees: List[ChristmasTree], tolerance: float = DEFAULT_OVERLAP_TOLERANCE) -> Tuple[bool, List]:
+    """
+    Check if any trees overlap.
+    
+    IMPORTANT: Use tolerance=1e-15 (default) for Kaggle validation compatibility.
+    The previous tolerance of 1e-12 was too loose and caused submission failures.
+    """
     if len(trees) <= 1:
         return False, []
     
@@ -108,6 +119,11 @@ def has_overlap(trees: List[ChristmasTree], tolerance: float = 1e-12) -> Tuple[b
                         overlaps.append((i, idx, intersection.area))
     
     return len(overlaps) > 0, overlaps
+
+
+def has_overlap_strict(trees: List[ChristmasTree]) -> Tuple[bool, List]:
+    """Check for overlaps with strictest tolerance (1e-15)."""
+    return has_overlap(trees, tolerance=1e-15)
 
 
 def get_bounding_box_side(trees: List[ChristmasTree]) -> float:
@@ -143,7 +159,7 @@ def score_submission(df: pd.DataFrame, max_n: int = 200, check_overlaps: bool = 
             continue
         
         if check_overlaps:
-            has_ovlp, _ = has_overlap(trees)
+            has_ovlp, _ = has_overlap(trees)  # Now uses strict tolerance by default
             if has_ovlp:
                 overlapping_ns.append(n)
         
@@ -194,3 +210,20 @@ def is_valid_submission(df: pd.DataFrame) -> bool:
     if len(df) != expected_rows:
         return False
     return True
+
+
+def verify_submission_no_overlaps(df: pd.DataFrame) -> Tuple[bool, List[int]]:
+    """
+    Verify a submission has no overlaps for any N value.
+    Returns (is_valid, list_of_overlapping_ns).
+    """
+    overlapping_ns = []
+    for n in range(1, 201):
+        trees = load_trees_for_n(df, n)
+        if len(trees) != n:
+            continue
+        has_ovlp, _ = has_overlap_strict(trees)
+        if has_ovlp:
+            overlapping_ns.append(n)
+    
+    return len(overlapping_ns) == 0, overlapping_ns
