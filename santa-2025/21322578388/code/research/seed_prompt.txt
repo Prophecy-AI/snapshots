@@ -1,111 +1,113 @@
 # Santa 2025 - Christmas Tree Packing Optimization
 
 ## Current Status
-- Best CV score: 70.627589 from exp_003 (003_strict_ensemble)
-- Best LB score: FAILED - "Overlapping trees in group 008" (both exp_001 and exp_002)
-- Target: 68.896973 | Gap to target: ~1.73 (2.45%)
+- Best CV score: 70.633168 from valid_hybrid (exp_004 analysis)
+- Best LB score: N/A (both previous submissions failed with "Overlapping trees in group 008")
+- Target: 68.896973 | Gap to target: 1.736195
 
-## CRITICAL ISSUE IDENTIFIED
+## CRITICAL DISCOVERY: LB Overlap Validation
 
-**Root Cause Analysis:**
-Both submissions failed with "Overlapping trees in group 008". Investigation revealed:
+**The LB uses `int(x * 1e15)` scaling for coordinates before overlap detection!**
 
-1. **The LB uses scaled coordinates (1e15)**: The getting-started notebook shows `scale_factor = Decimal('1e15')`. This means a distance of 1e-15 in real coords = 1 in scaled coords.
+This means:
+- Tiny overlaps (1e-32 area) that are undetectable at normal precision become visible
+- ALL preoptimized files except sample_submission.csv have overlaps when checked with scaled coordinates
+- Previous submissions failed because they had configs with microscopic overlaps
 
-2. **Our submissions have trees essentially touching**: 
-   - best_snapshot.csv: 181 groups with min_dist < 1e-10, 8 groups with actual overlaps
-   - chistyakov_best.csv: min_dist = 1e-16 (essentially 0 in scaled coords)
-   - Even "valid" configs have trees at distance 1e-15 to 1e-16
-
-3. **The LB collision detection is stricter than ours**: When trees are at distance 1e-16, after scaling by 1e15 they're at distance 0.1, which Shapely might consider as overlapping due to floating point precision.
+**Preoptimized File Status (with scaled overlap check):**
+| File | Score | Scaled Overlaps | Valid? |
+|------|-------|-----------------|--------|
+| sample_submission.csv | 173.65 | 0 | ✓ YES |
+| chistyakov_best.csv | 70.926 | 1 (group 2) | ✗ NO |
+| best_snapshot.csv | 70.628 | 30 | ✗ NO |
+| ensemble_70_627.csv | 70.628 | 120 | ✗ NO |
+| All others | ~70.6-70.9 | 30-120 | ✗ NO |
 
 ## Response to Evaluator
 
-**Technical verdict was UNRELIABLE** - AGREED. The evaluator correctly identified:
-1. The overlap validation was WRONG
-2. The LB uses `intersects() and not touches()`, not area-based checks
+The evaluator correctly identified that the experiment output didn't match the intended result. The issue was deeper than expected:
+- The hybrid approach was selecting configs that passed `intersects() and not touches()` at normal precision
+- But the LB uses SCALED coordinates (1e15), which reveals microscopic overlaps
+- I've now created a valid hybrid (70.633168) using the correct scaled overlap check
 
-**However, the deeper issue is:**
-- Even configs that pass `intersects() and not touches()` locally may fail on LB
-- This is because the LB uses scaled coordinates (1e15) which amplifies tiny distances
-- Trees at distance 1e-16 become distance 0.1 after scaling, which may be considered overlapping
+## Data Understanding
 
-**Evaluator's recommendation to use chistyakov_best.csv:**
-- chistyakov_best.csv has better separation than other files
-- BUT it still has min_dist = 1e-16 which might fail
-- We should try submitting it to verify
+Reference notebooks:
+- `exploration/evolver_loop4_analysis.ipynb` - Discovered scaled coordinate overlap issue
+- `research/kernels/yongsukprasertsuk_santa-2025-best-keeping-bbox3-runner/` - bbox3 optimization strategy
 
-## Preoptimized File Analysis
-
-| File | Score | Min Distance | Actual Overlaps |
-|------|-------|--------------|-----------------|
-| best_snapshot.csv | 70.627582 | 0.00e+00 | 8 groups |
-| better_ensemble.csv | 70.647306 | 0.00e+00 | 7 groups |
-| bucket_of_chump.csv | 70.676501 | 0.00e+00 | 16 groups |
-| chistyakov_best.csv | 70.926150 | 1.09e-16 | 0 groups |
-| ensemble_70_627.csv | 70.627582 | 0.00e+00 | 121 groups |
-| saspav_best.csv | 70.630478 | 0.00e+00 | 7 groups |
-| sample_submission.csv | 173.652299 | 4.09e-05 | 0 groups |
-
-**Key insight**: sample_submission.csv has much better separation (4e-5) but terrible score. chistyakov_best.csv is the best balance of score and separation.
+Key patterns:
+1. The LB scales coordinates by 1e15 before overlap detection
+2. Trees that "touch" at normal precision may "overlap" at scaled precision
+3. Only sample_submission.csv is truly valid, but has terrible score
+4. Created valid hybrid by selecting only configs that pass scaled overlap check
 
 ## Recommended Approaches (Priority Order)
 
-### 1. CREATE NEW EXPERIMENT WITH chistyakov_best.csv (IMMEDIATE)
-- Score: 70.926150 (worse than our ensemble but might pass LB)
-- Has 0 actual overlaps and better separation than other files
-- We need LB feedback to understand if the issue is precision or something else
-- **Create exp_003 with chistyakov_best.csv and submit**
+### 1. IMMEDIATE: Submit the Valid Hybrid (exp_005)
+- Score: 70.633168
+- Verified 0 overlaps with scaled coordinates
+- This should pass LB validation and establish a baseline
 
-### 2. If chistyakov passes, create hybrid submission
-- Use chistyakov_best.csv as base
-- For groups where best_snapshot is significantly better AND has good separation, use best_snapshot
-- This could improve score while maintaining validity
+### 2. Use bbox3 Optimizer
+The bbox3 binary is available at `/home/code/bbox3`. From the kernel analysis:
+```bash
+./bbox3 -n 1000 -r 30  # Short run (2 min)
+./bbox3 -n 2000 -r 60  # Medium run (10 min)
+```
+Key parameters:
+- `-n`: Number of iterations
+- `-r`: Number of restarts
 
-### 3. If chistyakov fails, investigate further
-- The LB might use different tree geometry or precision
-- Check if there's a minimum separation requirement
-- Look for submissions in snapshots with better separation
+Strategy:
+1. Start with the valid hybrid as input
+2. Run bbox3 to optimize
+3. Verify output has 0 scaled overlaps
+4. If overlaps exist, replace invalid configs with valid ones from sample_submission.csv
 
-### 4. Implement tree separation optimizer
-- For each group, slightly move trees apart to create minimum separation
-- Use gradient descent or simulated annealing to minimize bounding box while maintaining separation
-- Target minimum separation of 1e-10 or higher
+### 3. Fix Direction Optimization
+From the kernel, the `fix_direction` function optimizes rotation angles:
+- Uses convex hull of all tree vertices
+- scipy.optimize.minimize_scalar to find optimal rotation (0-90°)
+- Can reduce bounding box size by rotating entire configuration
 
-### 5. Use bbox3 with separation constraint
-- Modify bbox3 or create wrapper that enforces minimum separation
-- This could optimize while ensuring validity
+### 4. Repair Overlaps Strategy
+When bbox3 creates overlaps:
+1. Check each config with scaled coordinates
+2. If overlap detected, replace with valid config from sample_submission.csv
+3. This ensures LB validity at cost of some score
 
 ## What NOT to Try
-- Scaling trees toward center (creates overlaps)
-- Using best_snapshot.csv directly (has actual overlaps)
-- Area-based overlap detection (doesn't match LB)
 
-## Validation Strategy
-**CRITICAL**: The LB uses:
-1. Scaled coordinates: `scale_factor = Decimal('1e15')`
-2. Collision detection: `intersects() and not touches()`
-3. High precision Decimal arithmetic
+1. ❌ Creating hybrids without scaled overlap check - will fail LB
+2. ❌ Using chistyakov_best.csv directly - has overlap in group 2
+3. ❌ Using any preoptimized file directly - all have scaled overlaps
+4. ❌ Checking overlaps with `intersection.area > 0` - wrong method
 
-To match LB validation locally:
+## Validation Notes
+
+**CRITICAL: Always verify with scaled coordinates:**
 ```python
-from decimal import Decimal, getcontext
-getcontext().prec = 25
-scale_factor = Decimal('1e15')
+scale_factor = int(1e15)
+def create_tree_polygon_scaled(x, y, deg):
+    # ... rotate and translate ...
+    scaled = (translated * scale_factor).astype(np.int64)
+    return Polygon(scaled)
 
-# Scale coordinates before collision check
-scaled_poly = affinity.scale(poly, xfact=float(scale_factor), yfact=float(scale_factor), origin=(0,0))
+# Check overlap
+if p1.intersects(p2) and not p1.touches(p2):
+    # THIS IS AN OVERLAP
 ```
 
-## Gap Analysis
-- Current best valid: 70.926150 (chistyakov_best.csv)
-- Target: 68.896973
-- Gap: 2.029177 (2.94%)
-
-This gap is larger than before (was 1.73 with invalid submission), but we need a VALID submission first. Once we have LB feedback, we can iterate to improve.
-
 ## Next Steps
-1. **Create exp_003 with chistyakov_best.csv** and submit to verify it passes LB validation
-2. If it passes, create hybrid submission to improve score
-3. If it fails, investigate the exact LB validation requirements
-4. Implement tree separation optimizer if needed
+
+1. **Submit exp_005 (valid hybrid)** to verify LB validation passes
+2. **Run bbox3 optimization** on the valid hybrid
+3. **Implement repair strategy** to fix any overlaps bbox3 creates
+4. **Target score**: Need to reduce from 70.633 to 68.897 (gap of 1.74)
+
+## Technical Notes
+
+- bbox3 binary: `/home/code/bbox3`
+- Valid baseline: `/home/code/experiments/005_valid_hybrid/submission.csv`
+- Sample submission (fallback): `/home/code/preoptimized/sample_submission.csv`
