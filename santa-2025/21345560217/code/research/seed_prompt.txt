@@ -1,0 +1,214 @@
+# Santa 2025 - Evolved Seed Prompt (Loop 1)
+
+## Current Status
+- Best CV score: 70.615102 (from valid baseline)
+- Best LB score: PENDING (first submission failed due to overlaps)
+- Target: 68.882921 | Gap to target: 1.732181 points
+
+## CRITICAL ISSUE: Previous Submission Failed
+The first submission (exp_000) was REJECTED by Kaggle with error:
+**"Overlapping trees in group 002"**
+
+Investigation revealed:
+- The "best" pre-optimized solution (70.523320) had **69 N values with overlaps**
+- Many pre-optimized solutions have subtle overlaps that pass loose validation but fail Kaggle's strict validation
+- We found a VALID submission with score 70.615102 that passes strict validation
+
+## IMMEDIATE ACTION REQUIRED
+1. **Log the valid baseline as exp_001** (002_valid_baseline folder)
+2. **Submit exp_001** to get LB feedback - this is a VALID solution
+3. Then implement fractional translation optimization
+
+## Response to Evaluator
+The evaluator correctly identified that:
+1. N=1 exhaustive search hadn't been done - **COMPLETED**: N=1 is already optimal at 45° rotation (side=0.813173, score=0.661250)
+2. Per-N tracking system not implemented - **AGREED**: This is needed
+3. Seed prompt mandates not followed - **PARTIALLY ADDRESSED**: N=1 is optimal, but N=2-10 optimization still needed
+
+## Key Findings from Analysis
+1. **N=1 is already optimal** at 45° rotation - no improvement possible there
+2. **Strict validation is CRITICAL** - must use integer-scaled coordinates for precise overlap detection
+3. **Top kernels use ensemble approach** - collect best per-N from 15+ sources
+4. **Fractional translation** is key technique - small step sizes (0.001, 0.0005, 0.0002, 0.0001)
+
+## ⛔ FORBIDDEN (WILL BE REJECTED)
+- bbox3, sa_fast, eazy_optimizer, tree_packer - FORBIDDEN
+- subprocess.run() or os.system() - FORBIDDEN
+- Running ANY binary or executable - FORBIDDEN
+- Submitting solutions without strict overlap validation - FORBIDDEN
+
+## ✅ MANDATORY: STRICT OVERLAP VALIDATION
+
+Before ANY submission, validate ALL N values with this code:
+
+```python
+from decimal import Decimal, getcontext
+from shapely.geometry import Polygon
+from shapely import affinity
+
+getcontext().prec = 30
+SCALE = 10**18
+
+TX = [0, 0.125, 0.0625, 0.2, 0.1, 0.35, 0.075, 0.075, -0.075, -0.075, -0.35, -0.1, -0.2, -0.0625, -0.125]
+TY = [0.8, 0.5, 0.5, 0.25, 0.25, 0, 0, -0.2, -0.2, 0, 0, 0.25, 0.25, 0.5, 0.5]
+
+def create_tree_polygon(x, y, deg):
+    poly = Polygon(zip(TX, TY))
+    rotated = affinity.rotate(poly, deg, origin=(0, 0))
+    return affinity.translate(rotated, x, y)
+
+def validate_no_overlap_strict(trees_df, n):
+    """Validate no overlaps using integer-scaled coordinates."""
+    trees = trees_df[trees_df['n'] == n]
+    if len(trees) == 0:
+        return True, "No trees"
+    
+    polygons = []
+    for _, row in trees.iterrows():
+        poly = create_tree_polygon(row['x'], row['y'], row['deg'])
+        coords = list(poly.exterior.coords)
+        int_coords = [(int(Decimal(str(x)) * SCALE), int(Decimal(str(y)) * SCALE)) for x, y in coords]
+        int_poly = Polygon(int_coords)
+        polygons.append(int_poly)
+    
+    for i in range(len(polygons)):
+        for j in range(i+1, len(polygons)):
+            if polygons[i].intersects(polygons[j]) and not polygons[i].touches(polygons[j]):
+                intersection = polygons[i].intersection(polygons[j])
+                if intersection.area > 0:
+                    return False, f"Trees {i} and {j} overlap"
+    return True, "OK"
+
+# MANDATORY: Validate ALL N before submission
+for n in range(1, 201):
+    ok, msg = validate_no_overlap_strict(df, n)
+    if not ok:
+        raise ValueError(f"N={n}: {msg}")
+```
+
+## ✅ NEXT EXPERIMENT: IMPLEMENT FRACTIONAL TRANSLATION IN PYTHON
+
+The top kernels use "fractional translation" - moving trees by tiny amounts (0.001, 0.0005, etc.) to shrink the bounding box.
+
+**Implement this algorithm:**
+
+```python
+def fractional_translation(trees_df, n, max_iter=200):
+    """Improve N-tree configuration by tiny translations."""
+    trees = trees_df[trees_df['n'] == n].copy()
+    
+    # Step sizes to try (from largest to smallest)
+    frac_steps = [0.001, 0.0005, 0.0002, 0.0001, 0.00005, 0.00002, 0.00001]
+    
+    # 8 directions: up, down, left, right, and diagonals
+    directions = [(0, 1), (0, -1), (1, 0), (-1, 0), (1, 1), (1, -1), (-1, 1), (-1, -1)]
+    
+    best_side = get_bounding_box_side(trees)
+    
+    for iteration in range(max_iter):
+        improved = False
+        for idx in range(len(trees)):
+            for step in frac_steps:
+                for dx, dy in directions:
+                    # Try moving tree by (dx*step, dy*step)
+                    old_x, old_y = trees.iloc[idx]['x'], trees.iloc[idx]['y']
+                    trees.iloc[idx, trees.columns.get_loc('x')] = old_x + dx * step
+                    trees.iloc[idx, trees.columns.get_loc('y')] = old_y + dy * step
+                    
+                    # Check if valid (no overlaps)
+                    if not has_overlap(trees, idx):
+                        new_side = get_bounding_box_side(trees)
+                        if new_side < best_side - 1e-12:
+                            best_side = new_side
+                            improved = True
+                        else:
+                            # Revert
+                            trees.iloc[idx, trees.columns.get_loc('x')] = old_x
+                            trees.iloc[idx, trees.columns.get_loc('y')] = old_y
+                    else:
+                        # Revert
+                        trees.iloc[idx, trees.columns.get_loc('x')] = old_x
+                        trees.iloc[idx, trees.columns.get_loc('y')] = old_y
+        
+        if not improved:
+            break
+    
+    return trees, best_side
+```
+
+## ✅ REQUIRED: PER-N TRACKING SYSTEM
+
+Create a system to track best solution for EACH N separately:
+
+```python
+import json
+
+def load_best_per_n():
+    try:
+        with open('best_per_n.json', 'r') as f:
+            return json.load(f)
+    except:
+        return {str(n): {'score': float('inf'), 'source': None} for n in range(1, 201)}
+
+def save_best_per_n(best_per_n):
+    with open('best_per_n.json', 'w') as f:
+        json.dump(best_per_n, f, indent=2)
+
+def update_best_per_n(new_solution_df, source_name):
+    best_per_n = load_best_per_n()
+    improvements = []
+    
+    for n in range(1, 201):
+        trees = new_solution_df[new_solution_df['n'] == n]
+        if len(trees) == 0:
+            continue
+        
+        # Validate no overlaps
+        ok, msg = validate_no_overlap_strict(new_solution_df, n)
+        if not ok:
+            continue
+        
+        # Calculate score
+        score = calculate_score_for_n(new_solution_df, n)
+        
+        if score < best_per_n[str(n)]['score']:
+            improvements.append((n, best_per_n[str(n)]['score'] - score))
+            best_per_n[str(n)] = {'score': score, 'source': source_name}
+    
+    save_best_per_n(best_per_n)
+    return improvements
+```
+
+## Experiment Priority Order
+
+1. **002_valid_baseline**: Log and submit the valid baseline (70.615102) to get LB feedback
+2. **003_fractional_translation**: Implement fractional translation in Python for N=2-20
+3. **004_per_n_ensemble**: Create per-N ensemble from multiple valid sources
+4. **005_local_search**: Implement local search with rotation optimization
+
+## Score Contribution Analysis
+
+From the valid baseline:
+- N=1-10: 4.3291 points (6.1% of total)
+- N=11-50: 14.7036 points (20.8% of total)
+- N=51-100: 17.6063 points (24.9% of total)
+- N=101-150: 17.1341 points (24.3% of total)
+- N=151-200: 16.8421 points (23.9% of total)
+
+**Focus areas:**
+- N=2-10: These contribute 3.67 points - room for optimization
+- N=11-50: Large contribution, worth optimizing
+- All N values matter - need per-N tracking
+
+## Key Files
+- Valid baseline: `/home/code/experiments/002_valid_baseline/submission.csv`
+- Submission folder: `/home/submission/submission.csv` (already contains valid baseline)
+- Best per-N tracking: `/home/code/best_per_n.json` (to be created)
+
+## CRITICAL REMINDERS
+
+1. **VALIDATE BEFORE SUBMIT** - Use strict overlap validation on ALL N values
+2. **NO BINARIES** - Write all optimization code in Python
+3. **PER-N TRACKING** - Save improvements for each N separately
+4. **SMALL STEPS** - Fractional translation uses tiny step sizes (0.0001 and smaller)
+5. **SUBMIT EVERYTHING** - We have 99 submissions left, use them for LB feedback
