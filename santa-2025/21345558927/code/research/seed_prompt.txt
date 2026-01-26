@@ -26,13 +26,6 @@ Analysis shows:
 | 009 | highprec ensemble | 70.341 | - | ❌ FAILED |
 | 010 | safe ensemble | 70.365 | 70.365 | ✅ PASSED |
 
-## Response to Evaluator
-
-**AGREE with all evaluator concerns:**
-1. ✅ External data sources not fully leveraged - NOW DOWNLOADED AND ANALYZED
-2. ✅ Diminishing returns on current approach - External data provides new solutions
-3. ✅ Need step change, not incremental improvements - External data is the step change
-
 ## ⛔ FORBIDDEN
 - bbox3, sa_fast, eazy_optimizer, tree_packer - FORBIDDEN
 - subprocess.run() or os.system() with binaries - FORBIDDEN
@@ -40,93 +33,149 @@ Analysis shows:
 
 ## ✅ MANDATORY NEXT EXPERIMENT: MEGA-ENSEMBLE WITH EXTERNAL DATA
 
-### STEP 1: Create Mega-Ensemble
-Combine ALL sources with strict validation:
+### Create experiment 012_mega_ensemble
+
+**CRITICAL: Use MIN_IMPROVEMENT=0.001 threshold to avoid overlap failures!**
 
 ```python
 import pandas as pd
 import sys
+import os
+import glob
 sys.path.insert(0, '/home/code')
-from code.tree_geometry import calculate_score
+
+from code.tree_geometry import calculate_score, get_tree_vertices_numba
 from code.utils import parse_submission, save_submission
 from decimal import Decimal, getcontext
 from shapely.geometry import Polygon
 
 getcontext().prec = 30
 SCALE = 10**18
-MIN_IMPROVEMENT = 0.001  # Safe threshold
+MIN_IMPROVEMENT = 0.001  # Safe threshold - DO NOT LOWER!
 
-# Load all sources
-sources = {
-    'exp_010': '/home/code/experiments/010_safe_ensemble/submission.csv',
-    'external_santa2025': '/home/code/external_data/santa-2025.csv',
-    'external_70.378': '/home/code/external_data/70.378875862989_20260126_045659.csv',
-    'external_submission': '/home/code/external_data/submission.csv',
-}
+def get_tree_polygon_highprec(x, y, angle_deg):
+    """Get tree polygon with high-precision integer coordinates."""
+    rx, ry = get_tree_vertices_numba(x, y, angle_deg)
+    coords = []
+    for xi, yi in zip(rx, ry):
+        xi_int = int(Decimal(str(xi)) * SCALE)
+        yi_int = int(Decimal(str(yi)) * SCALE)
+        coords.append((xi_int, yi_int))
+    return Polygon(coords)
 
-# Also load all internal snapshots
-import glob
-snapshot_files = glob.glob('/home/nonroot/snapshots/santa-2025/**/*.csv', recursive=True)
+def validate_no_overlap_strict(trees):
+    """Validate no overlaps using integer arithmetic."""
+    if len(trees) <= 1:
+        return True
+    
+    polygons = []
+    for x, y, angle in trees:
+        poly = get_tree_polygon_highprec(x, y, angle)
+        if not poly.is_valid:
+            return False
+        polygons.append(poly)
+    
+    for i in range(len(polygons)):
+        for j in range(i+1, len(polygons)):
+            if polygons[i].intersects(polygons[j]):
+                if not polygons[i].touches(polygons[j]):
+                    inter = polygons[i].intersection(polygons[j])
+                    if inter.area > 0:
+                        return False
+    return True
 
 # Load baseline for fallback
 baseline_df = pd.read_csv('/home/code/experiments/001_valid_baseline/submission.csv')
 baseline_configs = parse_submission(baseline_df)
 baseline_scores = {n: calculate_score(baseline_configs[n]) for n in range(1, 201)}
 
-# High-precision overlap validation
-def validate_no_overlap_strict(trees):
-    # ... (use SCALE=10^18 integer arithmetic)
-    pass
+# Load all sources
+sources = {}
+
+# 1. exp_010 (our current best)
+sources['exp_010'] = parse_submission(pd.read_csv('/home/code/experiments/010_safe_ensemble/submission.csv'))
+
+# 2. External data
+external_files = [
+    '/home/code/external_data/santa-2025.csv',
+    '/home/code/external_data/70.378875862989_20260126_045659.csv',
+    '/home/code/external_data/submission.csv',
+]
+for f in external_files:
+    if os.path.exists(f):
+        try:
+            df = pd.read_csv(f)
+            if 'id' in df.columns and len(df) == 20100:
+                sources[f.split('/')[-1]] = parse_submission(df)
+        except:
+            pass
+
+# 3. Internal snapshots (sample for speed)
+snapshot_files = glob.glob('/home/nonroot/snapshots/santa-2025/**/*.csv', recursive=True)
+for f in snapshot_files[:500]:  # Sample first 500
+    try:
+        df = pd.read_csv(f)
+        if 'id' in df.columns and len(df) == 20100:
+            sources[f] = parse_submission(df)
+    except:
+        pass
+
+print(f"Loaded {len(sources)} sources")
 
 # Build mega-ensemble
 best_per_n = {}
+improvements = []
+
 for n in range(1, 201):
     best_score = baseline_scores[n]
     best_config = baseline_configs[n]
+    best_source = "baseline"
     
-    for source_name, source_path in sources.items():
-        df = pd.read_csv(source_path)
-        configs = parse_submission(df)
+    for source_name, configs in sources.items():
+        if n not in configs:
+            continue
         
-        if n in configs:
-            config = configs[n]
-            score = calculate_score(config)
-            improvement = best_score - score
-            
-            # Only accept if significant improvement AND valid
-            if improvement > MIN_IMPROVEMENT:
-                if validate_no_overlap_strict(config):
-                    best_score = score
-                    best_config = config
+        config = configs[n]
+        if len(config) != n:
+            continue
+        
+        score = calculate_score(config)
+        improvement = best_score - score
+        
+        # Only accept if significant improvement AND valid
+        if improvement > MIN_IMPROVEMENT:
+            if validate_no_overlap_strict(config):
+                best_score = score
+                best_config = config
+                best_source = source_name
     
     best_per_n[n] = best_config
+    
+    if best_source != "baseline":
+        improvements.append((n, baseline_scores[n] - best_score, best_source))
 
-# Save and validate
+# Calculate final score
+final_total = sum(calculate_score(best_per_n[n]) for n in range(1, 201))
+print(f"Final score: {final_total:.6f}")
+print(f"Improvements: {len(improvements)}")
+
+# Save submission
 save_submission(best_per_n, 'submission.csv')
 ```
 
-### STEP 2: Validate Before Submission
-```python
-# Final validation with strict overlap checking
-for n in range(1, 201):
-    if not validate_no_overlap_strict(best_per_n[n]):
-        print(f"N={n}: OVERLAP - falling back to baseline")
-        best_per_n[n] = baseline_configs[n]
-```
-
-### STEP 3: Submit and Get LB Feedback
-With 93 submissions remaining, submit the mega-ensemble to validate.
+### SUBMIT THE RESULT
+After creating the mega-ensemble, SUBMIT IT to get LB feedback.
+We have 93 submissions remaining - use them!
 
 ## Expected Outcome
 - Mega-ensemble should score around **70.34** (improvement of ~0.025 over exp_010)
 - If it passes validation, this is our new best
 - Still need ~1.46 points more to reach target
 
-## External Data Sources Downloaded
-1. `/home/code/external_data/santa-2025.csv` - Score: 70.348933 ✅ BETTER
+## External Data Sources Available
+1. `/home/code/external_data/santa-2025.csv` - Score: 70.348933 ✅ BETTER THAN exp_010
 2. `/home/code/external_data/70.378875862989_20260126_045659.csv` - Score: 70.378876
 3. `/home/code/external_data/submission.csv` - Score: 70.647327
-4. `/home/code/external_data/submission_best.csv` - Score: 70.926150
 
 ## Per-N Analysis (External vs exp_010)
 Top N values where external is better:
@@ -135,11 +184,6 @@ Top N values where external is better:
 - N=47: +0.000877
 - N=116: +0.000875
 - N=139: +0.000829
-
-Top N values where exp_010 is better:
-- N=21: +0.002616
-- N=88: +0.002445
-- N=41: +0.001517
 
 ## What NOT to Try
 - ❌ Fractional translation (found NO improvements)
@@ -154,8 +198,3 @@ Top N values where exp_010 is better:
 | 70.365 | exp_010 (current best) | 1.49 points |
 | 70.341 | Potential mega-ensemble | 1.46 points |
 | 68.879 | TARGET | 0 points |
-
-The remaining gap is still significant (1.46 points). After mega-ensemble, need to explore:
-1. More external data sources (Kaggle datasets)
-2. Different optimization strategies from top kernels
-3. Lattice/tessellation patterns for large N
