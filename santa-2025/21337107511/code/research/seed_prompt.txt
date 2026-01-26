@@ -1,195 +1,222 @@
 ## Current Status
-- Best CV score: 70.615107 from exp_011 (baseline)
+- Best CV score: 70.615107 from exp_001 (baseline)
 - Best LB score: 70.615107 (from exp_001)
 - Target: 68.884199 | Gap to target: 1.73 points (2.45% improvement needed)
 
-## ⚠️ CRITICAL SITUATION ANALYSIS
+## ⛔⛔⛔ CRITICAL: 6 CONSECUTIVE EXPERIMENTS WITH ZERO IMPROVEMENT ⛔⛔⛔
 
-### What We've Learned (12 Experiments)
-1. **All 115 local snapshots converge to SAME local optimum** (70.615107)
-2. **Ensemble approach EXHAUSTED**: Only 1.76e-7 valid improvement (numerical noise)
-3. **"Rebuild from corners" technique TESTED**: Only 4.6e-7 improvement (noise)
-4. **Python SA, fractional translation, random restart**: ZERO improvements
-5. **Constructive approaches**: 25-90% WORSE than baseline
+Experiments 007-012 ALL produced score 70.615107 with ZERO improvements:
+- exp_007: Fractional translation → 0 improvements
+- exp_008: Python SA (6 variants) → 0 improvements  
+- exp_009: Random restart + lattice → 24-138% WORSE
+- exp_010: Constructive algorithms → 28-92% WORSE
+- exp_011: Validated ensemble → 1.76e-7 (noise)
+- exp_012: Numba SA (100x faster) → 0 improvements
 
-### Why We're Stuck
-The baseline (snapshot 21337353543) is at a **strong local optimum**. All approaches that:
-- Optimize existing solutions (SA, fractional translation)
-- Extract subsets from larger solutions (rebuild from corners)
-- Use simple patterns (constructive, lattice)
-
-...CANNOT escape this local optimum.
-
-### The ONLY Path Forward: C++ Optimizer with CORRECT Parameters OR Numba JIT
-
-The top kernels (scoring ~68.5) use bbox3.cpp with:
-- **15,000-20,000 iterations** (not 1000 like exp_009)
-- **Multiple rounds** (nr=80-96)
-- **Proper temperature schedule**: T = 1.0 → 0.000005
-- **Metropolis acceptance**: accept if delta < 0 OR random() < exp(-delta/temp)
-- **OpenMP parallelization** for speed
-
-## ⛔ FORBIDDEN (WILL BE REJECTED)
-- Running bbox3/sa_fast as a binary without fixing parameters
-- subprocess.run() or os.system() to run pre-compiled binaries AS-IS
-- "Optimizing" existing CSV files with Python SA (proven to fail)
-- Ensemble approaches (EXHAUSTED - only 1.76e-7 improvement)
-- "Rebuild from corners" (EXHAUSTED - only 4.6e-7 improvement)
-
-## ✅ REQUIRED FOR NEXT EXPERIMENT: NUMBA-ACCELERATED SA
-
-Since C++ compilation may be complex, use Numba JIT to speed up Python SA by 100x.
-
-### MANDATORY IMPLEMENTATION:
-
-```python
-from numba import njit, prange
-import numpy as np
-
-# Precompute tree polygon vertices (15 vertices per tree)
-TX = np.array([0, 0.125, 0.0625, 0.2, 0.1, 0.35, 0.075, 0.075, -0.075, -0.075, -0.35, -0.1, -0.2, -0.0625, -0.125])
-TY = np.array([0.8, 0.5, 0.5, 0.25, 0.25, 0, 0, -0.2, -0.2, 0, 0, 0.25, 0.25, 0.5, 0.5])
-
-@njit
-def rotate_tree(tx, ty, angle_deg):
-    """Rotate tree vertices by angle (degrees)."""
-    angle_rad = angle_deg * np.pi / 180.0
-    cos_a = np.cos(angle_rad)
-    sin_a = np.sin(angle_rad)
-    rx = tx * cos_a - ty * sin_a
-    ry = tx * sin_a + ty * cos_a
-    return rx, ry
-
-@njit
-def compute_bbox(trees_x, trees_y, trees_angle, n):
-    """Compute bounding box side length for n trees."""
-    min_x = np.inf
-    max_x = -np.inf
-    min_y = np.inf
-    max_y = -np.inf
-    
-    for i in range(n):
-        rx, ry = rotate_tree(TX, TY, trees_angle[i])
-        for j in range(15):
-            x = trees_x[i] + rx[j]
-            y = trees_y[i] + ry[j]
-            min_x = min(min_x, x)
-            max_x = max(max_x, x)
-            min_y = min(min_y, y)
-            max_y = max(max_y, y)
-    
-    return max(max_x - min_x, max_y - min_y)
-
-@njit
-def check_overlap(trees_x, trees_y, trees_angle, n, tree_idx):
-    """Check if tree at tree_idx overlaps with any other tree."""
-    # Simplified overlap check using bounding boxes
-    # For full accuracy, would need polygon intersection
-    for i in range(n):
-        if i == tree_idx:
-            continue
-        # Check bounding box overlap first
-        # ... (implement proper overlap check)
-    return False
-
-@njit
-def fast_sa(trees_x, trees_y, trees_angle, n, n_iterations=15000):
-    """Numba-accelerated simulated annealing."""
-    best_side = compute_bbox(trees_x, trees_y, trees_angle, n)
-    best_score = (best_side ** 2) / n
-    
-    temp = 1.0
-    final_temp = 0.000005
-    
-    for i in range(n_iterations):
-        temp = 1.0 * (final_temp / 1.0) ** (i / n_iterations)
-        
-        # Random perturbation
-        tree_idx = np.random.randint(n)
-        dx = (np.random.random() - 0.5) * 0.002
-        dy = (np.random.random() - 0.5) * 0.002
-        dangle = (np.random.random() - 0.5) * 2.0
-        
-        # Save old values
-        old_x = trees_x[tree_idx]
-        old_y = trees_y[tree_idx]
-        old_angle = trees_angle[tree_idx]
-        
-        # Apply move
-        trees_x[tree_idx] += dx
-        trees_y[tree_idx] += dy
-        trees_angle[tree_idx] += dangle
-        
-        # Check for overlaps
-        if check_overlap(trees_x, trees_y, trees_angle, n, tree_idx):
-            # Reject - restore
-            trees_x[tree_idx] = old_x
-            trees_y[tree_idx] = old_y
-            trees_angle[tree_idx] = old_angle
-            continue
-        
-        new_side = compute_bbox(trees_x, trees_y, trees_angle, n)
-        new_score = (new_side ** 2) / n
-        delta = new_score - best_score
-        
-        # Metropolis acceptance
-        if delta < 0 or np.random.random() < np.exp(-delta / temp):
-            best_score = new_score
-            best_side = new_side
-        else:
-            # Reject - restore
-            trees_x[tree_idx] = old_x
-            trees_y[tree_idx] = old_y
-            trees_angle[tree_idx] = old_angle
-    
-    return best_score, trees_x, trees_y, trees_angle
-```
-
-### KEY PARAMETERS (MUST USE THESE):
-- n_iterations = 15000 (NOT 1000)
-- temp: 1.0 → 0.000005 (exponential decay)
-- perturbation scale: 0.002 (NOT 0.1)
-- Metropolis acceptance: accept if delta < 0 OR random() < exp(-delta/temp)
-
-### TESTING STRATEGY:
-1. First test on N=10, N=20, N=30 to verify it works
-2. If improvements found, scale to all N=1-200
-3. Run multiple rounds (10+) to accumulate improvements
-
-## ✅ REQUIRED: PER-N TRACKING
-
-Track best solution for EACH N separately:
-- Load baseline per-N scores
-- After each experiment, compare per-N
-- Keep only N values where you improved
-- Ensemble = best per-N from all sources
+**THE BASELINE IS AT A TRUE LOCAL OPTIMUM. SA CANNOT ESCAPE IT.**
 
 ## Response to Evaluator
 
 The evaluator correctly identified that:
-1. Local snapshots are EXHAUSTED (all at same optimum)
-2. C++ optimizer parameters were WRONG in exp_009
-3. Need to either fix C++ or use Numba for speed
+1. All local optimization approaches are EXHAUSTED
+2. We need DIFFERENT starting points, not better optimization
+3. External data sources have WORSE scores than our baseline
+4. Top kernels achieve ~68.5 by ensembling from 15+ external sources we don't have
 
-I agree with all points. The next experiment MUST:
-1. Use CORRECT SA parameters (15000+ iterations, proper temp schedule)
-2. Use Numba JIT for speed (100x faster than pure Python)
-3. Run on ALL N values
-4. Validate with Kaggle's exact method before submitting
+**I AGREE with the evaluator's assessment.** The path forward is:
+1. Generate diverse solutions from RANDOM starting points
+2. Implement genetic algorithm for multi-basin exploration
+3. Use fundamentally different representations (NFP-based placement)
 
-## What NOT to Try
-- Python SA without Numba (too slow - proven in exp_008)
-- Ensemble from local snapshots (EXHAUSTED)
-- "Rebuild from corners" (EXHAUSTED)
-- Constructive approaches (25-90% WORSE)
-- Random restart (24-64% WORSE)
+## ⛔ FORBIDDEN (WILL BE REJECTED)
+- Running SA/local search on the baseline (PROVEN INEFFECTIVE)
+- "More iterations" or "different parameters" on same approach
+- Ensembling from existing snapshots (all converge to same optimum)
+- Any approach that starts from the baseline and tries to improve it locally
+
+## ✅ MANDATORY: GENERATE DIVERSE SOLUTIONS FROM SCRATCH
+
+The key insight is that we're stuck in ONE basin of attraction. We need to explore OTHER basins.
+
+### EXPERIMENT 013: RANDOM RESTART WITH DIVERSE SEEDS
+
+**STEP 1: Generate random valid configurations**
+```python
+import numpy as np
+from numba import njit
+
+def generate_random_config(n, seed):
+    """Generate a random valid configuration for n trees."""
+    np.random.seed(seed)
+    
+    # Estimate required area (trees are ~0.7 wide, ~1.0 tall)
+    tree_area = 0.7 * 1.0  # approximate
+    total_area = n * tree_area * 2.5  # 2.5x for spacing
+    side = np.sqrt(total_area)
+    
+    trees_x = np.zeros(n)
+    trees_y = np.zeros(n)
+    trees_angle = np.zeros(n)
+    
+    # Place trees one by one with rejection sampling
+    for i in range(n):
+        for attempt in range(1000):
+            x = np.random.uniform(-side/2, side/2)
+            y = np.random.uniform(-side/2, side/2)
+            angle = np.random.uniform(0, 360)
+            
+            # Check overlap with existing trees
+            trees_x[i] = x
+            trees_y[i] = y
+            trees_angle[i] = angle
+            
+            if not check_any_overlap(trees_x, trees_y, trees_angle, i+1, i):
+                break
+        else:
+            # Failed to place - try larger area
+            side *= 1.1
+            i = 0  # restart
+    
+    return trees_x, trees_y, trees_angle
+```
+
+**STEP 2: Run SA from each random start**
+```python
+def explore_multiple_basins(n, n_seeds=50, n_iterations=50000):
+    """Explore multiple basins by starting from random configurations."""
+    results = []
+    
+    for seed in range(n_seeds):
+        # Generate random starting point
+        x, y, angle = generate_random_config(n, seed)
+        initial_score = compute_score(x, y, angle, n)
+        
+        # Run Numba SA (already implemented in exp_012)
+        final_score, x, y, angle, _, _ = fast_sa(x, y, angle, n, n_iterations, seed)
+        
+        results.append({
+            'seed': seed,
+            'initial_score': initial_score,
+            'final_score': final_score,
+            'x': x.copy(),
+            'y': y.copy(),
+            'angle': angle.copy()
+        })
+        
+        print(f"Seed {seed}: {initial_score:.4f} -> {final_score:.4f}")
+    
+    # Find best result
+    best = min(results, key=lambda r: r['final_score'])
+    return best, results
+```
+
+**STEP 3: Test on small N first**
+```python
+# Test on N=10, 20, 30 first
+for n in [10, 20, 30]:
+    baseline_score = get_baseline_score(n)
+    best, results = explore_multiple_basins(n, n_seeds=50)
+    
+    print(f"N={n}: baseline={baseline_score:.6f}, best_random={best['final_score']:.6f}")
+    
+    # Check how many seeds found different local optima
+    unique_scores = set(round(r['final_score'], 6) for r in results)
+    print(f"  Unique local optima found: {len(unique_scores)}")
+```
+
+**Expected outcome:**
+- Random restarts should find at least SOME N values with different local optima
+- Even if most converge to the same optimum, some might find different basins
+- The goal is DIVERSITY, not immediate improvement
+
+### ALTERNATIVE: GENETIC ALGORITHM (if random restart fails)
+
+If random restart doesn't find diverse solutions, implement GA:
+
+```python
+def genetic_algorithm(n, population_size=20, generations=100):
+    """Genetic algorithm with crossover for multi-basin exploration."""
+    
+    # Initialize population with random configurations
+    population = [generate_random_config(n, seed) for seed in range(population_size)]
+    
+    for gen in range(generations):
+        # Evaluate fitness
+        scores = [compute_score(*config, n) for config in population]
+        
+        # Selection (tournament)
+        selected = tournament_selection(population, scores, k=population_size//2)
+        
+        # Crossover: combine tree positions from two parents
+        offspring = []
+        for i in range(0, len(selected), 2):
+            child = crossover(selected[i], selected[i+1], n)
+            offspring.append(child)
+        
+        # Mutation: small perturbations
+        for config in offspring:
+            mutate(config, mutation_rate=0.1)
+        
+        # Replace worst individuals
+        population = selected + offspring
+        
+        # Local search on best individual
+        best_idx = np.argmin(scores)
+        population[best_idx] = local_search(population[best_idx])
+    
+    return min(population, key=lambda c: compute_score(*c, n))
+
+def crossover(parent1, parent2, n):
+    """Combine tree positions from two parents."""
+    x1, y1, a1 = parent1
+    x2, y2, a2 = parent2
+    
+    # Random crossover point
+    crossover_point = np.random.randint(1, n)
+    
+    child_x = np.concatenate([x1[:crossover_point], x2[crossover_point:]])
+    child_y = np.concatenate([y1[:crossover_point], y2[crossover_point:]])
+    child_a = np.concatenate([a1[:crossover_point], a2[crossover_point:]])
+    
+    # Repair overlaps
+    repair_overlaps(child_x, child_y, child_a, n)
+    
+    return child_x, child_y, child_a
+```
 
 ## Validation Notes
-- Use Decimal(prec=25) and 1e18 integer scaling
-- Validate ALL 200 N values before submission
-- Any overlap = Kaggle rejection
+
+1. **Use Numba SA from exp_012** - it's 100x faster than pure Python
+2. **Test on small N first** (N=10, 20, 30) before scaling up
+3. **Track unique local optima** - if all seeds converge to same score, the approach won't work
+4. **Compare to baseline per-N** - even small improvements are valuable
+
+## Success Criteria
+
+- ✅ **SUCCESS**: Find at least ONE N value where random restart beats baseline
+- ⚠️ **PARTIAL**: Find multiple distinct local optima (even if none beat baseline)
+- ❌ **FAILURE**: All random restarts converge to same score as baseline
 
 ## SUBMISSION STRATEGY
+
 - Remaining submissions: 95
-- Submit after this experiment? YES - we have abundant submissions
-- Even if score doesn't improve, LB feedback is valuable
+- **SUBMIT if**: Random restart finds ANY improvement over baseline
+- **DON'T SUBMIT if**: All approaches converge to baseline score
+
+## What NOT to Try
+
+- ❌ SA/local search starting from baseline (PROVEN INEFFECTIVE - 6 experiments)
+- ❌ Ensembling existing snapshots (all have same local optimum)
+- ❌ "More iterations" on same approach
+- ❌ Constructive algorithms without random variation (exp_010 showed 28-92% worse)
+
+## Key Insight from Top Kernels
+
+The top kernel (jonathanchan) achieves ~68.5 by:
+1. Ensembling from 15+ DIFFERENT external data sources
+2. Using C++ with 1.6M iterations per N (20000 × 80 rounds)
+3. Combining SA + local search + fractional translation
+
+**We don't have access to their external data sources.** Our only path is to GENERATE diverse solutions ourselves through random restarts or genetic algorithms.
+
+The target IS reachable. The top kernels prove that scores of ~68.5 are achievable. The path forward is generating DIVERSE solutions, not better optimization of the same solution.
