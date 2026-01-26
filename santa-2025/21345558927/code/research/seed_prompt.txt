@@ -59,13 +59,16 @@ The ONLY path forward is:
 
 ### Step 1: Download Missing Datasets
 ```bash
+# Create external data directory
+mkdir -p /home/code/data/external
+
 # Download ALL datasets used by top kernels
-kaggle datasets download -d jazivxt/bucket-of-chump -p /home/code/data/external/
-kaggle datasets download -d jonathanchan/santa25-public -p /home/code/data/external/
-kaggle datasets download -d seowoohyeon/santa-2025-try3 -p /home/code/data/external/
-kaggle datasets download -d asalhi/telegram-public-shared-solution-for-santa-2025 -p /home/code/data/external/
-kaggle datasets download -d saspav/santa-2025-csv -p /home/code/data/external/
-kaggle datasets download -d chistyakov/santa2025-packed-version-of-current-best-public -p /home/code/data/external/
+kaggle datasets download -d jazivxt/bucket-of-chump -p /home/code/data/external/ --unzip
+kaggle datasets download -d jonathanchan/santa25-public -p /home/code/data/external/ --unzip
+kaggle datasets download -d seowoohyeon/santa-2025-try3 -p /home/code/data/external/ --unzip
+kaggle datasets download -d asalhi/telegram-public-shared-solution-for-santa-2025 -p /home/code/data/external/ --unzip
+kaggle datasets download -d saspav/santa-2025-csv -p /home/code/data/external/ --unzip
+kaggle datasets download -d chistyakov/santa2025-packed-version-of-current-best-public -p /home/code/data/external/ --unzip
 
 # Also download from GitHub
 wget -q https://raw.githubusercontent.com/SmartManoj/Santa-Scoreboard/main/submission.csv -O /home/code/data/external/smartmanoj.csv
@@ -82,29 +85,115 @@ kaggle kernels output smartmanoj/santa-claude -p /home/code/data/external/santa-
 
 ### Step 3: Build Comprehensive Ensemble
 ```python
+import pandas as pd
+import numpy as np
+import glob
+from numba import njit
+import math
+
 # Load ALL CSV files from:
 # 1. /home/code/data/external/
 # 2. /home/nonroot/snapshots/santa-2025/*/code/**/*.csv
 # 3. Current best (exp_016)
 
-# For each N from 1 to 200:
-#   - Find best score across ALL sources
-#   - If improvement >= 0.001, use new solution
-#   - Otherwise keep exp_016 solution
+MIN_IMPROVEMENT = 0.001  # Safety threshold
 
-# Validate NO overlaps before saving
-# Submit to Kaggle
+@njit
+def make_polygon_template():
+    tw=0.15; th=0.2; bw=0.7; mw=0.4; ow=0.25
+    tip=0.8; t1=0.5; t2=0.25; base=0.0; tbot=-th
+    x=np.array([0,ow/2,ow/4,mw/2,mw/4,bw/2,tw/2,tw/2,-tw/2,-tw/2,-bw/2,-mw/4,-mw/2,-ow/4,-ow/2],np.float64)
+    y=np.array([tip,t1,t1,t2,t2,base,base,tbot,tbot,base,base,t2,t2,t1,t1],np.float64)
+    return x,y
+
+@njit
+def score_group(xs,ys,degs,tx,ty):
+    n=xs.size; V=tx.size
+    mnx=1e300; mny=1e300; mxx=-1e300; mxy=-1e300
+    for i in range(n):
+        r=degs[i]*math.pi/180.0
+        c=math.cos(r); s=math.sin(r)
+        xi=xs[i]; yi=ys[i]
+        for j in range(V):
+            X=c*tx[j]-s*ty[j]+xi
+            Y=s*tx[j]+c*ty[j]+yi
+            if X<mnx: mnx=X
+            if X>mxx: mxx=X
+            if Y<mny: mny=Y
+            if Y>mxy: mxy=Y
+    side=max(mxx-mnx,mxy-mny)
+    return side*side/n
+
+def strip(a):
+    return np.array([float(str(v).replace("s","")) for v in a],np.float64)
+
+# Collect all CSV files
+all_files = []
+all_files += glob.glob('/home/code/data/external/**/*.csv', recursive=True)
+all_files += glob.glob('/home/nonroot/snapshots/santa-2025/*/code/**/*.csv', recursive=True)
+all_files.append('/home/code/experiments/016_mega_ensemble_external/submission.csv')
+
+tx, ty = make_polygon_template()
+best = {n: {"score": 1e300, "data": None, "src": None} for n in range(1, 201)}
+
+# Load baseline first
+baseline_df = pd.read_csv('/home/code/experiments/016_mega_ensemble_external/submission.csv')
+baseline_df['N'] = baseline_df['id'].str.split('_').str[0].astype(int)
+for n, g in baseline_df.groupby('N'):
+    xs = strip(g['x'].to_numpy())
+    ys = strip(g['y'].to_numpy())
+    ds = strip(g['deg'].to_numpy())
+    # Check for NaN
+    if np.isnan(xs).any() or np.isnan(ys).any() or np.isnan(ds).any():
+        continue
+    sc = score_group(xs, ys, ds, tx, ty)
+    best[n] = {"score": float(sc), "data": g.drop(columns=['N']).copy(), "src": "baseline"}
+
+# Scan all files for better solutions
+for fp in all_files:
+    try:
+        df = pd.read_csv(fp)
+    except:
+        continue
+    if not {'id', 'x', 'y', 'deg'}.issubset(df.columns):
+        continue
+    df['N'] = df['id'].str.split('_').str[0].astype(int)
+    for n, g in df.groupby('N'):
+        if n < 1 or n > 200:
+            continue
+        xs = strip(g['x'].to_numpy())
+        ys = strip(g['y'].to_numpy())
+        ds = strip(g['deg'].to_numpy())
+        # Check for NaN
+        if np.isnan(xs).any() or np.isnan(ys).any() or np.isnan(ds).any():
+            continue
+        sc = score_group(xs, ys, ds, tx, ty)
+        improvement = best[n]['score'] - sc
+        if improvement >= MIN_IMPROVEMENT:
+            best[n] = {"score": float(sc), "data": g.drop(columns=['N']).copy(), "src": fp}
+
+# Build final submission
+rows = []
+for n in range(1, 201):
+    if best[n]['data'] is not None:
+        rows.append(best[n]['data'])
+
+out = pd.concat(rows, ignore_index=True)
+out['sn'] = out['id'].str.split('_').str[0].astype(int)
+out['si'] = out['id'].str.split('_').str[1].astype(int)
+out = out.sort_values(['sn', 'si']).drop(columns=['sn', 'si'])
+out = out[['id', 'x', 'y', 'deg']]
+out.to_csv('submission.csv', index=False)
+
+# Calculate total score
+total = sum(best[n]['score'] for n in range(1, 201))
+print(f"Total score: {total:.6f}")
 ```
 
-### Step 4: If Ensemble Doesn't Improve Enough, Compile C++ Optimizer
-```bash
-# The jonathanchan kernel has sa_v1_parallel.cpp
-# Copy it and compile:
-g++ -O3 -march=native -std=c++17 -fopenmp -o sa_parallel sa_v1_parallel.cpp
-
-# Run for extended period:
-./sa_parallel -i submission.csv -o optimized.csv -n 20000 -r 10
-```
+### Step 4: Validate and Submit
+- Validate NO overlaps using integer arithmetic (SCALE=10^18)
+- Submit to Kaggle
+- Track which N values improved and from which source
 
 ## Expected Outcome
 - With 10+ new external sources: Could find improvements for 10-20 N values
