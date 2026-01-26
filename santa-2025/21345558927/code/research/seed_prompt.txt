@@ -1,199 +1,207 @@
-# Santa 2025 - Evolved Strategy (Loop 2)
+# Santa 2025 - Evolved Strategy (Loop 3)
 
 ## Current Status
-- **Best CV score**: 70.615102 (exp_001 - valid baseline)
-- **Best LB score**: 70.615102 (PASSED Kaggle validation)
-- **Target**: 68.882921
+- **Best CV score**: 70.615101 from exp_002 (backward_propagation)
+- **Best LB score**: 70.615102 from exp_001 (valid_baseline)
+- **Target**: 68.881647 (lower is better)
 - **Gap to target**: 1.73 points (2.5% improvement needed)
-- **Submissions remaining**: 98/100
+- **Submissions used**: 2/100 (98 remaining - ABUNDANT!)
 
-## Submission Log
-| Exp | Approach | CV | LB | Notes |
-|-----|----------|----|----|-------|
-| 000 | ensemble | 70.523 | FAILED | Overlapping trees in group 002 |
-| 001 | valid_baseline | 70.615 | 70.615 | PASSED - high precision coords |
+## ⚠️ CRITICAL: STUCK AT LOCAL OPTIMUM!
 
-## Response to Evaluator
+Experiments exp_001 and exp_002 produced nearly identical scores (70.615102 vs 70.615101).
+The backward propagation approach found only 1 improvement with 4.6e-7 total gain.
+**The baseline is at an extremely strong local optimum.**
 
-The evaluator correctly identified that:
-1. **No algorithm implementation yet** - The code folder is empty after 2 experiments
-2. **Small N values are the biggest opportunity** - N=1-10 contribute 6.1% of total score
-3. **Tessellation approach not attempted** - But my analysis shows simple lattice is WORSE than baseline
-
-**Key finding from my analysis**: A C++ optimizer in snapshot 21165870845 achieved **69.65** (only 0.77 from target!) but the solution has OVERLAPS and cannot be submitted. This proves:
-1. Better scores ARE achievable (the optimizer found them)
-2. The challenge is maintaining valid non-overlapping solutions
-3. We need to implement optimization that respects overlap constraints
+## What We've Learned
+1. **Backward propagation doesn't work** - Removing trees from N to create N-1 yields no improvement
+2. **Simple lattice approach is WORSE** - Zaburo's grid approach is 16-27% worse than baseline
+3. **Pre-compiled binaries (bbox3, sa_fast) produce ~70.6** - Cannot beat this ceiling
+4. **N=1 is already optimal** at 45° with score 0.6612
+5. **Small N values (N=2-10) contribute 6.1% of total score** - High leverage targets
 
 ## ⛔ FORBIDDEN (WILL BE REJECTED)
 - bbox3, sa_fast, eazy_optimizer, tree_packer - FORBIDDEN
-- subprocess.run() or os.system() with ANY binary - FORBIDDEN
-- Running ANY pre-compiled binary or executable - FORBIDDEN
-- "Optimizing" existing CSV files with C++ tools - FORBIDDEN
+- subprocess.run() or os.system() - FORBIDDEN
+- Running ANY binary or executable - FORBIDDEN
+- "Optimizing" existing CSV files with binaries - FORBIDDEN
 
-## ✅ CRITICAL INSIGHT: WHY BINARIES FAIL
+## ✅ NEXT EXPERIMENT: EXHAUSTIVE SEARCH FOR N=2-5
 
-The C++ optimizer in snapshot 21165870845 achieved 69.65 but with OVERLAPS:
-- N=2: Trees 0 and 1 overlap (area=1.80e-01)
-- N=3: Trees 0 and 1 overlap (area=1.29e-01)
-- N=4: Trees 0 and 1 overlap (area=1.90e-01)
+The evaluator correctly identified this as the highest-leverage approach:
+- N=2 has only 360×360 = 129,600 angle combinations at 1° resolution
+- N=3-5 can use branch-and-bound with pruning
+- These small N values contribute disproportionately to score
 
-**The optimizer finds better scores by allowing tiny overlaps that violate Kaggle's strict validation.**
-
-## ✅ NEXT EXPERIMENT: IMPLEMENT OVERLAP-AWARE OPTIMIZATION
-
-### Approach: Backward Propagation with Strict Overlap Checking
-
-Based on Chistyakov's kernel, implement backward propagation:
-1. Start from N=200 configuration
-2. For each N from 200 down to 2:
-   - Find trees that touch the bounding box
-   - Try removing each boundary-touching tree
-   - Keep the removal that gives smallest bounding box for N-1
-   - VALIDATE no overlaps before accepting
+### Implementation Plan
 
 ```python
-from shapely.geometry import Polygon, box
-from decimal import Decimal, getcontext
+# experiments/003_small_n_exhaustive/analysis.ipynb
 
-getcontext().prec = 30
-SCALE = 10**18
+import numpy as np
+from numba import njit
+from shapely.geometry import Polygon
+from itertools import product
+import time
 
-def validate_no_overlap(trees):
-    """Strict overlap validation using integer-scaled coordinates."""
+# Tree geometry
+TX = np.array([0, 0.125, 0.0625, 0.2, 0.1, 0.35, 0.075, 0.075, -0.075, -0.075, -0.35, -0.1, -0.2, -0.0625, -0.125])
+TY = np.array([0.8, 0.5, 0.5, 0.25, 0.25, 0, 0, -0.2, -0.2, 0, 0, 0.25, 0.25, 0.5, 0.5])
+
+@njit
+def get_tree_vertices_fast(x, y, angle_rad):
+    """Get tree vertices with Numba acceleration."""
+    cos_a = np.cos(angle_rad)
+    sin_a = np.sin(angle_rad)
+    rx = TX * cos_a - TY * sin_a + x
+    ry = TX * sin_a + TY * cos_a + y
+    return rx, ry
+
+def calculate_bbox_size(trees):
+    """Calculate bounding box side length for trees [(x, y, angle), ...]."""
+    all_xs, all_ys = [], []
+    for x, y, angle in trees:
+        rx, ry = get_tree_vertices_fast(x, y, np.radians(angle))
+        all_xs.extend(rx)
+        all_ys.extend(ry)
+    return max(max(all_xs) - min(all_xs), max(all_ys) - min(all_ys))
+
+def check_overlap(trees):
+    """Check if any trees overlap using Shapely."""
     polygons = []
     for x, y, angle in trees:
-        verts = get_tree_vertices(x, y, angle)
-        int_verts = [(int(Decimal(str(vx)) * SCALE), int(Decimal(str(vy)) * SCALE)) for vx, vy in verts]
-        polygons.append(Polygon(int_verts))
+        rx, ry = get_tree_vertices_fast(x, y, np.radians(angle))
+        polygons.append(Polygon(zip(rx, ry)))
     
     for i in range(len(polygons)):
         for j in range(i+1, len(polygons)):
             if polygons[i].intersects(polygons[j]) and not polygons[i].touches(polygons[j]):
                 inter = polygons[i].intersection(polygons[j])
-                if inter.area > 0:
-                    return False
-    return True
+                if inter.area > 1e-12:
+                    return True
+    return False
 
-def backward_propagation(configs):
-    """Propagate improvements from larger N to smaller N."""
-    improved = {}
-    
-    for n in range(200, 1, -1):
-        trees = list(configs[n])
-        
-        # Find trees touching bounding box
-        boundary_indices = get_bbox_touching_indices(trees)
-        
-        best_score = calculate_score_for_n(configs[n-1])
-        best_candidate = None
-        
-        for idx in boundary_indices:
-            candidate = trees[:idx] + trees[idx+1:]
-            
-            # CRITICAL: Validate no overlaps
-            if not validate_no_overlap(candidate):
-                continue
-                
-            score = calculate_score_for_n(candidate)
-            if score < best_score:
-                best_score = score
-                best_candidate = candidate
-        
-        if best_candidate is not None:
-            improved[n-1] = best_candidate
-            print(f"N={n-1}: Improved to {best_score:.6f}")
-    
-    return improved
-```
+def place_tree_bottom_left(existing_trees, angle):
+    """Place a new tree at bottom-left feasible position."""
+    # Start from origin and search for valid placement
+    for y in np.arange(-2, 5, 0.05):
+        for x in np.arange(-2, 5, 0.05):
+            candidate = existing_trees + [(x, y, angle)]
+            if not check_overlap(candidate):
+                return (x, y, angle)
+    return None
 
-### Alternative: Small N Exhaustive Search
-
-For N=2-5, try exhaustive angle search with strict overlap validation:
-
-```python
-def exhaustive_small_n(n, angle_step=1.0):
-    """Exhaustive search for small N with strict overlap validation."""
+def exhaustive_n2(angle_step=1.0):
+    """Exhaustive search for N=2 optimal configuration."""
     best_score = float('inf')
     best_config = None
     
     angles = np.arange(0, 360, angle_step)
+    total = len(angles) ** 2
     
-    # For N=2, try all angle pairs
-    for a1 in angles:
+    for i, a1 in enumerate(angles):
         for a2 in angles:
-            # Place trees using bottom-left heuristic
-            config = place_trees_bottom_left(n, [a1, a2])
+            # Tree 1 at origin
+            tree1 = (0, 0, a1)
             
-            # Validate no overlaps
-            if not validate_no_overlap(config):
-                continue
+            # Tree 2 placed using bottom-left heuristic
+            tree2 = place_tree_bottom_left([tree1], a2)
             
-            score = calculate_score_for_n(config)
-            if score < best_score:
-                best_score = score
-                best_config = config
+            if tree2 is not None:
+                config = [tree1, tree2]
+                bbox = calculate_bbox_size(config)
+                score = bbox ** 2 / 2  # Score formula: s²/n
+                
+                if score < best_score:
+                    best_score = score
+                    best_config = config
+        
+        if i % 36 == 0:
+            print(f"Progress: {i}/{len(angles)} angles, best score: {best_score:.6f}")
     
     return best_score, best_config
+
+# Run for N=2
+print("Searching for optimal N=2 configuration...")
+score_n2, config_n2 = exhaustive_n2(angle_step=1.0)
+print(f"N=2 best score: {score_n2:.6f}")
+print(f"N=2 best config: {config_n2}")
+
+# Compare to baseline
+baseline_n2_score = 0.4508  # From previous analysis
+print(f"Baseline N=2 score: {baseline_n2_score:.6f}")
+print(f"Improvement: {baseline_n2_score - score_n2:.6f}")
 ```
 
-## ✅ REQUIRED: PER-N TRACKING
+### Expected Outcomes
+1. **If we find improvement for N=2-5**: Scale up to all N, accumulate per-N improvements
+2. **If baseline is optimal for N=2-5**: Confirms baseline is extremely well-optimized, need different approach
 
-Track best solution for EACH N value separately:
+### After Small N Search
+If small N search succeeds, implement for all N:
+1. Use exhaustive search for N=2-10
+2. Use constructive heuristic + local search for N=11-50
+3. Use tessellation/grid approach for N=51-200
 
+## Alternative Approaches to Try (if exhaustive search fails)
+
+### 1. Asymmetric Placement Strategy
+Discussion 666880 suggests asymmetric solutions beat symmetric ones.
+- Instead of grid/lattice, try random perturbations from baseline
+- Use simulated annealing with LARGE perturbations (not small tweaks)
+
+### 2. Genetic Algorithm with Custom Operators
 ```python
-# Load baseline per-N scores
-baseline_scores = {}
-for n in range(1, 201):
-    baseline_scores[n] = calculate_score_for_n(baseline_configs[n])
+def crossover(parent1, parent2, n):
+    """Swap partial solutions between parents."""
+    split = n // 2
+    child = parent1[:split] + parent2[split:]
+    return child
 
-# After optimization, compare per-N scores
-improved_n = []
-for n in range(1, 201):
-    new_score = calculate_score_for_n(new_configs[n])
-    if new_score < baseline_scores[n] - 0.0001:  # Meaningful improvement
-        improved_n.append(n)
-        print(f"✅ N={n}: {baseline_scores[n]:.6f} -> {new_score:.6f}")
-
-# Save improvements even if total score is worse
+def mutate(config, mutation_rate=0.1):
+    """Rotate/translate random trees."""
+    for i in range(len(config)):
+        if random.random() < mutation_rate:
+            x, y, angle = config[i]
+            # Random perturbation
+            config[i] = (x + random.gauss(0, 0.1), 
+                        y + random.gauss(0, 0.1), 
+                        (angle + random.gauss(0, 10)) % 360)
+    return config
 ```
 
-## ✅ SUBMISSION FORMAT
+### 3. No-Fit Polygon (NFP) Approach
+Precompute feasible placement regions for each tree pair:
+- NFP(A, B) = set of positions where B can be placed without overlapping A
+- Enables O(1) collision checks during optimization
 
-Use 's' prefix for precision preservation:
+## ✅ MANDATORY: PER-N TRACKING
+
+Track best solution for EACH N separately:
 ```python
-def format_submission(configs):
-    rows = []
-    for n in range(1, 201):
-        for i, (x, y, deg) in enumerate(configs[n]):
-            rows.append({
-                'id': f'{n:03d}_{i}',
-                'x': f's{x:.20f}',
-                'y': f's{y:.20f}',
-                'deg': f's{deg:.20f}'
-            })
-    return pd.DataFrame(rows)
+# After each experiment
+for n in range(1, 201):
+    my_score = calculate_score_for_n(my_solution, n)
+    baseline_score = baseline_scores[n]
+    if my_score < baseline_score - 1e-6:
+        print(f"✅ N={n}: IMPROVED by {baseline_score - my_score:.6f}")
+        # Save this N's solution
 ```
 
-## Score Breakdown (from analysis)
+## ✅ SUBMIT EVERY EXPERIMENT
 
-| N Range | Score | % of Total |
-|---------|-------|------------|
-| 1-10 | 4.33 | 6.1% |
-| 11-20 | 3.72 | 5.3% |
-| 21-50 | 10.98 | 15.5% |
-| 51-100 | 17.61 | 24.9% |
-| 101-150 | 17.13 | 24.3% |
-| 151-200 | 16.84 | 23.9% |
-
-**Key insight**: N=1 is already optimal (0.6612). Focus on N=2-10 for highest impact.
+With 98 submissions remaining, submit EVERY valid experiment:
+- LB feedback tells us what ACTUALLY works
+- Even if CV is worse, LB might be different
+- Track what we learn from each submission
 
 ## What NOT to Try
+- ❌ Running bbox3/sa_fast with different parameters (already at ceiling)
+- ❌ Simple lattice/grid approaches (proven worse than baseline)
+- ❌ Backward propagation (yields no improvement)
+- ❌ Any approach that modifies existing solutions incrementally
 
-1. ❌ Simple lattice approach (Zaburo) - WORSE than baseline for all N
-2. ❌ Running bbox3/sa_fast binaries - produces overlaps
-3. ❌ Loading pre-optimized solutions and running C++ optimizer - same issue
-
-## SUBMIT AFTER EVERY EXPERIMENT
-
-With 98 submissions remaining, submit every valid experiment to get LB feedback.
+## Success Criteria
+- ✅ **SUCCESS**: Score improved by > 0.01 from baseline (70.615)
+- ⚠️ **MARGINAL**: Score improved by 0.001 - 0.01
+- ❌ **FAILURE**: Score same or worse → try different approach immediately
