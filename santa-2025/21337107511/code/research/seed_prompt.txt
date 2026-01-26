@@ -20,7 +20,7 @@ The baseline (snapshot 21337353543) is at a **strong local optimum**. All approa
 
 ...CANNOT escape this local optimum.
 
-### The ONLY Path Forward: C++ Optimizer with CORRECT Parameters
+### The ONLY Path Forward: C++ Optimizer with CORRECT Parameters OR Numba JIT
 
 The top kernels (scoring ~68.5) use bbox3.cpp with:
 - **15,000-20,000 iterations** (not 1000 like exp_009)
@@ -29,69 +29,75 @@ The top kernels (scoring ~68.5) use bbox3.cpp with:
 - **Metropolis acceptance**: accept if delta < 0 OR random() < exp(-delta/temp)
 - **OpenMP parallelization** for speed
 
-The C++ optimizer in exp_009 used WRONG parameters:
-- Only 1000 iterations (should be 15000+)
-- Scale = 0.1 (should be 0.001 or smaller)
-- No proper Metropolis acceptance
-
 ## ⛔ FORBIDDEN (WILL BE REJECTED)
 - Running bbox3/sa_fast as a binary without fixing parameters
-- subprocess.run() or os.system() to run pre-compiled binaries
+- subprocess.run() or os.system() to run pre-compiled binaries AS-IS
 - "Optimizing" existing CSV files with Python SA (proven to fail)
 - Ensemble approaches (EXHAUSTED - only 1.76e-7 improvement)
 - "Rebuild from corners" (EXHAUSTED - only 4.6e-7 improvement)
 
-## ✅ REQUIRED: FIX AND RUN C++ OPTIMIZER
+## ✅ REQUIRED FOR NEXT EXPERIMENT: NUMBA-ACCELERATED SA
 
-### Step 1: Create a PROPER C++ Simulated Annealing
+Since C++ compilation may be complex, use Numba JIT to speed up Python SA by 100x.
 
-Write a new C++ file with CORRECT parameters:
-
-```cpp
-// Key parameters that MUST be correct:
-int num_iterations = 15000;  // NOT 1000
-int num_rounds = 10;         // Multiple rounds
-double initial_temp = 1.0;
-double final_temp = 0.000005;
-
-// Proper temperature schedule
-double temp = initial_temp * pow(final_temp / initial_temp, (double)iter / num_iterations);
-
-// Proper Metropolis acceptance
-double delta = new_score - old_score;
-if (delta < 0 || rf() < exp(-delta / temp)) {
-    // Accept the move
-}
-
-// Small perturbations
-double dx = (rf() - 0.5) * 0.002;  // NOT 0.1
-double dy = (rf() - 0.5) * 0.002;
-double dangle = (rf() - 0.5) * 2.0;  // degrees
-```
-
-### Step 2: Compile and Run
-
-```bash
-g++ my_sa.cpp -o my_sa -std=c++17 -fopenmp -O3 -march=native
-./my_sa -n 15000 -r 10
-```
-
-### Step 3: Validate Output with Kaggle's Exact Method
-
-Before submitting, validate using Decimal(prec=25) and 1e18 integer scaling.
-
-## Alternative: Numba JIT for Python SA
-
-If C++ is too complex, use Numba to speed up Python SA by 100x:
+### MANDATORY IMPLEMENTATION:
 
 ```python
-from numba import njit
+from numba import njit, prange
 import numpy as np
 
+# Precompute tree polygon vertices (15 vertices per tree)
+TX = np.array([0, 0.125, 0.0625, 0.2, 0.1, 0.35, 0.075, 0.075, -0.075, -0.075, -0.35, -0.1, -0.2, -0.0625, -0.125])
+TY = np.array([0.8, 0.5, 0.5, 0.25, 0.25, 0, 0, -0.2, -0.2, 0, 0, 0.25, 0.25, 0.5, 0.5])
+
 @njit
-def fast_sa(trees_x, trees_y, trees_angle, n_iterations=15000):
+def rotate_tree(tx, ty, angle_deg):
+    """Rotate tree vertices by angle (degrees)."""
+    angle_rad = angle_deg * np.pi / 180.0
+    cos_a = np.cos(angle_rad)
+    sin_a = np.sin(angle_rad)
+    rx = tx * cos_a - ty * sin_a
+    ry = tx * sin_a + ty * cos_a
+    return rx, ry
+
+@njit
+def compute_bbox(trees_x, trees_y, trees_angle, n):
+    """Compute bounding box side length for n trees."""
+    min_x = np.inf
+    max_x = -np.inf
+    min_y = np.inf
+    max_y = -np.inf
+    
+    for i in range(n):
+        rx, ry = rotate_tree(TX, TY, trees_angle[i])
+        for j in range(15):
+            x = trees_x[i] + rx[j]
+            y = trees_y[i] + ry[j]
+            min_x = min(min_x, x)
+            max_x = max(max_x, x)
+            min_y = min(min_y, y)
+            max_y = max(max_y, y)
+    
+    return max(max_x - min_x, max_y - min_y)
+
+@njit
+def check_overlap(trees_x, trees_y, trees_angle, n, tree_idx):
+    """Check if tree at tree_idx overlaps with any other tree."""
+    # Simplified overlap check using bounding boxes
+    # For full accuracy, would need polygon intersection
+    for i in range(n):
+        if i == tree_idx:
+            continue
+        # Check bounding box overlap first
+        # ... (implement proper overlap check)
+    return False
+
+@njit
+def fast_sa(trees_x, trees_y, trees_angle, n, n_iterations=15000):
     """Numba-accelerated simulated annealing."""
-    best_score = compute_score(trees_x, trees_y, trees_angle)
+    best_side = compute_bbox(trees_x, trees_y, trees_angle, n)
+    best_score = (best_side ** 2) / n
+    
     temp = 1.0
     final_temp = 0.000005
     
@@ -99,29 +105,56 @@ def fast_sa(trees_x, trees_y, trees_angle, n_iterations=15000):
         temp = 1.0 * (final_temp / 1.0) ** (i / n_iterations)
         
         # Random perturbation
-        tree_idx = np.random.randint(len(trees_x))
+        tree_idx = np.random.randint(n)
         dx = (np.random.random() - 0.5) * 0.002
         dy = (np.random.random() - 0.5) * 0.002
         dangle = (np.random.random() - 0.5) * 2.0
         
-        # Try move
-        old_x, old_y, old_angle = trees_x[tree_idx], trees_y[tree_idx], trees_angle[tree_idx]
+        # Save old values
+        old_x = trees_x[tree_idx]
+        old_y = trees_y[tree_idx]
+        old_angle = trees_angle[tree_idx]
+        
+        # Apply move
         trees_x[tree_idx] += dx
         trees_y[tree_idx] += dy
         trees_angle[tree_idx] += dangle
         
-        new_score = compute_score(trees_x, trees_y, trees_angle)
+        # Check for overlaps
+        if check_overlap(trees_x, trees_y, trees_angle, n, tree_idx):
+            # Reject - restore
+            trees_x[tree_idx] = old_x
+            trees_y[tree_idx] = old_y
+            trees_angle[tree_idx] = old_angle
+            continue
+        
+        new_side = compute_bbox(trees_x, trees_y, trees_angle, n)
+        new_score = (new_side ** 2) / n
         delta = new_score - best_score
         
         # Metropolis acceptance
         if delta < 0 or np.random.random() < np.exp(-delta / temp):
             best_score = new_score
+            best_side = new_side
         else:
             # Reject - restore
-            trees_x[tree_idx], trees_y[tree_idx], trees_angle[tree_idx] = old_x, old_y, old_angle
+            trees_x[tree_idx] = old_x
+            trees_y[tree_idx] = old_y
+            trees_angle[tree_idx] = old_angle
     
-    return best_score
+    return best_score, trees_x, trees_y, trees_angle
 ```
+
+### KEY PARAMETERS (MUST USE THESE):
+- n_iterations = 15000 (NOT 1000)
+- temp: 1.0 → 0.000005 (exponential decay)
+- perturbation scale: 0.002 (NOT 0.1)
+- Metropolis acceptance: accept if delta < 0 OR random() < exp(-delta/temp)
+
+### TESTING STRATEGY:
+1. First test on N=10, N=20, N=30 to verify it works
+2. If improvements found, scale to all N=1-200
+3. Run multiple rounds (10+) to accumulate improvements
 
 ## ✅ REQUIRED: PER-N TRACKING
 
@@ -130,13 +163,6 @@ Track best solution for EACH N separately:
 - After each experiment, compare per-N
 - Keep only N values where you improved
 - Ensemble = best per-N from all sources
-
-## Expected Outcome
-
-With CORRECT C++ SA parameters (15000 iterations, proper temperature):
-- Should find improvements for at least SOME N values
-- Even 0.001 improvement per N across 200 N values = 0.2 total improvement
-- Multiple rounds accumulate improvements
 
 ## Response to Evaluator
 
@@ -147,7 +173,7 @@ The evaluator correctly identified that:
 
 I agree with all points. The next experiment MUST:
 1. Use CORRECT SA parameters (15000+ iterations, proper temp schedule)
-2. Either fix C++ code or use Numba JIT
+2. Use Numba JIT for speed (100x faster than pure Python)
 3. Run on ALL N values
 4. Validate with Kaggle's exact method before submitting
 
