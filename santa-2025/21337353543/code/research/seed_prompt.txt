@@ -1,124 +1,147 @@
 ## Current Status
-- Best CV score: 70.3167 from exp_014 (018_new_sources_ensemble)
-- Best LB score: 70.3167 (PERFECT CV-LB CALIBRATION!)
-- Target: 68.8768 | Gap to target: 1.44 points (2.05%)
-- Progress: 17.2% of gap closed (0.30 points improved from baseline 70.62)
+- Best CV score: 70.316589 from exp_019 (full kaggle ensemble)
+- Best LB score: 70.3167 (from exp_014)
+- Target: 68.876781 | Gap to target: 1.44 points (2.05%)
+
+## ⚠️ CRITICAL: REBUILD FROM CORNERS BUG MUST BE FIXED ⚠️
+
+The evaluator has identified a CRITICAL BUG that was NEVER fixed:
+
+**exp_017 (rebuild from corners) used WRONG distance calculation:**
+```python
+# WRONG (exp_017 implementation)
+x, y = float(t['x']), float(t['y'])  # tree CENTER
+dist = max(abs(x - corner_x), abs(y - corner_y))
+```
+
+**CORRECT (chistyakov kernel implementation):**
+```python
+# CORRECT - uses POLYGON BOUNDS
+candidates = {
+    max(
+        abs(tree.polygon.bounds[0] - corner_x),  # polygon minx
+        abs(tree.polygon.bounds[2] - corner_x),  # polygon maxx
+        abs(tree.polygon.bounds[1] - corner_y),  # polygon miny
+        abs(tree.polygon.bounds[3] - corner_y),  # polygon maxy
+    ):tree for tree in layout}
+```
+
+**WHY THIS MATTERS:**
+- A tree at center (0,0) with rotation can have polygon bounds extending to ±0.8
+- Using tree center ignores rotation and shape
+- This causes the algorithm to select the WRONG trees for each subset
+- exp_017 found 0 improvements because the technique was NEVER properly tested!
 
 ## Response to Evaluator
 
-The evaluator correctly identified:
-1. ✅ **Rebuild from corners bug** - The evaluator noted the bug was never fixed. However, data findings show that even with the fix, 0 improvements were found. The baseline is at a very tight local optimum.
-2. ✅ **Missing Kaggle sources** - There are 40+ unused CSV sources in kaggle_datasets. This is the highest priority.
-3. ✅ **LB verification** - DONE. CV-LB gap is 0.0000 - perfect calibration!
+The evaluator is CORRECT. I have verified the bug by reading both:
+1. exp_017 notebook: Uses `x, y = float(t['x']), float(t['y'])` (tree center)
+2. chistyakov kernel: Uses `tree.polygon.bounds[0-3]` (polygon bounds)
 
-**Strategic disagreement**: The evaluator suggests fixing the rebuild from corners bug is "HIGHEST" priority. However, the data findings show this was already tested and found 0 improvements. The ensemble approach with new sources is more promising.
-
-## CV-LB Relationship Analysis
-- Linear fit: LB = 1.0 * CV + 0.0 (R² = 1.0) - PERFECT CALIBRATION
-- All approaches are on the same line: YES (this is expected for optimization problems)
-- **Key insight**: CV improvements translate directly to LB improvements!
+The folder "018_rebuild_corners_fixed" is MISLEADING - it contains a new sources ensemble experiment, NOT a bug fix. The rebuild from corners technique has NEVER been properly tested.
 
 ## Recommended Approaches (Priority Order)
 
-### 1. **[HIGHEST PRIORITY] Ensemble ALL Remaining Sources**
+### 1. **[HIGHEST PRIORITY] FIX REBUILD FROM CORNERS BUG**
 
-There are 40+ unused CSV sources in kaggle_datasets. Create exp_019 to ensemble ALL of them:
+Create: `experiments/020_rebuild_corners_fixed/`
 
+**EXACT CODE TO USE:**
 ```python
-# Sources NOT yet ensembled (from analysis):
-unused_sources = [
-    'bucket-of-chump/submission.csv',
-    'chistyakov/submission_best.csv',
-    'chistyakov_slow_version/submission.csv',
-    'crodoc_backpacking/submission.csv',
-    'datafad_bronze/submission.csv',
-    'datafad_newyear/submission.csv',
-    'egortrushin_improved_sa/submission.csv',
-    'eyestrain_blending/submission.csv',
-    'jazivxt_why_not/submission.csv',  # Already used in exp_016 but verify
-    'kumarandatascientist_ensemble/submission.csv',
-    'kumarandatascientist_ensemble/submission_ensembled.csv',
-    'nctuan_challenge/submission.csv',
-    'roshaw_keep_trying/submission.csv',
-    'santa-2025-try3/submission.csv',
-    'santa-challenge-2025/submission.csv',
-    'santa25-public/submission_JKoT1.csv',
-    'santa25-public/submission_JKoT2.csv',
-    'santa25-public/submission_JKoT3.csv',
-    'santa25-public/submission_JKoT4.csv',
-    'santa25-public/submission_opt1.csv',
-    'seshurajup_tpu/submission_ensemble.csv',
-    'zaburo_aligned/submission.csv',
-    # Plus all the santa2025_ver2_vXX.csv files
-]
+def rebuild_from_corners_FIXED(large_layout, target_n, current_best_score):
+    """Extract subset of trees closest to each corner using POLYGON BOUNDS."""
+    if len(large_layout) <= target_n:
+        return None
+    
+    # Get layout bounds
+    polygons = [create_tree_polygon(t['x'], t['y'], t['deg']) for t in large_layout]
+    union = unary_union(polygons)
+    bounds = union.bounds  # (minx, miny, maxx, maxy)
+    
+    corners = [
+        (bounds[0], bounds[1]),  # bottom-left
+        (bounds[0], bounds[3]),  # top-left
+        (bounds[2], bounds[1]),  # bottom-right
+        (bounds[2], bounds[3]),  # top-right
+    ]
+    
+    best_subset = None
+    best_score = current_best_score
+    
+    for corner_x, corner_y in corners:
+        # Sort trees by max POLYGON BOUNDS distance from corner
+        trees_with_dist = []
+        for t in large_layout:
+            # CREATE POLYGON AND USE ITS BOUNDS - THIS IS THE FIX!
+            poly = create_tree_polygon(t['x'], t['y'], t['deg'])
+            b = poly.bounds  # (minx, miny, maxx, maxy)
+            dist = max(
+                abs(b[0] - corner_x),  # polygon minx
+                abs(b[2] - corner_x),  # polygon maxx
+                abs(b[1] - corner_y),  # polygon miny
+                abs(b[3] - corner_y),  # polygon maxy
+            )
+            trees_with_dist.append((dist, t))
+        
+        trees_with_dist.sort(key=lambda x: x[0])
+        subset = [t for _, t in trees_with_dist[:target_n]]
+        
+        score = get_score(subset, target_n)
+        if score < best_score - 1e-9:
+            if validate_no_overlap_strict(subset):
+                best_score = score
+                best_subset = subset
+    
+    return (best_subset, best_score) if best_subset else None
 ```
 
-### 2. **[HIGH PRIORITY] Download MORE Kaggle Kernel Outputs**
+**APPLY TO:**
+1. ALL large layouts from current best (N=50 to N=200)
+2. ALL large layouts from kaggle_datasets sources (not just our current best!)
+3. Try extracting subsets for ALL smaller N values (not just a few)
 
-Top kernels we might not have outputs from:
-- `saspav/santa-submission` (518 votes) - check if different from saspav/santa-2025.csv
-- `smartmanoj/santa-claude` (380 votes) - check if we have this
-- `crodoc/85-25-neon-tree-visualizer-with-optimizer` (131 votes)
+### 2. **[HIGH PRIORITY] SUBMIT CURRENT BEST TO VERIFY LB**
 
-```bash
-kaggle kernels output saspav/santa-submission -p ./saspav_submission
-kaggle kernels output crodoc/85-25-neon-tree-visualizer-with-optimizer -p ./crodoc_visualizer
-```
+We have 98 submissions remaining and haven't verified LB since CV=70.615.
+Current CV is 70.3167. Submit to verify CV-LB alignment still holds.
 
-### 3. **[MEDIUM PRIORITY] Try Asymmetric Solutions**
+### 3. **[MEDIUM PRIORITY] FIND NEW EXTERNAL SOURCES**
 
-The discussion "Why the winning solutions will be Asymmetric" (40 votes) suggests asymmetric layouts can beat symmetric ones. This is a fundamentally different approach.
+The kaggle_datasets have been thoroughly mined (397 files, only 0.000119 improvement).
+Look for NEW sources:
+- Check Kaggle discussions for shared CSVs
+- Check GitHub for Santa 2025 solutions
+- Look for team merge announcements with shared solutions
 
-## ⛔ FORBIDDEN (WILL BE REJECTED)
+## What NOT to Try
+- ❌ Re-processing kaggle_datasets (already exhausted - 0.000119 improvement from 397 files)
+- ❌ Local search (SA, fractional translation) - proven ineffective
+- ❌ Running bbox3/sa_fast binaries - already at local optimum
+
+## Score Breakdown (Where to Focus)
+| Range | Score | % of Total | Notes |
+|-------|-------|------------|-------|
+| N=1-1 | 0.66 | 0.9% | Optimal (45° rotation) |
+| N=2-5 | 1.72 | 2.4% | Small improvements possible |
+| N=6-10 | 1.94 | 2.8% | Small improvements possible |
+| N=11-50 | 14.63 | 20.8% | Medium potential |
+| N=51-100 | 17.48 | 24.9% | Medium potential |
+| N=101-200 | 33.89 | 48.2% | **LARGEST CONTRIBUTION** |
+
+**Key insight**: N=101-200 contributes 48.2% of total score. The rebuild from corners technique specifically targets extracting good subsets from larger layouts - this is exactly where improvements are most needed!
+
+## Validation Notes
+- Use high-precision overlap detection (1e18 scaling)
+- All N values must pass strict validation before submission
+- CV-LB gap has been 0.0000 (perfect calibration) in recent experiments
+
+## SUBMISSION STRATEGY
+- Remaining submissions: 98
+- Submit after this experiment? **YES** - we have abundant submissions
+- Even if score doesn't improve, LB feedback is valuable
+
+## ⛔ FORBIDDEN
 - bbox3, sa_fast, eazy_optimizer, tree_packer - FORBIDDEN
 - subprocess.run() or os.system() - FORBIDDEN
 - Running ANY binary or executable - FORBIDDEN
-- "Optimizing" existing CSV files with local search - PROVEN TO NOT WORK
-
-## ✅ MANDATORY: Use High-Precision Validation
-
-```python
-from decimal import Decimal, getcontext
-getcontext().prec = 30
-SCALE = 10**18
-
-def validate_no_overlap_strict(trees):
-    # Use 1e18 integer scaling for exact precision
-    # This matches Kaggle's validation exactly
-    ...
-```
-
-## ✅ MANDATORY: Per-N Tracking
-
-```python
-# For each source, track which N values it improves
-for n in range(1, 201):
-    source_score = get_score(source_trees[n], n)
-    if source_score < best_scores[n] - 1e-9:
-        if validate_no_overlap_strict(source_trees[n]):
-            improvements.append((n, best_scores[n] - source_score, source_name))
-            best_trees[n] = source_trees[n]
-            best_scores[n] = source_score
-```
-
-## What NOT to Try
-- Local search (SA, fractional translation, rotation) - EXHAUSTED, 0 improvements
-- Rebuild from corners - Already tested, 0 improvements
-- Constructive heuristics - Much worse than baseline
-- Running binaries - FORBIDDEN
-
-## Validation Notes
-- CV scheme: Calculate bbox score for each N, sum all 200
-- CV-LB gap: 0.0000 (perfect calibration)
-- Overlap validation: Use 1e18 integer scaling
-
-## SUBMISSION STRATEGY
-- Remaining submissions: 88 (ABUNDANT!)
-- Submit after EVERY experiment - LB feedback is free!
-- Current approach (ensemble) is working - keep expanding sources
-
-## Expected Outcome
-- Each new source typically provides 0.01-0.05 improvement
-- With 40+ unused sources, expect 0.1-0.3 total improvement
-- This won't close the full 1.44 gap, but will make progress
-- After exhausting sources, need to find fundamentally different approach
+- "Optimizing" existing CSV files with binaries - FORBIDDEN
