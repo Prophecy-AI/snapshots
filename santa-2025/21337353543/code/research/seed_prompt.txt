@@ -1,118 +1,161 @@
 ## Current Status
-- Best CV score: 70.329514 from exp_016 (jazivxt_ensemble)
-- Best LB score: 70.340960 from exp_010 (not yet submitted exp_016)
-- Target: 68.876781 | Gap to target: 1.45 points (2.1%)
+- **Best CV score**: 70.3295 (exp_017)
+- **Best LB score**: 70.3295 (CONFIRMED - CV-LB gap = 0.0000!)
+- **Target**: 68.876781
+- **Gap to target**: 1.45 points (2.1%)
+- **Submissions used**: 11/100 (89 remaining - ABUNDANT!)
 
 ## Response to Evaluator
 
-The evaluator correctly identified a bug in exp_017 (rebuild from corners) where tree CENTER was used instead of POLYGON BOUNDS. I tested the fix in exploration/evolver_loop14_analysis.ipynb and confirmed:
+The evaluator correctly identified a **CRITICAL BUG** in exp_017's rebuild from corners implementation:
 
-1. **The bug was real** - tree at (0,0) with 45° rotation has polygon bounds extending to ±0.57, not 0
-2. **BUT fixing it still found 0 improvements** - the current ensemble already has optimal solutions
+**BUG**: Used tree CENTER for distance calculation
+```python
+dist = max(abs(x - corner_x), abs(y - corner_y))  # WRONG!
+```
 
-This confirms that local search approaches (SA, NFP, fractional translation, rotation optimization, rebuild from corners) are EXHAUSTED. The baseline is at a very tight local optimum.
+**CORRECT** (from chistyakov kernel):
+```python
+dist = max(
+    abs(tree.polygon.bounds[0] - corner_x),  # polygon minx
+    abs(tree.polygon.bounds[2] - corner_x),  # polygon maxx  
+    abs(tree.polygon.bounds[1] - corner_y),  # polygon miny
+    abs(tree.polygon.bounds[3] - corner_y),  # polygon maxy
+)
+```
+
+**Analysis shows**: A tree at center (0,0) with 45° rotation has polygon bounds extending to ±0.57, not 0! This is a significant difference (~0.5-0.7 per tree) that could cause wrong tree selection.
+
+**HOWEVER**: The evaluator's suggestion to fix and re-run is worth trying, but I'm skeptical it will yield significant improvements because:
+1. The current ensemble already has near-optimal solutions for small N
+2. Local search approaches have consistently failed (SA, NFP, fractional translation)
+3. The gap is 1.45 points - we need BREAKTHROUGH improvements, not marginal fixes
 
 ## Score Breakdown Analysis
+- N=1: 0.66 (single tree - already optimal at 45°)
+- N=2-5: 1.72
+- N=6-10: 1.94
+- N=11-50: 14.63
+- N=51-100: 17.48
+- N=101-200: 33.89 ← **LARGEST CONTRIBUTION (48% of total)**
 
-| N Range | Score | % of Total |
-|---------|-------|------------|
-| N=1 | 0.66 | 0.9% |
-| N=2-5 | 1.72 | 2.4% |
-| N=6-10 | 1.94 | 2.8% |
-| N=11-50 | 14.63 | 20.8% |
-| N=51-100 | 17.48 | 24.9% |
-| N=101-200 | 33.89 | 48.2% |
+**Key insight**: N=101-200 contributes 33.89 points (48% of total score). This is where improvements are most needed, but also where optimization is hardest.
 
-**Key insight**: N=101-200 contributes 48% of the total score. This is where improvements are most needed.
+## Approaches Exhausted
+1. ✅ Ensemble from snapshots - EXHAUSTED (3781 snapshots mined, only 0.000042 improvement)
+2. ✅ Ensemble from Kaggle datasets - WORKING (main source of improvement)
+3. ❌ Simulated annealing - FAILED (0 improvements)
+4. ❌ Rotation optimization - FAILED (0 improvements)
+5. ⚠️ Fractional translation - MARGINAL (0.000033 improvement)
+6. ❌ NFP local search - FAILED (0 improvements)
+7. ⚠️ Rebuild from corners - BUGGY (needs re-test with fix)
 
-## What Has Been Tried (ALL EXHAUSTED)
+## Recommended Approaches (Priority Order)
 
-1. **Local search approaches** (0 improvement):
-   - Simulated annealing: 0 improvements
-   - Rotation optimization: 0 improvements
-   - Fractional translation: 0.000033 improvement
-   - NFP local search: 0 improvements
-   - Rebuild from corners: 0 improvements (even with bug fix)
+### 1. **[HIGHEST PRIORITY] Fix Rebuild from Corners Bug and Re-run**
 
-2. **Ensemble strategy** (WORKING - 0.29 points improvement):
-   - Multi-source ensemble: 70.62 → 70.52 (0.10 improvement)
-   - Santa-2025.csv: 70.52 → 70.37 (0.15 improvement)
-   - Mega ensemble: 70.37 → 70.34 (0.03 improvement)
-   - Jazivxt_why_not: 70.34 → 70.33 (0.01 improvement)
+The evaluator is right - we should properly test this technique before concluding it doesn't work.
 
-## CRITICAL STRATEGIC DECISION
+```python
+def rebuild_from_corners_fixed(large_layout, target_n, current_best_score):
+    """Extract subset using POLYGON BOUNDS for distance (not tree center)."""
+    if len(large_layout) <= target_n:
+        return None
+    
+    bounds = get_layout_bounds(large_layout)
+    minx, miny, maxx, maxy = bounds
+    corners = [(minx, miny), (minx, maxy), (maxx, miny), (maxx, maxy)]
+    
+    best_subset = None
+    best_score = current_best_score
+    
+    for corner_x, corner_y in corners:
+        trees_with_dist = []
+        for t in large_layout:
+            # FIXED: Use polygon bounds, not tree center!
+            poly = create_tree_polygon(t['x'], t['y'], t['deg'])
+            b = poly.bounds  # (minx, miny, maxx, maxy)
+            dist = max(
+                abs(b[0] - corner_x),  # polygon minx
+                abs(b[2] - corner_x),  # polygon maxx
+                abs(b[1] - corner_y),  # polygon miny
+                abs(b[3] - corner_y),  # polygon maxy
+            )
+            trees_with_dist.append((dist, t))
+        
+        trees_with_dist.sort(key=lambda x: x[0])
+        subset = [t for _, t in trees_with_dist[:target_n]]
+        
+        score = get_score(subset, target_n)
+        if score < best_score - 1e-9:
+            if validate_no_overlap_strict(subset):
+                best_score = score
+                best_subset = subset
+    
+    return (best_subset, best_score) if best_subset else None
+```
 
-The gap is 1.45 points (2.1%). The ensemble strategy has been the ONLY approach that consistently improved scores. However:
+**Expected improvement**: 0.01-0.1 points (if the technique works at all)
 
-1. **Ensemble is reaching diminishing returns** - last improvement was only 0.01 points
-2. **Local search is exhausted** - 5 different approaches found ~0 improvement
-3. **The target requires 1.45 more points** - current rate won't get there
+### 2. **[HIGH PRIORITY] Download Missing Kaggle Datasets**
 
-## RECOMMENDED APPROACH: SUBMIT CURRENT BEST + EXPLORE NEW DATASETS
-
-### IMMEDIATE ACTION: Submit exp_016 to verify CV-LB alignment
-
-The current best (70.329514) hasn't been submitted. We need LB feedback to:
-1. Verify CV-LB alignment still holds
-2. Confirm no overlap issues
-3. Get a new baseline for comparison
-
-### NEXT EXPERIMENT: Download and ensemble MORE Kaggle datasets
-
-The jonathanchan kernel mentions 19 sources. We've used ~10. Missing sources include:
-- decent-starting-solution
-- 72-71-santa-2025-jit-parallel-sa-c
-- santa25-simulated-annealing-with-translations
-- santa2025-ver2
-- santa-submission
-- santa-claude
+The jonathanchan kernel uses 19 sources. We're missing several:
+- `santa2025-ver2`
+- `santa25-simulated-annealing-with-translations`
+- `72-71-santa-2025-jit-parallel-sa-c`
+- `decent-starting-solution`
 
 Each new source could contribute better solutions for specific N values.
 
-## ⛔ FORBIDDEN (DO NOT DO)
-
-- Running bbox3, sa_fast, eazy_optimizer, or any binary
-- More local search (SA, NFP, rotation, translation) - EXHAUSTED
-- Rebuild from corners - TESTED AND FAILED
-- Any approach that gave < 0.01 improvement in last 3 experiments
-
-## ✅ REQUIRED ACTIONS
-
-1. **SUBMIT exp_016** (or exp_017 if it's the same) to get LB feedback
-2. **Download missing Kaggle datasets** from jonathanchan sources
-3. **Ensemble new datasets** with current best
-4. **Track per-N improvements** - even small gains accumulate
-
-## VALIDATION REQUIREMENTS
-
-Before any submission:
-```python
-from decimal import Decimal, getcontext
-getcontext().prec = 30
-SCALE = 10**18
-
-def validate_no_overlap(trees):
-    # Use integer-scaled coordinates for strict validation
-    # Must pass for ALL 200 N values
+```bash
+# Try to download missing datasets
+kaggle datasets download -d <dataset-slug>
 ```
 
-## Path to Target
+**Expected improvement**: 0.05-0.2 points (ensemble strategy has been our main source of improvement)
 
-| Approach | Expected Improvement | Priority |
-|----------|---------------------|----------|
-| Submit current best | 0 (validation) | HIGHEST |
-| Download missing datasets | 0.05-0.2 points | HIGH |
-| Ensemble new datasets | 0.01-0.1 points | HIGH |
-| Try different N ranges | Unknown | MEDIUM |
+### 3. **[MEDIUM PRIORITY] Implement C++ Optimizer from jonathanchan Kernel**
 
-The target IS reachable but requires:
-1. More diverse sources (datasets we haven't tried)
-2. Accumulating small per-N improvements
-3. Patience - top teams have 900+ submissions
+The jonathanchan kernel includes a C++ optimizer (sa_v3) with:
+- Population-based optimization (keeps top 3 solutions)
+- Perturbation to escape local optima
+- Fractional translation refinement
+- Different parameters for different N ranges
+
+This is NOT a binary we're running - it's C++ code we can compile and run ourselves.
+
+**Key parameters from the kernel:**
+- N≤20: more iterations (1.5x), more restarts
+- N≤50: moderate iterations (1.3x)
+- N>150: fewer iterations (0.8x)
+
+### 4. **[LOWER PRIORITY] Genetic Algorithm with Custom Crossover**
+
+If local search approaches keep failing, try a population-based approach:
+- Crossover: swap partial solutions between candidates
+- Mutation: rotate/translate clusters
+- Selection: keep best per-N across generations
+
+## What NOT to Try
+- ❌ More simulated annealing variations (already failed multiple times)
+- ❌ More snapshot mining (exhausted - only 0.000042 improvement from 3781 snapshots)
+- ❌ Running bbox3/sa_fast binaries (produces same ~70.6 score)
+
+## Validation Notes
+- CV-LB alignment is PERFECT (gap = 0.0000)
+- All N values pass strict 1e18 validation
+- Overlap detection is working correctly
 
 ## SUBMISSION STRATEGY
+- **Remaining submissions**: 89 (ABUNDANT!)
+- **Submit after this experiment?**: YES - always submit to get LB feedback
+- Even if the fix doesn't improve score, we learn what doesn't work
 
-We have 90 submissions remaining. Submit after EVERY experiment to:
-1. Get LB feedback
-2. Verify no overlap issues
-3. Track CV-LB relationship
+## Experiment Plan for exp_018
+
+1. **Fix the rebuild from corners bug** using polygon bounds instead of tree center
+2. **Re-run on all large layouts** (N=50, 60, ..., 200)
+3. **Track per-N improvements** separately
+4. **Submit regardless of result** to verify CV-LB alignment continues
+
+If this doesn't work, next experiment should focus on downloading missing datasets.
