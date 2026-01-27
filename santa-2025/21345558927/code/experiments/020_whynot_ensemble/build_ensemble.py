@@ -87,24 +87,45 @@ print(f"Total CSV files to scan: {len(all_files)}")
 tx, ty = make_polygon_template()
 best = {n: {"score": 1e300, "data": None, "src": None} for n in range(1, 201)}
 
-# Load WHY-NOT as the baseline (it's better than our previous baseline!)
-whynot_path = '/home/code/data/external/kernel_outputs/why-not/submission.csv'
-print("Loading why-not as baseline...")
-whynot_df = pd.read_csv(whynot_path)
-whynot_df['N'] = whynot_df['id'].str.split('_').str[0].astype(int)
-whynot_total = 0
-for n, g in whynot_df.groupby('N'):
+# Load why-not as the base (it's the best validated submission)
+print("Loading why-not as base...")
+baseline_path = '/home/code/data/external/kernel_outputs/why-not/submission.csv'
+baseline_df = pd.read_csv(baseline_path)
+baseline_df['N'] = baseline_df['id'].str.split('_').str[0].astype(int)
+baseline_total = 0
+for n, g in baseline_df.groupby('N'):
     xs = strip(g['x'].to_numpy())
     ys = strip(g['y'].to_numpy())
     ds = strip(g['deg'].to_numpy())
     if np.isnan(xs).any() or np.isnan(ys).any() or np.isnan(ds).any():
-        print(f"WARNING: Why-not N={n} has NaN values!")
+        print(f"WARNING: Baseline N={n} has NaN values!")
         continue
     sc = score_group(xs, ys, ds, tx, ty)
-    whynot_total += sc
+    baseline_total += sc
     best[n] = {"score": float(sc), "data": g.drop(columns=['N']).copy(), "src": "why-not"}
 
-print(f"Why-not baseline total score: {whynot_total:.6f}")
+print(f"Why-not base score: {baseline_total:.6f}")
+
+# Also load team-blend as a secondary source
+print("Loading team-blend...")
+team_blend_path = '/home/code/data/external/kernel_outputs/team-optimization-blend/submission.csv'
+team_blend_df = pd.read_csv(team_blend_path)
+team_blend_df['N'] = team_blend_df['id'].str.split('_').str[0].astype(int)
+team_blend_improvements = 0
+for n, g in team_blend_df.groupby('N'):
+    xs = strip(g['x'].to_numpy())
+    ys = strip(g['y'].to_numpy())
+    ds = strip(g['deg'].to_numpy())
+    if np.isnan(xs).any() or np.isnan(ys).any() or np.isnan(ds).any():
+        continue
+    sc = score_group(xs, ys, ds, tx, ty)
+    if sc < best[n]['score'] - MIN_IMPROVEMENT:
+        # Check for overlaps
+        if not check_overlaps(list(xs), list(ys), list(ds)):
+            best[n] = {"score": float(sc), "data": g.drop(columns=['N']).copy(), "src": "team-blend"}
+            team_blend_improvements += 1
+
+print(f"Team-blend improvements: {team_blend_improvements}")
 
 # Track improvements
 improvements = []
@@ -114,7 +135,7 @@ overlap_rejections = 0
 
 # Scan all files for better solutions
 for fp in all_files:
-    if fp == whynot_path:
+    if fp in [baseline_path, team_blend_path]:
         continue
     try:
         df = pd.read_csv(fp)
@@ -170,7 +191,7 @@ for fp in all_files:
                 'source': os.path.basename(fp)
             })
             files_with_improvements.add(fp)
-            if improvement >= 0.0001:  # Only print significant improvements
+            if improvement > 0.001:
                 print(f"N={n}: {old_score:.6f} -> {sc:.6f} (+{improvement:.6f}) from {os.path.basename(fp)}")
 
 print(f"\nFiles processed: {files_processed}")
@@ -195,12 +216,12 @@ out.to_csv('submission.csv', index=False)
 
 # Calculate total score
 total = sum(best[n]['score'] for n in range(1, 201))
-improvement_from_whynot = whynot_total - total
+improvement_from_baseline = baseline_total - total
 
 print(f"\n=== FINAL RESULTS ===")
-print(f"Why-not baseline score: {whynot_total:.6f}")
+print(f"Why-not base score: {baseline_total:.6f}")
 print(f"New total score: {total:.6f}")
-print(f"Total improvement over why-not: {improvement_from_whynot:.6f}")
+print(f"Total improvement: {improvement_from_baseline:.6f}")
 
 # Count sources
 source_counts = {}
@@ -210,19 +231,19 @@ for n in range(1, 201):
         source_counts[src] = 0
     source_counts[src] += 1
 
-print(f"\nSource distribution:")
-for src, count in sorted(source_counts.items(), key=lambda x: -x[1])[:10]:
-    print(f"  {os.path.basename(src) if src else 'unknown'}: {count} N values")
+print(f"\nSources breakdown:")
+for src, count in sorted(source_counts.items(), key=lambda x: -x[1]):
+    print(f"  {os.path.basename(src) if '/' in src else src}: {count} N values")
 
 # Save metrics
 metrics = {
     'cv_score': total,
-    'whynot_score': whynot_total,
-    'improvement': improvement_from_whynot,
+    'baseline_score': baseline_total,
+    'improvement': improvement_from_baseline,
     'num_improvements': len(improvements),
     'overlap_rejections': overlap_rejections,
-    'source_counts': {os.path.basename(k) if k else 'unknown': v for k, v in source_counts.items()},
-    'improvements': improvements[:100]  # Save first 100
+    'source_counts': {os.path.basename(k) if '/' in k else k: v for k, v in source_counts.items()},
+    'improvements': improvements[:100]
 }
 with open('metrics.json', 'w') as f:
     json.dump(metrics, f, indent=2)
