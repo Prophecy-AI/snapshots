@@ -1,0 +1,287 @@
+"""
+Selective Threshold Ensemble
+- Use MIN_IMPROVEMENT=0.001 for problematic N values (N=2, N=70, N=79, N=123, N=138)
+- Use MIN_IMPROVEMENT=0.0001 for all other N values
+This should capture more improvements while avoiding overlap failures.
+"""
+
+import sys
+import os
+sys.path.insert(0, '/home/code')
+
+import numpy as np
+import pandas as pd
+import json
+import glob
+import time
+from decimal import Decimal, getcontext
+from shapely.geometry import Polygon
+
+from code.tree_geometry import TX, TY, calculate_score, get_tree_vertices_numba
+from code.utils import parse_submission, save_submission
+
+getcontext().prec = 30
+SCALE = 10**18
+
+# Problematic N values that caused overlap failures in previous experiments
+PROBLEMATIC_N = {2, 70, 79, 123, 138}
+
+# Thresholds
+SAFE_THRESHOLD = 0.0001  # Lower threshold for safe N values
+PROBLEMATIC_THRESHOLD = 0.001  # Higher threshold for problematic N values
+
+def get_tree_polygon_highprec(x, y, angle_deg):
+    """Get tree polygon with high-precision integer coordinates."""
+    rx, ry = get_tree_vertices_numba(x, y, angle_deg)
+    coords = []
+    for xi, yi in zip(rx, ry):
+        xi_int = int(Decimal(str(xi)) * SCALE)
+        yi_int = int(Decimal(str(yi)) * SCALE)
+        coords.append((xi_int, yi_int))
+    return Polygon(coords)
+
+def validate_no_overlap_strict(trees):
+    """Validate no overlaps using integer arithmetic."""
+    if len(trees) <= 1:
+        return True
+    
+    polygons = []
+    for x, y, angle in trees:
+        poly = get_tree_polygon_highprec(x, y, angle)
+        if not poly.is_valid:
+            return False
+        polygons.append(poly)
+    
+    for i in range(len(polygons)):
+        for j in range(i+1, len(polygons)):
+            if polygons[i].intersects(polygons[j]):
+                if not polygons[i].touches(polygons[j]):
+                    inter = polygons[i].intersection(polygons[j])
+                    if inter.area > 0:
+                        return False
+    return True
+
+def check_no_nan(trees):
+    """Check for NaN values."""
+    for x, y, angle in trees:
+        if np.isnan(x) or np.isnan(y) or np.isnan(angle):
+            return False
+    return True
+
+def load_submission_fast(csv_file):
+    """Load submission."""
+    try:
+        df = pd.read_csv(csv_file)
+        if 'id' not in df.columns or 'x' not in df.columns or len(df) != 20100:
+            return None
+        return parse_submission(df)
+    except:
+        return None
+
+def main():
+    print("=" * 70)
+    print("SELECTIVE THRESHOLD ENSEMBLE")
+    print("=" * 70)
+    print(f"Problematic N values: {PROBLEMATIC_N}")
+    print(f"Safe threshold: {SAFE_THRESHOLD}")
+    print(f"Problematic threshold: {PROBLEMATIC_THRESHOLD}")
+    
+    start_time = time.time()
+    
+    # Load baseline for fallback
+    print("\nLoading baseline...")
+    baseline_df = pd.read_csv('/home/code/experiments/001_valid_baseline/submission.csv')
+    baseline_configs = parse_submission(baseline_df)
+    baseline_scores = {n: calculate_score(baseline_configs[n]) for n in range(1, 201)}
+    baseline_total = sum(baseline_scores.values())
+    print(f"Baseline total: {baseline_total:.6f}")
+    
+    # Load all sources
+    sources = {}
+    
+    # 1. exp_010 (our current best validated submission)
+    print("\nLoading exp_010...")
+    exp010_df = pd.read_csv('/home/code/experiments/010_safe_ensemble/submission.csv')
+    sources['exp_010'] = parse_submission(exp010_df)
+    exp010_total = sum(calculate_score(sources['exp_010'][n]) for n in range(1, 201))
+    print(f"exp_010 total: {exp010_total:.6f}")
+    
+    # 2. External data
+    print("\nLoading external data...")
+    external_files = [
+        '/home/code/external_data/santa-2025.csv',
+        '/home/code/external_data/70.378875862989_20260126_045659.csv',
+        '/home/code/external_data/submission.csv',
+        '/home/code/external_data/submission_best.csv',
+    ]
+    for f in external_files:
+        if os.path.exists(f):
+            configs = load_submission_fast(f)
+            if configs is not None:
+                name = f.split('/')[-1]
+                sources[name] = configs
+                total = sum(calculate_score(configs[n]) for n in range(1, 201))
+                print(f"  {name}: {total:.6f}")
+    
+    # 3. Internal snapshots
+    print("\nLoading internal snapshots...")
+    snapshot_files = glob.glob('/home/nonroot/snapshots/santa-2025/**/*.csv', recursive=True)
+    loaded = 0
+    for f in snapshot_files:
+        configs = load_submission_fast(f)
+        if configs is not None:
+            sources[f] = configs
+            loaded += 1
+            if loaded % 500 == 0:
+                print(f"  Loaded {loaded} snapshots...")
+    print(f"  Total snapshots loaded: {loaded}")
+    
+    print(f"\nTotal sources: {len(sources)}")
+    
+    # Build ensemble with selective thresholds
+    print("\n" + "=" * 70)
+    print("BUILDING SELECTIVE THRESHOLD ENSEMBLE")
+    print("=" * 70)
+    
+    best_per_n = {}
+    improvements = []
+    rejected_small = []
+    rejected_overlap = []
+    
+    for n in range(1, 201):
+        # Select threshold based on whether N is problematic
+        threshold = PROBLEMATIC_THRESHOLD if n in PROBLEMATIC_N else SAFE_THRESHOLD
+        
+        best_score = baseline_scores[n]
+        best_config = baseline_configs[n]
+        best_source = "baseline"
+        
+        for source_name, configs in sources.items():
+            if n not in configs:
+                continue
+            
+            config = configs[n]
+            if len(config) != n:
+                continue
+            
+            if not check_no_nan(config):
+                continue
+            
+            score = calculate_score(config)
+            improvement = best_score - score
+            
+            # Apply selective threshold
+            if improvement < threshold:
+                if improvement > 0:
+                    rejected_small.append((n, improvement, source_name.split('/')[-1]))
+                continue
+            
+            # Strict overlap validation
+            if not validate_no_overlap_strict(config):
+                rejected_overlap.append((n, improvement, source_name.split('/')[-1]))
+                continue
+            
+            best_score = score
+            best_config = config
+            best_source = source_name
+        
+        best_per_n[n] = best_config
+        
+        if best_source != "baseline":
+            improvement = baseline_scores[n] - best_score
+            improvements.append((n, improvement, best_source.split('/')[-1]))
+            threshold_used = "PROBLEMATIC" if n in PROBLEMATIC_N else "SAFE"
+            print(f"N={n} [{threshold_used}]: Improved by {improvement:.6f} from {best_source.split('/')[-1]}")
+    
+    # Summary
+    print("\n" + "=" * 70)
+    print("SUMMARY")
+    print("=" * 70)
+    
+    final_total = sum(calculate_score(best_per_n[n]) for n in range(1, 201))
+    total_improvement = baseline_total - final_total
+    
+    print(f"Baseline total: {baseline_total:.6f}")
+    print(f"exp_010 total: {exp010_total:.6f}")
+    print(f"Final total: {final_total:.6f}")
+    print(f"Improvement over baseline: {total_improvement:.6f}")
+    print(f"Improvement over exp_010: {exp010_total - final_total:.6f}")
+    print(f"\nN values improved: {len(improvements)}")
+    print(f"Rejected (too small): {len(rejected_small)}")
+    print(f"Rejected (overlap): {len(rejected_overlap)}")
+    
+    # Final validation
+    print("\n" + "=" * 70)
+    print("FINAL VALIDATION")
+    print("=" * 70)
+    
+    invalid_n = []
+    for n in range(1, 201):
+        config = best_per_n[n]
+        if len(config) != n:
+            print(f"N={n}: Wrong number of trees")
+            invalid_n.append(n)
+            continue
+        if not check_no_nan(config):
+            print(f"N={n}: NaN values")
+            invalid_n.append(n)
+            continue
+        if not validate_no_overlap_strict(config):
+            print(f"N={n}: Overlap - falling back to baseline")
+            best_per_n[n] = baseline_configs[n]
+            invalid_n.append(n)
+    
+    if not invalid_n:
+        print("✅ All configurations valid!")
+    else:
+        print(f"⚠️ Fell back for {len(invalid_n)} N values")
+        final_total = sum(calculate_score(best_per_n[n]) for n in range(1, 201))
+        print(f"Updated final total: {final_total:.6f}")
+    
+    # Save submission
+    save_submission(best_per_n, 'submission.csv')
+    print("\nSaved submission.csv")
+    
+    # Validate format
+    df = pd.read_csv('submission.csv')
+    print(f"Rows: {len(df)}")
+    for col in ['x', 'y', 'deg']:
+        vals = df[col].astype(str).str.replace('s', '', regex=False)
+        nan_count = vals.apply(lambda x: 'nan' in x.lower()).sum()
+        if nan_count > 0:
+            print(f"❌ WARNING: {nan_count} NaN values in {col}")
+        else:
+            print(f"✅ No NaN values in {col}")
+    
+    # Save metrics
+    metrics = {
+        'cv_score': final_total,
+        'baseline_score': baseline_total,
+        'exp010_score': exp010_total,
+        'improvement_over_baseline': total_improvement,
+        'improvement_over_exp010': exp010_total - final_total,
+        'num_improvements': len(improvements),
+        'safe_threshold': SAFE_THRESHOLD,
+        'problematic_threshold': PROBLEMATIC_THRESHOLD,
+        'problematic_n': list(PROBLEMATIC_N),
+        'rejected_small': len(rejected_small),
+        'rejected_overlap': len(rejected_overlap),
+        'notes': 'Selective threshold ensemble - lower threshold for safe N values'
+    }
+    
+    with open('metrics.json', 'w') as f:
+        json.dump(metrics, f, indent=2)
+    
+    print(f"\nFinal CV Score: {final_total:.6f}")
+    print(f"Total time: {time.time() - start_time:.1f}s")
+    
+    # Copy to submission folder
+    import shutil
+    shutil.copy('submission.csv', '/home/submission/submission.csv')
+    print("Copied submission to /home/submission/")
+    
+    return final_total
+
+if __name__ == '__main__':
+    os.chdir('/home/code/experiments/013_selective_threshold')
+    main()
