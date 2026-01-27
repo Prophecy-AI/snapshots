@@ -8,8 +8,8 @@ import json
 from shapely import Polygon
 from shapely.affinity import rotate, translate
 
-# NO threshold - accept ANY improvement
-MIN_IMPROVEMENT = 1e-8
+# NO THRESHOLD - accept any improvement
+MIN_IMPROVEMENT = 1e-8  # Essentially zero
 
 # Tree polygon vertices
 TX = [0, 0.125, 0.0625, 0.2, 0.1, 0.35, 0.075, 0.075, -0.075, -0.075, -0.35, -0.1, -0.2, -0.0625, -0.125]
@@ -68,59 +68,57 @@ def score_group(xs,ys,degs,tx,ty):
 def strip(a):
     return np.array([float(str(v).replace("s","")) for v in a],np.float64)
 
+# Collect all CSV files from multiple sources
+all_files = []
+
+# 1. New external data
+all_files += glob.glob('/home/code/data/external/**/*.csv', recursive=True)
+
+# 2. Snapshots (existing) - EXCLUDE ensemble_best.csv which has overlaps
+snapshot_files = glob.glob('/home/nonroot/snapshots/santa-2025/*/code/**/*.csv', recursive=True)
+# Filter out known bad files
+bad_patterns = ['ensemble_best.csv', 'candidate_']
+for fp in snapshot_files:
+    if not any(bad in fp for bad in bad_patterns):
+        all_files.append(fp)
+
+print(f"Total CSV files to scan: {len(all_files)}")
+
 tx, ty = make_polygon_template()
 best = {n: {"score": 1e300, "data": None, "src": None} for n in range(1, 201)}
 
-# STEP 1: Load why-not as the BASE (it's validated and better than current)
-print("Loading why-not submission as base...")
+# Load WHY-NOT as the baseline (it's better than our previous baseline!)
 whynot_path = '/home/code/data/external/kernel_outputs/why-not/submission.csv'
+print("Loading why-not as baseline...")
 whynot_df = pd.read_csv(whynot_path)
 whynot_df['N'] = whynot_df['id'].str.split('_').str[0].astype(int)
-
 whynot_total = 0
 for n, g in whynot_df.groupby('N'):
     xs = strip(g['x'].to_numpy())
     ys = strip(g['y'].to_numpy())
     ds = strip(g['deg'].to_numpy())
     if np.isnan(xs).any() or np.isnan(ys).any() or np.isnan(ds).any():
-        print(f"WARNING: why-not N={n} has NaN values!")
+        print(f"WARNING: Why-not N={n} has NaN values!")
         continue
     sc = score_group(xs, ys, ds, tx, ty)
     whynot_total += sc
     best[n] = {"score": float(sc), "data": g.drop(columns=['N']).copy(), "src": "why-not"}
 
-print(f"Why-not base score: {whynot_total:.6f}")
-
-# STEP 2: Collect all other sources
-all_files = []
-
-# External data
-all_files += glob.glob('/home/code/data/external/**/*.csv', recursive=True)
-
-# Snapshots (exclude known bad files)
-snapshot_files = glob.glob('/home/nonroot/snapshots/santa-2025/*/code/**/*.csv', recursive=True)
-bad_patterns = ['ensemble_best.csv', 'candidate_']
-for fp in snapshot_files:
-    if not any(bad in fp for bad in bad_patterns):
-        all_files.append(fp)
-
-# Previous experiment submissions
-all_files += glob.glob('/home/code/experiments/*/submission.csv')
-
-print(f"Total files to scan: {len(all_files)}")
+print(f"Why-not baseline total score: {whynot_total:.6f}")
 
 # Track improvements
 improvements = []
 files_processed = 0
+files_with_improvements = set()
 overlap_rejections = 0
 
-# STEP 3: Scan all files for better solutions
+# Scan all files for better solutions
 for fp in all_files:
     if fp == whynot_path:
         continue
     try:
         df = pd.read_csv(fp)
-    except:
+    except Exception as e:
         continue
     
     if not {'id', 'x', 'y', 'deg'}.issubset(df.columns):
@@ -143,9 +141,11 @@ for fp in all_files:
         except:
             continue
             
+        # Check for NaN
         if np.isnan(xs).any() or np.isnan(ys).any() or np.isnan(ds).any():
             continue
             
+        # Check correct number of trees
         if len(xs) != n:
             continue
             
@@ -153,7 +153,7 @@ for fp in all_files:
         improvement = best[n]['score'] - sc
         
         if improvement >= MIN_IMPROVEMENT:
-            # Check for overlaps
+            # CRITICAL: Check for overlaps before accepting
             if check_overlaps(list(xs), list(ys), list(ds)):
                 overlap_rejections += 1
                 continue
@@ -167,15 +167,18 @@ for fp in all_files:
                 'new_score': sc,
                 'improvement': improvement,
                 'old_source': old_src,
-                'new_source': os.path.basename(fp)
+                'source': os.path.basename(fp)
             })
-            print(f"N={n}: {old_score:.6f} -> {sc:.6f} (+{improvement:.6f}) from {os.path.basename(fp)}")
+            files_with_improvements.add(fp)
+            if improvement >= 0.0001:  # Only print significant improvements
+                print(f"N={n}: {old_score:.6f} -> {sc:.6f} (+{improvement:.6f}) from {os.path.basename(fp)}")
 
 print(f"\nFiles processed: {files_processed}")
-print(f"Total improvements over why-not: {len(improvements)}")
+print(f"Files with improvements: {len(files_with_improvements)}")
+print(f"Total improvements found: {len(improvements)}")
 print(f"Overlap rejections: {overlap_rejections}")
 
-# STEP 4: Build final submission
+# Build final submission
 rows = []
 for n in range(1, 201):
     if best[n]['data'] is not None:
@@ -195,31 +198,31 @@ total = sum(best[n]['score'] for n in range(1, 201))
 improvement_from_whynot = whynot_total - total
 
 print(f"\n=== FINAL RESULTS ===")
-print(f"Why-not base score: {whynot_total:.6f}")
+print(f"Why-not baseline score: {whynot_total:.6f}")
 print(f"New total score: {total:.6f}")
-print(f"Improvement over why-not: {improvement_from_whynot:.6f}")
+print(f"Total improvement over why-not: {improvement_from_whynot:.6f}")
 
 # Count sources
 source_counts = {}
 for n in range(1, 201):
     src = best[n]['src']
-    if src:
-        src_name = os.path.basename(src) if '/' in src else src
-        source_counts[src_name] = source_counts.get(src_name, 0) + 1
+    if src not in source_counts:
+        source_counts[src] = 0
+    source_counts[src] += 1
 
-print(f"\nSources used:")
+print(f"\nSource distribution:")
 for src, count in sorted(source_counts.items(), key=lambda x: -x[1])[:10]:
-    print(f"  {src}: {count} N values")
+    print(f"  {os.path.basename(src) if src else 'unknown'}: {count} N values")
 
 # Save metrics
 metrics = {
     'cv_score': total,
     'whynot_score': whynot_total,
-    'improvement_over_whynot': improvement_from_whynot,
+    'improvement': improvement_from_whynot,
     'num_improvements': len(improvements),
     'overlap_rejections': overlap_rejections,
-    'source_counts': source_counts,
-    'improvements': improvements[:50]
+    'source_counts': {os.path.basename(k) if k else 'unknown': v for k, v in source_counts.items()},
+    'improvements': improvements[:100]  # Save first 100
 }
 with open('metrics.json', 'w') as f:
     json.dump(metrics, f, indent=2)
