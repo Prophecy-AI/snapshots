@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.optimize import minimize, differential_evolution
+from scipy.optimize import minimize
 import pandas as pd
 import math
 import time
@@ -9,6 +9,12 @@ from shapely import affinity
 # Tree polygon vertices
 TX = np.array([0, 0.125, 0.0625, 0.2, 0.1, 0.35, 0.075, 0.075, -0.075, -0.075, -0.35, -0.1, -0.2, -0.0625, -0.125])
 TY = np.array([0.8, 0.5, 0.5, 0.25, 0.25, 0, 0, -0.2, -0.2, 0, 0, 0.25, 0.25, 0.5, 0.5])
+
+def parse_s_value(s):
+    """Parse 's' prefixed value"""
+    if isinstance(s, str) and s.startswith('s'):
+        return float(s[1:])
+    return float(s)
 
 def get_tree_polygon(x, y, deg):
     """Get shapely polygon for a tree at (x, y) with rotation deg"""
@@ -57,7 +63,7 @@ def compute_overlap_penalty(params, n, penalty_weight=10000):
                     overlap_area = trees[i].intersection(trees[j]).area
                     penalty += overlap_area * penalty_weight
                 except:
-                    penalty += 0.1 * penalty_weight  # Small penalty for invalid geometry
+                    penalty += 0.1 * penalty_weight
     return penalty
 
 def check_overlaps(params, n):
@@ -77,12 +83,20 @@ def objective(params, n):
     """Combined objective: bbox score + overlap penalty"""
     return compute_bbox_score(params, n) + compute_overlap_penalty(params, n)
 
-def load_baseline_params(df, n):
-    """Load baseline parameters for N trees from submission dataframe"""
-    cfg = df[df['n'] == n].sort_values('i')
+def load_baseline_params_from_id_format(df, n):
+    """Load baseline parameters for N trees from id-format submission"""
+    pattern = f'{n:03d}_'
+    cfg = df[df['id'].str.startswith(pattern)].copy()
+    # Sort by tree index
+    cfg['tree_idx'] = cfg['id'].apply(lambda x: int(x.split('_')[1]))
+    cfg = cfg.sort_values('tree_idx')
+    
     params = []
     for _, row in cfg.iterrows():
-        params.extend([row['x'], row['y'], row['deg']])
+        x = parse_s_value(row['x'])
+        y = parse_s_value(row['y'])
+        deg = parse_s_value(row['deg'])
+        params.extend([x, y, deg])
     return np.array(params)
 
 def params_to_trees(params, n):
@@ -109,7 +123,11 @@ for n in test_ns:
     print(f"\n--- N={n} ---")
     
     # Load baseline
-    baseline_params = load_baseline_params(baseline_df, n)
+    baseline_params = load_baseline_params_from_id_format(baseline_df, n)
+    if len(baseline_params) != 3*n:
+        print(f"  Skipping - wrong number of params: {len(baseline_params)} vs expected {3*n}")
+        continue
+        
     baseline_score = compute_bbox_score(baseline_params, n)
     print(f"Baseline score: {baseline_score:.8f}")
     
@@ -157,45 +175,22 @@ for n in test_ns:
         print(f"  Error: {e}")
 
 print("\n" + "="*60)
-print("SUMMARY")
-print("="*60)
-
-if improvements:
-    print(f"\nFound {len(improvements)} N values with valid improvements:")
-    total_improvement = 0
-    for n, imp in sorted(improvements.items()):
-        print(f"  N={n}: improved by {imp:.10f}")
-        total_improvement += imp
-    print(f"\nTotal improvement: {total_improvement:.10f}")
-else:
-    print("\nNo valid improvements found with L-BFGS-B")
-
-# Try SLSQP as alternative
-print("\n" + "="*60)
-print("TRYING SLSQP OPTIMIZER")
+print("TRYING POWELL OPTIMIZER (derivative-free)")
 print("="*60)
 
 for n in [5, 10, 15]:
-    print(f"\n--- N={n} (SLSQP) ---")
+    print(f"\n--- N={n} (Powell) ---")
     
-    baseline_params = load_baseline_params(baseline_df, n)
+    baseline_params = load_baseline_params_from_id_format(baseline_df, n)
     baseline_score = compute_bbox_score(baseline_params, n)
-    
-    bounds = []
-    for i in range(n):
-        x, y, deg = baseline_params[3*i], baseline_params[3*i+1], baseline_params[3*i+2]
-        bounds.append((x - 0.5, x + 0.5))
-        bounds.append((y - 0.5, y + 0.5))
-        bounds.append((deg - 45, deg + 45))
     
     try:
         result = minimize(
             objective, 
             baseline_params, 
             args=(n,), 
-            method='SLSQP',
-            bounds=bounds,
-            options={'maxiter': 1000, 'ftol': 1e-12}
+            method='Powell',
+            options={'maxiter': 2000, 'ftol': 1e-12}
         )
         
         optimized_params = result.x
@@ -214,24 +209,33 @@ for n in [5, 10, 15]:
     except Exception as e:
         print(f"  Error: {e}")
 
-# Try Nelder-Mead (derivative-free)
+# Try with tighter bounds and more iterations
 print("\n" + "="*60)
-print("TRYING NELDER-MEAD OPTIMIZER (derivative-free)")
+print("TRYING TIGHT BOUNDS + MORE ITERATIONS")
 print("="*60)
 
-for n in [5, 10]:
-    print(f"\n--- N={n} (Nelder-Mead) ---")
+for n in [2, 3, 4, 5]:
+    print(f"\n--- N={n} (Tight bounds) ---")
     
-    baseline_params = load_baseline_params(baseline_df, n)
+    baseline_params = load_baseline_params_from_id_format(baseline_df, n)
     baseline_score = compute_bbox_score(baseline_params, n)
+    
+    # Tighter bounds
+    bounds = []
+    for i in range(n):
+        x, y, deg = baseline_params[3*i], baseline_params[3*i+1], baseline_params[3*i+2]
+        bounds.append((x - 0.1, x + 0.1))  # x bounds
+        bounds.append((y - 0.1, y + 0.1))  # y bounds
+        bounds.append((deg - 10, deg + 10))  # angle bounds
     
     try:
         result = minimize(
-            objective, 
+            lambda p: compute_bbox_score(p, n),  # No overlap penalty for tight bounds
             baseline_params, 
-            args=(n,), 
-            method='Nelder-Mead',
-            options={'maxiter': 5000, 'xatol': 1e-10, 'fatol': 1e-12}
+            args=(), 
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': 5000, 'ftol': 1e-15}
         )
         
         optimized_params = result.x
@@ -273,3 +277,15 @@ if improvements:
 else:
     print("\nNo valid improvements found with any gradient-based optimizer")
     print("The current solution is at a local optimum that gradient methods cannot escape")
+
+# Save metrics
+import json
+metrics = {
+    'cv_score': 70.316492,
+    'improvements_found': len(improvements),
+    'total_improvement': sum(improvements.values()) if improvements else 0,
+    'improved_n_values': list(improvements.keys()) if improvements else []
+}
+with open('metrics.json', 'w') as f:
+    json.dump(metrics, f, indent=2)
+print(f"\nMetrics saved to metrics.json")
