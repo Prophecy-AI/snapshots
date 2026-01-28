@@ -69,11 +69,6 @@ print("GAP ANALYSIS: Current Score vs Theoretical Minimum")
 print("="*80)
 print()
 
-# Theoretical minimum: if trees could be packed perfectly (no gaps)
-# Total area = N * TREE_AREA
-# Minimum square side = sqrt(N * TREE_AREA)
-# Score contribution = side^2 / N = N * TREE_AREA / N = TREE_AREA
-
 results = []
 for n in range(1, 201):
     if n in baseline:
@@ -115,14 +110,14 @@ print("TOP 20 N VALUES WITH LARGEST GAPS (absolute):")
 print("-"*60)
 top_gaps = df_results.nlargest(20, 'gap')
 for _, row in top_gaps.iterrows():
-    print(f"  N={row['n']:3d}: gap={row['gap']:.4f} ({row['gap_pct']:.1f}%), efficiency={row['efficiency']:.1f}%")
+    print(f"  N={int(row['n']):3d}: gap={row['gap']:.4f} ({row['gap_pct']:.1f}%), efficiency={row['efficiency']:.1f}%")
 
 print()
 print("TOP 20 N VALUES WITH WORST EFFICIENCY:")
 print("-"*60)
 worst_eff = df_results.nsmallest(20, 'efficiency')
 for _, row in worst_eff.iterrows():
-    print(f"  N={row['n']:3d}: efficiency={row['efficiency']:.1f}%, gap={row['gap']:.4f}")
+    print(f"  N={int(row['n']):3d}: efficiency={row['efficiency']:.1f}%, gap={row['gap']:.4f}")
 
 # Group by N ranges
 print()
