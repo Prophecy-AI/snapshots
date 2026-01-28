@@ -38,16 +38,20 @@ def compute_bbox_score(xs, ys, angles, tx, ty):
     return side * side / n
 
 @njit
-def local_search_step(xs, ys, angles, tx, ty, step_size=0.01):
+def local_search_step(xs, ys, angles, tx, ty, step_size):
     """Try small perturbations to improve score."""
     n = len(xs)
     current_score = compute_bbox_score(xs, ys, angles, tx, ty)
     improved = False
     
+    deltas = np.array([-1.0, 0.0, 1.0])
+    
     for i in range(n):
         # Try small position changes
-        for dx in [-step_size, 0, step_size]:
-            for dy in [-step_size, 0, step_size]:
+        for di in range(3):
+            for dj in range(3):
+                dx = deltas[di] * step_size
+                dy = deltas[dj] * step_size
                 if dx == 0 and dy == 0:
                     continue
                 
@@ -83,7 +87,7 @@ def local_search_step(xs, ys, angles, tx, ty, step_size=0.01):
     return current_score, improved
 
 @njit
-def local_search(xs, ys, angles, tx, ty, max_iterations=1000):
+def local_search(xs, ys, angles, tx, ty, max_iterations):
     """Run local search until no improvement."""
     xs = xs.copy()
     ys = ys.copy()
@@ -92,7 +96,7 @@ def local_search(xs, ys, angles, tx, ty, max_iterations=1000):
     best_score = compute_bbox_score(xs, ys, angles, tx, ty)
     
     for it in range(max_iterations):
-        step_size = 0.01 * (1.0 - it / max_iterations)
+        step_size = 0.01 * (1.0 - float(it) / float(max_iterations))
         score, improved = local_search_step(xs, ys, angles, tx, ty, step_size)
         
         if not improved:
@@ -140,7 +144,7 @@ def main():
         xs, ys, angles = baseline_configs[n]
         
         # Run local search
-        opt_xs, opt_ys, opt_angles, score = local_search(xs, ys, angles, TX, TY, max_iterations=500)
+        opt_xs, opt_ys, opt_angles, score = local_search(xs, ys, angles, TX, TY, 500)
         
         improvement = baseline_scores[n] - score
         new_configs[n] = (opt_xs, opt_ys, opt_angles)
