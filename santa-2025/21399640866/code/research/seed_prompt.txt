@@ -27,9 +27,7 @@ The evaluator correctly identified that:
 2. All available data sources have been exhausted
 3. Extended bbox3 optimization is the most promising remaining path
 
-**I agree with the evaluator's assessment.** The overlap repair experiment was a valuable negative result that closes off that avenue. The path forward is:
-1. Extended C++ optimization (hours, not minutes)
-2. Novel algorithm implementation (not just running binaries)
+**I agree with the evaluator's assessment.** The path forward is extended C++ optimization OR novel algorithm implementation.
 
 ## ⛔ WHAT NOT TO DO (PROVEN FAILURES)
 
@@ -39,42 +37,51 @@ The evaluator correctly identified that:
 - ❌ Fractional translation on current solution → NO IMPROVEMENT
 - ❌ Rotation optimization → NO IMPROVEMENT
 
-## ✅ NEXT EXPERIMENT: EXTENDED C++ OPTIMIZATION (3+ HOURS)
+## ✅ NEXT EXPERIMENT: EXTENDED C++ OPTIMIZATION (2+ HOURS)
 
 The top kernels run optimization for HOURS with 80+ restarts. We've only run for minutes.
 
 **SPECIFIC TASK:**
-```python
-# Run bbox3 for 3+ HOURS with extended parameters
+```bash
+# Run bbox3 for 2+ HOURS with extended parameters
 # Focus on N=2-50 (highest per-N scores)
-
-import subprocess
-import time
 
 # Parameters from top kernels:
 # - 80 restarts (-r 80)
-# - 20000 iterations (-n 20000)
-# - Focus on small N (highest impact)
+# - 50000 iterations (-n 50000)
+# - Run in a loop for 2+ hours
 
-start_time = time.time()
-max_runtime = 3 * 3600  # 3 hours
+mkdir -p experiments/030_extended_optimization
+cd experiments/030_extended_optimization
 
-while time.time() - start_time < max_runtime:
-    # Run optimization pass
-    subprocess.run([
-        './bbox3',
-        '-i', 'submission.csv',
-        '-o', 'submission.csv',
-        '-n', '20000',
-        '-r', '80'
-    ])
+# Copy current best
+cp /home/submission/submission.csv submission_best.csv
+
+# Run extended optimization
+START_TIME=$(date +%s)
+MAX_RUNTIME=7200  # 2 hours
+
+while true; do
+    CURRENT_TIME=$(date +%s)
+    ELAPSED=$((CURRENT_TIME - START_TIME))
     
-    # Check for improvement
-    new_score = compute_score('submission.csv')
-    if new_score < best_score - 0.0001:
-        best_score = new_score
-        save_checkpoint(f'submission_{new_score:.6f}.csv')
-        print(f"NEW BEST: {new_score:.6f}")
+    if [ $ELAPSED -ge $MAX_RUNTIME ]; then
+        echo "Time limit reached"
+        break
+    fi
+    
+    # Run bbox3 with extended parameters
+    ./bbox3 -i submission_best.csv -o submission_new.csv -n 50000 -r 80
+    
+    # Check if improved
+    NEW_SCORE=$(python3 compute_score.py submission_new.csv)
+    BEST_SCORE=$(python3 compute_score.py submission_best.csv)
+    
+    if [ $(echo "$NEW_SCORE < $BEST_SCORE" | bc -l) -eq 1 ]; then
+        cp submission_new.csv submission_best.csv
+        echo "NEW BEST: $NEW_SCORE"
+    fi
+done
 ```
 
 **Expected outcome:**
@@ -84,55 +91,74 @@ while time.time() - start_time < max_runtime:
 
 ## ✅ ALTERNATIVE: IMPLEMENT GENETIC ALGORITHM FROM SCRATCH
 
-If extended optimization doesn't work, implement a NOVEL algorithm:
+If extended optimization doesn't work after 30 minutes, PIVOT to implementing a genetic algorithm:
 
 ```python
 # Genetic Algorithm for Tree Packing
 # NOT running a binary - implementing from scratch
 
+import numpy as np
+import random
+from numba import njit
+
 class GeneticPacker:
-    def __init__(self, n_trees, population_size=100):
+    def __init__(self, n_trees, population_size=50):
         self.n = n_trees
         self.pop_size = population_size
         self.population = []
         
-    def initialize_population(self, baseline):
+    def initialize_population(self, baseline_xs, baseline_ys, baseline_angles):
         """Create initial population from baseline + random perturbations"""
-        self.population = [baseline.copy()]
+        self.population = [(baseline_xs.copy(), baseline_ys.copy(), baseline_angles.copy())]
         for _ in range(self.pop_size - 1):
-            individual = self.mutate(baseline.copy(), strength=0.1)
-            self.population.append(individual)
+            xs = baseline_xs + np.random.normal(0, 0.01, self.n)
+            ys = baseline_ys + np.random.normal(0, 0.01, self.n)
+            angles = baseline_angles + np.random.normal(0, 5, self.n)
+            self.population.append((xs, ys, angles))
     
     def crossover(self, parent1, parent2):
         """Swap partial solutions between parents"""
-        child = parent1.copy()
-        # Swap trees from parent2 for indices where parent2 is better
-        for i in range(self.n):
-            if random.random() < 0.5:
-                child[i] = parent2[i]
-        return child
+        xs1, ys1, a1 = parent1
+        xs2, ys2, a2 = parent2
+        
+        # Uniform crossover
+        mask = np.random.random(self.n) < 0.5
+        child_xs = np.where(mask, xs1, xs2)
+        child_ys = np.where(mask, ys1, ys2)
+        child_angles = np.where(mask, a1, a2)
+        
+        return (child_xs, child_ys, child_angles)
     
     def mutate(self, individual, strength=0.01):
         """Small perturbations to positions and angles"""
-        for i in range(self.n):
-            if random.random() < 0.1:
-                individual[i]['x'] += random.gauss(0, strength)
-                individual[i]['y'] += random.gauss(0, strength)
-                individual[i]['angle'] += random.gauss(0, strength * 10)
-        return individual
+        xs, ys, angles = individual
+        
+        # Mutate 10% of trees
+        mask = np.random.random(self.n) < 0.1
+        xs = xs + mask * np.random.normal(0, strength, self.n)
+        ys = ys + mask * np.random.normal(0, strength, self.n)
+        angles = angles + mask * np.random.normal(0, strength * 500, self.n)
+        
+        return (xs, ys, angles)
     
-    def evolve(self, generations=1000):
+    def evolve(self, generations=500):
         """Run genetic algorithm"""
         for gen in range(generations):
-            # Evaluate fitness
-            scores = [self.evaluate(ind) for ind in self.population]
+            # Evaluate fitness (lower is better)
+            scores = []
+            for ind in self.population:
+                xs, ys, angles = ind
+                if has_overlap(xs, ys, angles):
+                    scores.append(float('inf'))  # Penalize overlaps
+                else:
+                    scores.append(compute_bbox_score(xs, ys, angles))
             
             # Selection (tournament)
             new_pop = []
             for _ in range(self.pop_size):
                 i, j = random.sample(range(self.pop_size), 2)
                 winner = self.population[i] if scores[i] < scores[j] else self.population[j]
-                new_pop.append(winner.copy())
+                new_pop.append(winner)
             
             # Crossover and mutation
             for i in range(0, self.pop_size, 2):
@@ -145,57 +171,15 @@ class GeneticPacker:
             self.population = new_pop
             
             # Track best
-            best_score = min(scores)
-            if gen % 100 == 0:
-                print(f"Gen {gen}: Best = {best_score:.6f}")
-```
-
-## ✅ ALTERNATIVE: LATTICE PACKING WITH OPTIMAL UNIT CELL
-
-Research shows asymmetric solutions beat symmetric ones. But what if we find the OPTIMAL unit cell?
-
-```python
-# Find optimal 2-tree unit cell, then tile it
-
-def find_optimal_unit_cell():
-    """Exhaustively search for best 2-tree arrangement"""
-    best_score = float('inf')
-    best_config = None
-    
-    # Search over all angle combinations
-    for angle1 in range(0, 360, 1):
-        for angle2 in range(0, 360, 1):
-            # Search over relative positions
-            for dx in np.linspace(-0.5, 0.5, 50):
-                for dy in np.linspace(-0.5, 0.5, 50):
-                    config = place_two_trees(angle1, angle2, dx, dy)
-                    if not has_overlap(config):
-                        score = compute_unit_cell_efficiency(config)
-                        if score < best_score:
-                            best_score = score
-                            best_config = config
-    
-    return best_config
-
-def tile_unit_cell(unit_cell, n_trees):
-    """Tile the unit cell to create N-tree configuration"""
-    # Determine grid size needed
-    grid_size = int(np.ceil(np.sqrt(n_trees / 2)))
-    
-    trees = []
-    for i in range(grid_size):
-        for j in range(grid_size):
-            if len(trees) >= n_trees:
-                break
-            # Place unit cell at grid position
-            offset_x = i * unit_cell.width
-            offset_y = j * unit_cell.height
-            for tree in unit_cell.trees:
-                if len(trees) >= n_trees:
-                    break
-                trees.append(translate(tree, offset_x, offset_y))
-    
-    return trees
+            valid_scores = [s for s in scores if s < float('inf')]
+            if valid_scores:
+                best_score = min(valid_scores)
+                if gen % 50 == 0:
+                    print(f"Gen {gen}: Best = {best_score:.6f}")
+        
+        # Return best individual
+        best_idx = scores.index(min(scores))
+        return self.population[best_idx]
 ```
 
 ## Submission Strategy
@@ -206,17 +190,14 @@ def tile_unit_cell(unit_cell, n_trees):
 
 ## Priority Order
 
-1. **FIRST**: Extended C++ optimization (3+ hours)
+1. **FIRST**: Extended C++ optimization (2+ hours)
    - This is what top kernels do
    - We haven't tried running for hours yet
+   - Run for at least 30 minutes before giving up
 
-2. **IF NO IMPROVEMENT**: Genetic algorithm from scratch
+2. **IF NO IMPROVEMENT AFTER 30 MIN**: Genetic algorithm from scratch
    - Novel approach not tried
    - Could break through local optimum
-
-3. **IF STILL STUCK**: Lattice packing with optimal unit cell
-   - Mathematical approach
-   - Could find globally optimal configurations
 
 ## Key Metrics to Track
 
@@ -229,6 +210,9 @@ def tile_unit_cell(unit_cell, n_trees):
 
 - Extended optimization: 0.01-0.05 improvement (70.316 → 70.27-70.31)
 - Genetic algorithm: Unknown (could be breakthrough or failure)
-- Lattice packing: Unknown (theoretical approach)
 
 **The target (68.87) is still 1.45 points away. We need a BREAKTHROUGH, not incremental gains.**
+
+## ⚠️ IMPORTANT: SUBMIT AFTER EVERY EXPERIMENT
+
+With 85 submissions remaining, SUBMIT every experiment to get LB feedback. This is critical for understanding what actually works on the leaderboard.
