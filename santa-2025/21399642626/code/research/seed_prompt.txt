@@ -17,32 +17,15 @@ The baseline (70.308629) was created by top competitors running:
 - 953+ submissions over WEEKS (not 20)
 - Team merges combining 17+ solution sources
 
-We cannot replicate this with our compute budget.
+## ⛔ FORBIDDEN (WILL BE REJECTED)
+- bbox3, sa_fast, eazy_optimizer, tree_packer - FORBIDDEN
+- subprocess.run() or os.system() - FORBIDDEN
+- Running ANY binary or executable - FORBIDDEN
+- Row-based constructive (PROVEN WORSE)
+- Simple lattice patterns (PROVEN WORSE)
+- Random multi-start (PROVEN: cannot generate valid configs)
 
-## Submission Log
-| Exp | Approach | CV | LB | Notes |
-|-----|----------|----|----|-------|
-| 001 | valid_baseline | 70.6151 | 70.6151 | Starting point |
-| 010 | safe_ensemble | 70.3651 | 70.3651 | External data mining |
-| 019 | ensemble | 70.3434 | 70.3434 | More external data |
-| 029 | ensemble | 70.3155 | 70.3155 | Exhausted external sources |
-| 039 | per_n_analysis | 70.3086 | 70.3086 | CURRENT BEST |
-
-## Response to Evaluator
-
-The evaluator correctly identifies that:
-1. **Row-based constructive FAILED** - produces 0.64-0.73 vs baseline 0.37 for small N
-2. **Baseline uses sophisticated per-tree optimization** - not simple patterns
-3. **The gap represents COMPUTE TIME, not algorithmic innovation**
-
-I AGREE with the evaluator's assessment that:
-- All algorithmic approaches have been exhausted
-- The baseline is at a strong local optimum for our compute budget
-- The only remaining options are: (1) more compute, (2) external solutions, (3) team merge
-
-HOWEVER, I CANNOT GIVE UP. The target IS reachable.
-
-## STRATEGIC PIVOT: SUBSET EXTRACTION FROM LARGE N
+## ✅ MANDATORY EXPERIMENT: SUBSET EXTRACTION FROM LARGE N
 
 The kernel "new-simple-fix-rebuild-large-layout-check-on-all" reveals a technique we haven't tried:
 
@@ -54,68 +37,132 @@ The kernel "new-simple-fix-rebuild-large-layout-check-on-all" reveals a techniqu
 3. Take first K trees → this is a candidate for N=K
 4. If this candidate has smaller bounding box than current N=K solution → IMPROVEMENT!
 
+**IMPLEMENTATION:**
+
+```python
+import pandas as pd
+import numpy as np
+from shapely.geometry import Polygon
+from shapely import affinity
+from shapely.ops import unary_union
+
+# Tree polygon vertices
+TX = np.array([0, 0.125, 0.0625, 0.2, 0.1, 0.35, 0.075, 0.075, -0.075, -0.075, -0.35, -0.1, -0.2, -0.0625, -0.125])
+TY = np.array([0.8, 0.5, 0.5, 0.25, 0.25, 0, 0, -0.2, -0.2, 0, 0, 0.25, 0.25, 0.5, 0.5])
+
+def get_tree_polygon(x, y, angle_deg):
+    coords = list(zip(TX, TY))
+    poly = Polygon(coords)
+    poly = affinity.rotate(poly, angle_deg, origin=(0, 0))
+    poly = affinity.translate(poly, x, y)
+    return poly
+
+def compute_score(trees, n):
+    """Compute S^2/N for a list of (x, y, angle) trees."""
+    if not trees:
+        return float('inf')
+    polygons = [get_tree_polygon(x, y, a) for x, y, a in trees]
+    bounds = unary_union(polygons).bounds
+    side = max(bounds[2] - bounds[0], bounds[3] - bounds[1])
+    return (side ** 2) / n
+
+def load_baseline(path):
+    """Load baseline solution."""
+    df = pd.read_csv(path)
+    df['n'] = df['id'].apply(lambda x: int(x.split('_')[0]))
+    df['x'] = df['x'].apply(lambda v: float(str(v).lstrip('s')))
+    df['y'] = df['y'].apply(lambda v: float(str(v).lstrip('s')))
+    df['deg'] = df['deg'].apply(lambda v: float(str(v).lstrip('s')))
+    
+    result = {}
+    for n in range(1, 201):
+        n_df = df[df['n'] == n]
+        if len(n_df) == n:
+            result[n] = [(row['x'], row['y'], row['deg']) for _, row in n_df.iterrows()]
+    return result
+
+# Load baseline
+baseline_path = "/home/code/experiments/039_per_n_analysis/safe_ensemble.csv"
+baseline = load_baseline(baseline_path)
+baseline_scores = {n: compute_score(baseline[n], n) for n in range(1, 201)}
+
+print(f"Baseline total: {sum(baseline_scores.values()):.6f}")
+
+# SUBSET EXTRACTION
+improvements = {}
+total_improvement = 0
+
+for large_n in range(50, 201):  # Start from N=50 for meaningful subsets
+    large_trees = baseline[large_n]
+    polygons = [get_tree_polygon(x, y, a) for x, y, a in large_trees]
+    bounds = unary_union(polygons).bounds
+    
+    # Four corners
+    corners = [
+        (bounds[0], bounds[1]),  # bottom-left
+        (bounds[0], bounds[3]),  # top-left
+        (bounds[2], bounds[1]),  # bottom-right
+        (bounds[2], bounds[3]),  # top-right
+    ]
+    
+    for corner_x, corner_y in corners:
+        # Sort trees by max distance from corner
+        def tree_distance(tree):
+            x, y, a = tree
+            poly = get_tree_polygon(x, y, a)
+            b = poly.bounds
+            return max(
+                abs(b[0] - corner_x), abs(b[2] - corner_x),
+                abs(b[1] - corner_y), abs(b[3] - corner_y)
+            )
+        
+        sorted_trees = sorted(large_trees, key=tree_distance)
+        
+        # Check subsets for smaller N
+        for small_n in range(2, min(large_n, 50)):  # Focus on small N
+            subset = sorted_trees[:small_n]
+            subset_score = compute_score(subset, small_n)
+            
+            if subset_score < baseline_scores[small_n] - 1e-6:
+                improvement = baseline_scores[small_n] - subset_score
+                if small_n not in improvements or improvement > improvements[small_n][1]:
+                    improvements[small_n] = (subset, improvement, large_n, (corner_x, corner_y))
+                    print(f"✅ N={small_n}: {baseline_scores[small_n]:.6f} -> {subset_score:.6f} (from N={large_n})")
+
+# Summary
+if improvements:
+    total_improvement = sum(imp[1] for imp in improvements.values())
+    print(f"\nTotal improvements found: {len(improvements)}")
+    print(f"Total score improvement: {total_improvement:.6f}")
+else:
+    print("\nNo improvements found from subset extraction")
+```
+
 **WHY THIS MIGHT WORK:**
 - Large N solutions are highly optimized
 - Subsets of well-packed trees may pack better than independently optimized small N
 - This is a NOVEL approach we haven't tried
 
-## Next Experiment: 043_subset_extraction
+## VALIDATION REQUIREMENTS
 
-**APPROACH:** Extract subsets from large N solutions to improve small N
+Before saving any improvement:
+1. Check for overlaps using integer-scaled coordinates
+2. Verify bounding box calculation is correct
+3. Only keep improvements > 1e-5 to avoid precision issues
 
-```python
-# For each large N (100-200):
-for large_n in range(100, 201):
-    large_solution = load_solution(large_n)
-    bounds = get_bounding_box(large_solution)
-    
-    # For each corner:
-    for corner in [(bounds.minx, bounds.miny), (bounds.minx, bounds.maxy), 
-                   (bounds.maxx, bounds.miny), (bounds.maxx, bounds.maxy)]:
-        # Sort trees by distance from corner
-        sorted_trees = sort_by_distance(large_solution, corner)
-        
-        # Extract subsets for smaller N
-        for small_n in range(1, large_n):
-            subset = sorted_trees[:small_n]
-            subset_score = compute_score(subset, small_n)
-            
-            if subset_score < baseline_scores[small_n]:
-                print(f"IMPROVEMENT: N={small_n} from N={large_n} corner")
-                improvements[small_n] = subset
-```
+## AFTER EXPERIMENT
 
-**EXPECTED OUTCOME:**
-- May find improvements for some N values
-- Even small improvements accumulate
-- This is a DIFFERENT paradigm than local search
+1. If improvements found → Create new ensemble with improvements
+2. If no improvements → Record finding and try next approach
+3. SUBMIT regardless of outcome - we need LB feedback
 
-## What NOT to Try
-- ❌ bbox3 with more iterations (proven: ZERO improvement)
-- ❌ SA with different parameters (proven: ZERO improvement)
-- ❌ Row-based constructive (proven: WORSE than baseline)
-- ❌ Simple lattice patterns (proven: WORSE than baseline)
-- ❌ Random multi-start (proven: cannot even generate valid configs)
+## FALLBACK APPROACHES (if subset extraction fails)
 
-## FALLBACK PLAN
-
-If subset extraction fails:
-1. **Check for NEW kernels/datasets** published in last 24 hours
-2. **Run bbox3 for 24+ hours** as final compute-intensive attempt
-3. **Accept current position** (70.308629) if nothing works
-
-## CRITICAL REMINDER
-
-The target (68.861114) IS achievable - top teams have done it.
-But they did it with:
-- 953+ submissions over WEEKS
-- 24+ CPUs running for DAYS
-- Team merges combining 17+ sources
-
-We have 80 submissions remaining and limited compute.
-The subset extraction approach is our best remaining novel idea.
+1. **Edge-based extraction**: Instead of corners, try extracting trees along edges
+2. **Centroid-based extraction**: Sort by distance from centroid
+3. **Density-based extraction**: Extract densest regions
 
 ## SUBMIT AFTER EXPERIMENT
 
-YES - submit exp_043 regardless of outcome. We need LB feedback.
+YES - submit exp_043 regardless of outcome. We have 80 submissions remaining.
 Even if no improvement, we learn whether this approach has potential.
