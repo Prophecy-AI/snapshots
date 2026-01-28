@@ -160,3 +160,45 @@ if all_improvements:
         print(f"  N={n}: {imp:.6f} from {source}")
 else:
     print("\nNo improvements found from any source")
+
+# Add saspav dataset
+print("\n" + "="*60)
+print("CHECKING SASPAV DATASET")
+print("="*60)
+
+saspav_paths = {
+    "saspav_dataset": "saspav_dataset/santa-2025.csv",
+}
+
+for name, path in saspav_paths.items():
+    if not Path(path).exists():
+        print(f"  {name}: FILE NOT FOUND")
+        continue
+        
+    try:
+        new_sub = load_submission(path)
+        if len(new_sub) < 200:
+            print(f"  {name}: Only {len(new_sub)} N values (need 200)")
+            continue
+            
+        # Find improvements
+        found = []
+        for n in range(1, 201):
+            if n in new_sub and n in baseline_scores:
+                new_score = compute_score_for_n(new_sub[n], n)
+                if new_score < baseline_scores[n] - 1e-9:
+                    improvement = baseline_scores[n] - new_score
+                    found.append((n, improvement, new_score, baseline_scores[n]))
+        
+        if found:
+            total_improvement = sum(f[1] for f in found)
+            print(f"  {name}: {len(found)} improvements, total {total_improvement:.6f}")
+            for n, imp, new_s, base_s in sorted(found, key=lambda x: -x[1])[:10]:
+                print(f"    N={n}: {base_s:.6f} -> {new_s:.6f} (improvement: {imp:.6f})")
+        else:
+            print(f"  {name}: No improvements found")
+            
+    except Exception as e:
+        print(f"  {name}: Error - {e}")
+        import traceback
+        traceback.print_exc()
