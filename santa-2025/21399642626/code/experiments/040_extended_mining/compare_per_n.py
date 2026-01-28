@@ -51,16 +51,24 @@ def load_submission(path):
     df = pd.read_csv(path)
     
     # Handle different column formats
+    if 'id' in df.columns:
+        # Format: id like "001_0", "002_1", etc.
+        df['n'] = df['id'].apply(lambda x: int(x.split('_')[0]))
+        df['i'] = df['id'].apply(lambda x: int(x.split('_')[1]))
+    
     if 'x' in df.columns:
         df['x'] = df['x'].apply(parse_coord)
         df['y'] = df['y'].apply(parse_coord)
-        df['deg'] = df['deg'].apply(parse_coord) if 'deg' in df.columns else 0
+        if 'deg' in df.columns:
+            df['deg'] = df['deg'].apply(parse_coord)
+        else:
+            df['deg'] = 0
     
     result = {}
     for n in range(1, 201):
         n_df = df[df['n'] == n]
         if len(n_df) == n:
-            trees = [(row['x'], row['y'], row.get('deg', 0)) for _, row in n_df.iterrows()]
+            trees = [(row['x'], row['y'], row['deg']) for _, row in n_df.iterrows()]
             result[n] = trees
     
     return result
@@ -69,6 +77,7 @@ def compare_submissions(baseline_path, new_paths):
     """Compare new submissions against baseline per-N"""
     print(f"Loading baseline: {baseline_path}")
     baseline = load_submission(baseline_path)
+    print(f"Loaded {len(baseline)} N values from baseline")
     
     # Compute baseline scores per N
     baseline_scores = {}
@@ -114,6 +123,8 @@ def compare_submissions(baseline_path, new_paths):
                 
         except Exception as e:
             print(f"  {name}: Error - {e}")
+            import traceback
+            traceback.print_exc()
     
     return improvements, baseline, baseline_scores
 
