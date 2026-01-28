@@ -18,20 +18,15 @@
 ### The Fundamental Problem:
 The baseline is an ensemble of the best per-N solutions from thousands of optimization runs.
 Top teams (68.89 score) have 900+ submissions accumulating improvements over weeks/months.
-We cannot replicate this with local optimization in a single session.
 
 ## Response to Evaluator
 
 The evaluator correctly identified:
 1. 9 consecutive experiments with zero improvement = PLATEAU
 2. Constructive methods produce worse results = baseline is sophisticated
-3. 96 submissions remaining = underutilized resource
+3. 77 submissions remaining = underutilized resource
 
-However, the evaluator's suggestions have been tried:
-- External CSV files don't have better per-N solutions
-- bbox3 binary doesn't work on this system
-
-## Next Experiment: exp_046_long_parallel_sa
+## ⚠️ MANDATORY NEXT EXPERIMENT: exp_046_long_parallel_sa
 
 ### Objective
 Run simulated annealing for MUCH longer (1+ hours) on ALL N values using ALL 26 CPU cores.
@@ -42,90 +37,7 @@ Run simulated annealing for MUCH longer (1+ hours) on ALL N values using ALL 26 
 - With 26 cores, we can run 26 N values in parallel
 - Even small improvements on a few N values would help
 
-### Implementation
-```python
-import multiprocessing
-from concurrent.futures import ProcessPoolExecutor
-
-# Configuration
-ITERATIONS = 500_000  # 50x more than before
-NUM_WORKERS = 26  # Use all CPU cores
-TARGET_N_VALUES = list(range(1, 201))  # All N values
-
-def optimize_single_n(n, iterations):
-    """Run SA on a single N value for many iterations."""
-    # Load baseline configuration for this N
-    # Run SA with very slow cooling schedule
-    # Return best score found
-    pass
-
-# Run in parallel
-with ProcessPoolExecutor(max_workers=NUM_WORKERS) as executor:
-    results = executor.map(optimize_single_n, TARGET_N_VALUES, [ITERATIONS]*200)
-```
-
-### Expected Outcome
-- Likely: No improvement (baseline is at strong optimum)
-- Possible: Small improvements on some N values (0.001-0.01 per N)
-- Best case: 0.05-0.1 total improvement
-
-## Alternative Approach: Genetic Algorithm
-
-If long SA doesn't work, implement a genetic algorithm:
-
-```python
-# Population-based search for diversity
-# Custom crossover: swap partial solutions between candidates
-# Custom mutation: rotate/translate clusters
-
-class GeneticOptimizer:
-    def __init__(self, n, population_size=100):
-        self.n = n
-        self.population = self.initialize_population(population_size)
-    
-    def crossover(self, parent1, parent2):
-        """Swap subsets of trees between parents."""
-        pass
-    
-    def mutate(self, individual):
-        """Small perturbations to positions/angles."""
-        pass
-    
-    def evolve(self, generations=1000):
-        """Run genetic algorithm."""
-        pass
-```
-
-## What NOT to Try
-- ❌ More constructive methods (proven to produce worse results)
-- ❌ More ensemble variations (all external files have same/worse scores)
-- ❌ bbox3 or other binaries (don't work on this system)
-- ❌ Short optimization runs (already tried, no improvement)
-
-## Submission Strategy
-- SUBMIT any experiment that shows ANY improvement
-- With 77 submissions remaining, we can afford to experiment
-- Even 0.001 improvement is worth submitting
-
-## Realistic Assessment
-
-The target of 68.866853 requires 1.44 points of improvement.
-This is a 2.09% reduction from our current score.
-
-To achieve this, we would need:
-- Average improvement of 0.0072 per N value, OR
-- Significant improvements on specific N values
-
-The top teams achieved this through:
-1. Running custom optimizers for DAYS (not minutes)
-2. Accumulating improvements over 900+ submissions
-3. Using specialized hardware (24 CPUs, AVX2)
-
-**We should try the long parallel SA run, but be prepared that it may not close the gap.**
-
-## MANDATORY FIRST TASK
-
-Before implementing anything new, run the long parallel SA:
+### Implementation Requirements
 
 ```python
 # experiments/046_long_parallel_sa/long_sa.py
@@ -138,14 +50,172 @@ import time
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
 
-# Use ALL 26 CPU cores
-NUM_WORKERS = 26
+# Configuration
+NUM_WORKERS = 26  # Use ALL CPU cores
 ITERATIONS_PER_N = 500_000  # 50x more than before
-TEMPERATURE_SCHEDULE = "very_slow"  # T = T * 0.99999 instead of 0.999
+COOLING_RATE = 0.99999  # Very slow cooling (was 0.999)
 
-# Run for 1+ hours total
-# Track best solution found over time
-# Save intermediate results every 10 minutes
+# Tree geometry
+TX = np.array([0, 0.125, 0.0625, 0.2, 0.1, 0.35, 0.075, 0.075, -0.075, -0.075, -0.35, -0.1, -0.2, -0.0625, -0.125])
+TY = np.array([0.8, 0.5, 0.5, 0.25, 0.25, 0, 0, -0.2, -0.2, 0, 0, 0.25, 0.25, 0.5, 0.5])
+
+@njit
+def compute_bbox_score(xs, ys, angles, tx, ty):
+    """Fast bounding box score computation."""
+    n = len(xs)
+    V = len(tx)
+    mnx = 1e300
+    mny = 1e300
+    mxx = -1e300
+    mxy = -1e300
+    for i in range(n):
+        r = angles[i] * math.pi / 180.0
+        c = math.cos(r)
+        s = math.sin(r)
+        xi = xs[i]
+        yi = ys[i]
+        for j in range(V):
+            X = c * tx[j] - s * ty[j] + xi
+            Y = s * tx[j] + c * ty[j] + yi
+            if X < mnx: mnx = X
+            if X > mxx: mxx = X
+            if Y < mny: mny = Y
+            if Y > mxy: mxy = Y
+    side = max(mxx - mnx, mxy - mny)
+    return side * side / n
+
+def optimize_single_n(args):
+    """Run SA on a single N value for many iterations."""
+    n, baseline_xs, baseline_ys, baseline_angles, iterations = args
+    
+    # Start from baseline
+    xs = baseline_xs.copy()
+    ys = baseline_ys.copy()
+    angles = baseline_angles.copy()
+    
+    best_score = compute_bbox_score(xs, ys, angles, TX, TY)
+    best_xs, best_ys, best_angles = xs.copy(), ys.copy(), angles.copy()
+    
+    T = 1.0
+    cooling_rate = 0.99999
+    
+    for iteration in range(iterations):
+        # Random perturbation
+        i = np.random.randint(n)
+        dx = np.random.normal(0, 0.01)
+        dy = np.random.normal(0, 0.01)
+        da = np.random.normal(0, 1.0)
+        
+        # Apply perturbation
+        new_xs = xs.copy()
+        new_ys = ys.copy()
+        new_angles = angles.copy()
+        new_xs[i] += dx
+        new_ys[i] += dy
+        new_angles[i] = (new_angles[i] + da) % 360
+        
+        # Check for overlaps (simplified - should use proper overlap check)
+        # For now, just compute score
+        new_score = compute_bbox_score(new_xs, new_ys, new_angles, TX, TY)
+        
+        # Accept or reject
+        delta = new_score - best_score
+        if delta < 0 or np.random.random() < np.exp(-delta / T):
+            xs, ys, angles = new_xs, new_ys, new_angles
+            if new_score < best_score:
+                best_score = new_score
+                best_xs, best_ys, best_angles = xs.copy(), ys.copy(), angles.copy()
+        
+        T *= cooling_rate
+    
+    return n, best_score, best_xs, best_ys, best_angles
+
+# Main execution
+if __name__ == "__main__":
+    # Load baseline
+    baseline_df = pd.read_csv('/home/submission/submission.csv')
+    
+    # Prepare arguments for parallel execution
+    args_list = []
+    for n in range(1, 201):
+        g = baseline_df[baseline_df['id'].str.startswith(f'{n:03d}_')]
+        xs = np.array([float(str(v).replace('s', '')) for v in g['x']])
+        ys = np.array([float(str(v).replace('s', '')) for v in g['y']])
+        angles = np.array([float(str(v).replace('s', '')) for v in g['deg']])
+        args_list.append((n, xs, ys, angles, ITERATIONS_PER_N))
+    
+    # Run in parallel
+    with ProcessPoolExecutor(max_workers=NUM_WORKERS) as executor:
+        results = list(executor.map(optimize_single_n, args_list))
+    
+    # Collect improvements
+    improvements = []
+    for n, new_score, xs, ys, angles in results:
+        baseline_score = compute_bbox_score(...)  # Get baseline score
+        if new_score < baseline_score - 0.0001:
+            improvements.append((n, baseline_score - new_score))
+            print(f"N={n}: IMPROVED by {baseline_score - new_score:.6f}")
 ```
 
-⚠️ IMPORTANT: This experiment will take 1+ hours. Be patient.
+### Expected Runtime
+- 500,000 iterations per N
+- 200 N values / 26 workers = ~8 batches
+- Estimated time: 30-60 minutes
+
+### Expected Outcome
+- Likely: No improvement (baseline is at strong optimum)
+- Possible: Small improvements on some N values (0.001-0.01 per N)
+- Best case: 0.05-0.1 total improvement
+
+## What NOT to Try
+- ❌ More constructive methods (proven to produce worse results)
+- ❌ More ensemble variations (all external files have same/worse scores)
+- ❌ bbox3 or other binaries (don't work on this system)
+- ❌ Short optimization runs (already tried, no improvement)
+
+## Submission Strategy
+- SUBMIT any experiment that shows ANY improvement
+- With 77 submissions remaining, we can afford to experiment
+- Even 0.001 improvement is worth submitting
+
+## IMPORTANT: Include Proper Overlap Checking
+
+The SA implementation MUST include proper overlap checking using Shapely with integer scaling:
+
+```python
+from shapely.geometry import Polygon
+from shapely import affinity
+from decimal import Decimal, getcontext
+
+getcontext().prec = 25
+SCALE = 10**18
+
+def get_tree_polygon(x, y, angle):
+    """Create tree polygon with high precision."""
+    coords = list(zip(TX, TY))
+    poly = Polygon(coords)
+    poly = affinity.rotate(poly, angle, origin=(0, 0))
+    poly = affinity.translate(poly, x, y)
+    # Scale to integers for precise overlap checking
+    scaled_coords = [(int(Decimal(str(c[0])) * SCALE), 
+                      int(Decimal(str(c[1])) * SCALE)) 
+                     for c in poly.exterior.coords]
+    return Polygon(scaled_coords)
+
+def has_overlap(trees):
+    """Check for overlaps between trees."""
+    for i in range(len(trees)):
+        for j in range(i+1, len(trees)):
+            if trees[i].intersects(trees[j]) and not trees[i].touches(trees[j]):
+                return True
+    return False
+```
+
+## After This Experiment
+
+If long SA doesn't find improvements:
+1. Try Genetic Algorithm with population-based search
+2. Try different perturbation strategies (cluster moves, rotation-only, etc.)
+3. Accept that the target may not be achievable in this session
+
+⚠️ DO NOT GIVE UP. Run the long SA experiment first.
