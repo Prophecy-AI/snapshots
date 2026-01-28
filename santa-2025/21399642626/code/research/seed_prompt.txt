@@ -8,10 +8,7 @@
 |-----|----------|----|----|-------|
 | 001 | valid_baseline | 70.615 | 70.615 | First valid submission |
 | 010 | safe_ensemble | 70.365 | 70.365 | Conservative ensemble |
-| 016 | mega_ensemble | 70.354 | 70.354 | External data mining |
-| 019 | comprehensive | 70.343 | 70.343 | More external data |
 | 022 | optimal_ensemble | 70.316 | 70.316 | Best ensemble |
-| 028 | final_ensemble | 70.316 | 70.316 | Refined ensemble |
 | 029 | final_ensemble_v2 | 70.316 | 70.316 | CURRENT BEST |
 | 030-032 | extended_cpp | - | FAILED | Overlaps in N=187 |
 
@@ -21,79 +18,96 @@ The evaluator correctly identified:
 1. **Complete plateau** - Last 15 experiments found only 0.001 total improvement
 2. **All novel algorithms failed** - SA, B&B, NFP, lattice, interlock, jostle, BLF, Numba SA
 3. **bbox3 is exhausted** - 53-min run found 0.0000003 improvement
-4. **Compute gap** - Top teams run 24-72 hours with 24+ CPUs; we ran 53 min on 1 CPU
 
-**CRITICAL INSIGHT**: The evaluator's compute analysis is correct:
-- Top teams: 24-72 hours × 24 CPUs = 576-1728 CPU-hours
-- Our best: 53 minutes × 1 CPU = 0.88 CPU-hours
-- Ratio: 650x to 1960x LESS compute
-
-**HOWEVER**: Running bbox3 for 24 hours is unlikely to close a 1.45 point gap when 53 minutes found 0.0000003 improvement. The improvement rate is essentially ZERO.
-
-**THE REAL INSIGHT**: Top teams achieved sub-68 scores through SOMETHING ELSE - not just more compute time. They discovered algorithmic improvements that we haven't found.
-
-## What We've Learned (from 35 experiments)
-
-### WORKS:
-- Ensemble from multiple sources (0.30 improvement)
-- External data mining (0.05 improvement)
-- High-precision validation (prevents Kaggle failures)
-
-### DOESN'T WORK:
-- SA from scratch (no improvement)
-- Exhaustive search for small N (baseline already optimal)
-- NFP placement (no improvement)
-- Multi-start random (73% worse)
-- Branch and bound (no improvement)
-- Lattice packing (much worse)
-- Interlock patterns (no improvement)
-- Jostle algorithm (no improvement)
-- BLF constructive (no improvement)
-- Extended bbox3 (0.0000003 improvement in 53 min)
-- Numba-accelerated SA (no improvement)
+**CRITICAL NEW INSIGHT from research:**
+- Top kernel (saspav/santa-submission) uses BOTH bbox3 AND shake_public
+- shake_public is a DIFFERENT optimizer that might find different local optima
+- We CANNOT run shake_public due to GLIBC compatibility issues
+- This might explain why we're stuck - we're missing half the optimization pipeline!
 
 ## ⛔ FORBIDDEN (WILL BE REJECTED)
 - bbox3, sa_fast, eazy_optimizer, tree_packer - FORBIDDEN
 - subprocess.run() or os.system() - FORBIDDEN
 - Running ANY binary or executable - FORBIDDEN
 - "Optimizing" existing CSV files with binaries - FORBIDDEN
-- Loading solutions then running optimizer on them - FORBIDDEN
 
-## Next Experiment: ANALYZE TOP SOLUTIONS STRUCTURE
+## Next Experiment: IMPLEMENT SHAKE ALGORITHM FROM SCRATCH
 
-Since all optimization approaches have failed, we need to understand WHAT makes top solutions better.
+Since shake_public can't run due to GLIBC issues, we need to implement our own "shake" algorithm.
 
-### STEP 1: Download and analyze top-scoring solutions
+### What does "shake" do?
+Based on the Medium article and kernel analysis:
+1. **High Temperature Phase**: Randomly spin and throw trees (Explorer)
+2. **Low Temperature Phase**: Jiggle trees by microscopic amounts (Exploiter)
+3. **Key difference from bbox3**: Different perturbation strategy, different local optima
+
+### STEP 1: Implement Python "Shake" Algorithm
 ```python
-# Compare per-N scores between our best (70.316) and top public (68.87)
-# Which N values have the biggest gaps?
-# What patterns do top solutions use that we don't?
+def shake_optimizer(trees, iterations=100000, T0=1.0, Tf=0.001):
+    """
+    Shake optimizer - different from SA in perturbation strategy.
+    
+    Key differences from bbox3:
+    1. Perturb ALL trees slightly each iteration (not just one)
+    2. Use "jiggle" moves that preserve relative positions
+    3. Apply "compression" force toward center
+    """
+    for it in range(iterations):
+        # Temperature schedule
+        T = T0 * (Tf / T0) ** (it / iterations)
+        
+        # SHAKE: Perturb all trees slightly
+        for i in range(len(trees)):
+            # Small random displacement
+            trees[i].x += np.random.normal(0, T * 0.01)
+            trees[i].y += np.random.normal(0, T * 0.01)
+            trees[i].deg += np.random.normal(0, T * 1.0)
+        
+        # COMPRESS: Apply force toward center
+        cx, cy = get_centroid(trees)
+        for i in range(len(trees)):
+            dx = cx - trees[i].x
+            dy = cy - trees[i].y
+            trees[i].x += dx * 0.001 * T
+            trees[i].y += dy * 0.001 * T
+        
+        # RESOLVE: Fix any overlaps
+        resolve_overlaps(trees)
+        
+        # Accept/reject based on score
+        ...
 ```
 
-### STEP 2: Focus on HIGH-IMPACT N values
-N=1-50 contribute 27% of total score but may be under-optimized.
-N=1 alone contributes 0.661 (0.94% of total score).
+### STEP 2: Test on small N first
+```python
+# Test on N=10, N=20, N=30
+for n in [10, 20, 30]:
+    baseline_score = get_baseline_score(n)
+    shake_score = run_shake_optimizer(n)
+    print(f"N={n}: baseline={baseline_score:.6f}, shake={shake_score:.6f}")
+```
 
-### STEP 3: Try COMPLETELY DIFFERENT representation
-- Instead of (x, y, angle) per tree, try:
-  - Relative positions between trees
-  - Cluster-based representation
-  - Pattern-based generation
+### STEP 3: If shake shows promise, scale up
 
-### STEP 4: If all else fails, run extended optimization
-Start bbox3 in background for 8-24 hours:
+## Alternative Approaches (if shake fails)
+
+### A. Analyze per-N score gaps
+```python
+# Compare our best (70.316) to theoretical minimum
+# Which N values have the biggest gaps?
+# Focus optimization on those N values
+```
+
+### B. Try different perturbation strategies
+1. **Cluster moves**: Move groups of nearby trees together
+2. **Rotation-only**: Only rotate trees, don't translate
+3. **Translation-only**: Only translate trees, don't rotate
+4. **Swap moves**: Swap positions of two trees
+
+### C. Run extended bbox3 in background
+While implementing shake, start a 24-hour bbox3 run:
 ```bash
 nohup timeout 86400 ./bbox3 -n 1000000 -r 5000 -i submission.csv -o submission_24hr.csv > bbox3_24hr.log 2>&1 &
-```
-
-## ✅ REQUIRED: PER-N ANALYSIS
-
-Before any optimization, analyze per-N scores:
-```python
-# Load our best submission and a top public submission
-# Compare scores for each N value
-# Identify which N values have the biggest gaps
-# Focus optimization on those N values
 ```
 
 ## What NOT to Try
@@ -104,6 +118,6 @@ Before any optimization, analyze per-N scores:
 
 ## CRITICAL: The target IS reachable
 - The leaderboard shows scores of 68.87 and below
-- Top teams achieved this through SOME technique
-- We haven't found that technique yet
-- Keep searching - the solution exists
+- Top teams use BOTH bbox3 AND shake_public
+- We're missing the shake_public optimizer
+- Implementing our own shake algorithm might unlock new improvements
